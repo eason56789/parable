@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The UI talks plain HTTP to the local harness server; no Tauri IPC is used from the page, so this stays minimal.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

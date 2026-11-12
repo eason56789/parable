@@ -1,13 +1,21 @@
-//! Desktop shell. Currently boots the harness server and opens the UI in the
-//! system webview/browser; the Tauri window wrapper lands in the next stage.
+//! Parable desktop shell — a Tauri v2 window over the local harness server.
+//!
+//! The architecture stays what the spec mandates: this process boots the axum
+//! server in-process (`harness::server::serve`, 127.0.0.1 + random port +
+//! per-run token) and points the webview at `http://127.0.0.1:<port>/?token=…`.
+//! No Tauri IPC is used; the page is the same single-file UI a browser tab
+//! would load. Closing the window interrupts any running turn, then the
+//! process exits.
+
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use harness::config::Config;
-use harness::server;
+use harness::server::{self, SharedState};
 use std::sync::Arc;
+use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
 use tokio::sync::RwLock;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -15,38 +23,71 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let _ = Config::ensure_home();
-    let mut cfg = Config::load();
-    if cfg.workspace.is_empty() {
-        cfg.workspace = std::env::current_dir()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
-    }
-    let config = Arc::new(RwLock::new(cfg));
+    let app = tauri::Builder::default()
+        .setup(|app| {
+            let _ = Config::ensure_home();
+            let mut cfg = Config::load();
+            if cfg.workspace.is_empty() {
+                cfg.workspace = std::env::current_dir()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+            }
+            let config = Arc::new(RwLock::new(cfg));
+            let token = {
+                let t = uuid::Uuid::new_v4().simple().to_string();
+                t[..24].to_string()
+            };
 
-    let token = {
-        let t = uuid::Uuid::new_v4().simple().to_string();
-        t[..24].to_string()
-    };
-    let (port, _state, _handle) = server::serve(token.clone(), config).await?;
-    let url = format!("http://127.0.0.1:{port}/?token={token}");
-    println!("Parable UI at {url}");
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                match server::serve(token.clone(), config, 0).await {
+                    Ok((port, state, _server_task)) => {
+                        // Stash the state so window-close can stop running turns.
+                        handle.manage::<SharedState>(state);
+                        let url = format!("http://127.0.0.1:{port}/?token={token}");
+                        let parsed: tauri::Url =
+                            url.parse().expect("127.0.0.1 url must always parse");
+                        if let Err(e) = WebviewWindowBuilder::new(
+                            &handle,
+                            "main",
+                            WebviewUrl::External(parsed),
+                        )
+                        .title("Parable")
+                        .inner_size(1280.0, 800.0)
+                        .min_inner_size(480.0, 400.0)
+                        .build()
+                        {
+                            tracing::error!("failed to create window: {e}");
+                            handle.exit(1);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("harness server failed to start: {e}");
+                        handle.exit(1);
+                    }
+                }
+            });
+            Ok(())
+        })
+        .build(tauri::generate_context!())
+        .expect("failed to build tauri application");
 
-    open_browser(&url);
-    tokio::signal::ctrl_c().await?;
-    Ok(())
-}
-
-fn open_browser(url: &str) {
-    #[cfg(windows)]
-    {
-        let _ = std::process::Command::new("cmd")
-            .args(["/C", "start", "", url])
-            .spawn();
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
-    }
+    app.run(|app_handle, event| {
+        if let RunEvent::Exit = event {
+            // Spec §4: closing the shell aborts running agents before teardown.
+            if let Some(state) = app_handle.try_state::<SharedState>() {
+                let state = Arc::clone(&*state);
+                let _ = app_handle.run_on_main_thread(move || {
+                    tauri::async_runtime::block_on(async move {
+                        for s in state.store.list("").await {
+                            if state.agent.is_running(&s.id).await {
+                                state.agent.interrupt(&s.id).await;
+                            }
+                        }
+                    });
+                });
+            }
+        }
+    });
 }

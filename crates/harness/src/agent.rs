@@ -4,7 +4,7 @@
 use crate::config::Config;
 use crate::error::HarnessError;
 use crate::event::EventHub;
-use crate::permission::{PermissionBroker, Risk};
+use crate::permission::PermissionBroker;
 use crate::provider::{self, AsstPart, ChatRequest, Msg, StreamChunk, ToolSpec, UserPart};
 use crate::session::{StoredMessage, SharedStore};
 use crate::token::Usage;
@@ -771,7 +771,7 @@ When it is achieved, say so clearly in your reply.",
 
             let mut text_buf = String::new();
             let mut think_buf = String::new();
-            let mut think_sig = String::new();
+            let think_sig = String::new();
             let mut calls: Vec<(String, String, Value)> = Vec::new();
             let mut pending_args: HashMap<String, String> = HashMap::new();
             let mut stream_usage = Usage::default();

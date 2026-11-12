@@ -3,7 +3,7 @@ name = "app"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Parable desktop shell (webview over the local harness server)"
+description = "Parable desktop shell (Tauri v2 window over the local harness server)"
 
 [[bin]]
 name = "parable-app"
@@ -16,3 +16,7 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
+tauri = { version = "2", features = [] }
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }

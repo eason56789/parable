@@ -424,7 +424,7 @@ pub async fn screenshot(_a: &Value, ctx: &super::tools::ToolCtx) -> Result<super
 }
 
 /// computer_axtree：无障碍观察。
-pub async fn axtree(a: &Value, ctx: &super::tools::ToolCtx) -> Result<super::tools::ToolOutcome, HarnessError> {
+pub async fn axtree(_a: &Value, ctx: &super::tools::ToolCtx) -> Result<super::tools::ToolOutcome, HarnessError> {
     ctx.authorize("computer_axtree", "screen", crate::permission::Risk::Shell).await?;
     let bridge = ctx.computer.as_ref().ok_or_else(|| HarnessError::Tool("computer use 未挂载".into()))?;
     let tree = bridge.ax_tree().await?;
