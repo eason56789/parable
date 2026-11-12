@@ -1,0 +1,22 @@
+# Rust build
+/target
+
+# Vendored reference repos (opencode / zcode / deepseek-harness) — source of
+# design study only, not part of the project and not redistributable here.
+/research-refs
+
+# Local scratch / runtime artifacts
+/chat-req.json
+/tmp-patch-plugin.py
+/run-parable.log
+/run-port.txt
+
+# Harness runtime data (lives in ~/.parable; ignore stray copies)
+/sessions/
+/logs/
+
+# Tool/session workspace state
+.zcode/
+.v2c/
+.video_agent/
+*.local

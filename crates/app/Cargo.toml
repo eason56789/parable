@@ -1,0 +1,18 @@
+[package]
+name = "app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Parable desktop shell (webview over the local harness server)"
+
+[[bin]]
+name = "parable-app"
+path = "src/main.rs"
+
+[dependencies]
+harness = { path = "../harness" }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
