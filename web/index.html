@@ -252,18 +252,22 @@ body.chat #sbar{margin-top:10px;opacity:1;transform:none;pointer-events:auto}
 #sfind::placeholder{color:var(--fg2)}
 .sgrp{padding:12px 10px 4px;font-size:11px;color:var(--fg2);letter-spacing:.04em}
 #sp{flex:1;overflow-y:auto;padding:0}
-.sphd{padding:38px 44px 6px;max-width:1100px;margin:0 auto}
+.sphd{padding:38px 44px 6px;max-width:1000px;margin:0 auto}
 .sphd h2{margin:0;font:600 26px var(--serif);color:var(--fg)}
 .sphd p{margin:6px 0 0;color:var(--fg2);font-size:13px}
-.spb{padding:18px 44px 60px;max-width:1100px;margin:0 auto}
+.spb{padding:14px 44px 60px;max-width:1000px;margin:0 auto}
 @media(max-width:760px){#snav{width:auto;flex-direction:row;padding:12px;overflow-x:auto}#snav h3{display:none}#sback .sbx{display:none}.sgrp{display:none}.sphd{padding:22px 20px 4px}.spb{padding:14px 20px 40px}}
 .pn{animation:rise calc(.5s * var(--animd)) cubic-bezier(.16,.84,.3,1) both}
-.sr{display:flex;justify-content:space-between;align-items:center;gap:20px;padding:14px 0;border-bottom:.5px solid var(--line);animation:rise calc(.55s * var(--animd)) cubic-bezier(.16,.84,.3,1) both;animation-delay:calc(var(--i)*calc(40ms * var(--animd)))}
-.sr.stk{flex-direction:column;align-items:stretch;gap:10px}
+/* 设置项：左侧标签固定宽度，右侧内容自适应。
+   之前标签没有固定列宽，被右侧控件挤成竖排换行（"聊天/字体" 断成两行）。 */
+.sr{display:grid;grid-template-columns:200px 1fr;align-items:center;gap:24px;padding:15px 0;border-bottom:.5px solid var(--line);animation:rise calc(.55s * var(--animd)) cubic-bezier(.16,.84,.3,1) both;animation-delay:calc(var(--i)*calc(40ms * var(--animd)))}
+.sr.stk{grid-template-columns:1fr;align-items:stretch;gap:10px}
+.sr>div:first-child{min-width:0}
 .sr small{display:block;color:var(--fg2);font-size:12.5px;margin-top:2px}
-.sr .ct{flex:none;width:210px}.sr.stk .ct{width:auto}
-.seg{display:flex;background:var(--hov);border-radius:9px;padding:3px}
-.seg button{flex:1;border:0;background:none;color:var(--fg2);border-radius:7px;padding:5px 6px;cursor:pointer;transition:background-color calc(.3s * var(--animd)),color calc(.3s * var(--animd)),box-shadow calc(.3s * var(--animd))}
+.sr .ct{width:auto;max-width:340px;justify-self:start}
+.sr.stk .ct{max-width:none}
+.seg{display:inline-flex;background:var(--hov);border-radius:9px;padding:3px}
+.seg button{flex:1;border:0;background:none;color:var(--fg2);border-radius:7px;padding:5px 12px;cursor:pointer;white-space:nowrap;transition:background-color calc(.3s * var(--animd)),color calc(.3s * var(--animd)),box-shadow calc(.3s * var(--animd))}
 .seg button.on{background:var(--bg);color:var(--fg);box-shadow:0 1px 2px rgba(0,0,0,.1)}
 .sws{display:flex;gap:10px;justify-content:flex-end}.sws button{width:24px;height:24px;border-radius:50%;border:0;cursor:pointer;transition:transform calc(.35s * var(--animd)) cubic-bezier(.34,1.56,.64,1),box-shadow calc(.3s * var(--animd))}
 .sws button:hover{transform:scale(1.15)}.sws button.on{transform:scale(1.18);box-shadow:0 0 0 2px var(--bg),0 0 0 4px var(--fg2)}
@@ -272,8 +276,9 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 .tg{width:40px;height:24px;border-radius:12px;background:var(--line);border:0;position:relative;cursor:pointer;transition:background-color calc(.35s * var(--animd))}
 .tg::after{content:"";position:absolute;top:3px;left:3px;width:18px;height:18px;border-radius:50%;background:#fff;transition:transform calc(.45s * var(--animd)) cubic-bezier(.34,1.56,.64,1)}
 .tg.on{background:var(--accent)}.tg.on::after{transform:translateX(16px)}
-.tcs{display:flex;gap:12px}.tc{flex:1;background:none;border:1.5px solid var(--line);border-radius:12px;padding:8px;cursor:pointer;transition:border-color calc(.3s * var(--animd)),transform calc(.3s * var(--animd))}
+.tcs{display:flex;gap:12px}.tc{flex:none;width:96px;background:none;border:1.5px solid var(--line);border-radius:12px;padding:8px;cursor:pointer;transition:border-color calc(.3s * var(--animd)),transform calc(.3s * var(--animd))}
 .tc:hover{transform:translateY(-2px)}.tc.on{border-color:var(--accent)}.tc i{display:block;height:52px;border-radius:7px;margin-bottom:6px;border:.5px solid var(--line)}
+.tc>span{display:block;font:12px var(--sans);color:var(--fg2);white-space:nowrap}
 .btn{background:none;border:.5px solid var(--line);border-radius:9px;padding:7px 14px;cursor:pointer;transition:background-color calc(.25s * var(--animd))}.btn:hover{background:var(--hov)}
 #pv{min-height:3.4em;background:var(--side);border-radius:10px;padding:10px 14px;font:16px/1.6 var(--serif)}
 #feed,#ttl,#sp{transition:opacity calc(.3s * var(--animd)) ease,transform calc(.4s * var(--animd)) cubic-bezier(.4,0,.2,1),filter calc(.3s * var(--animd))}
@@ -965,6 +970,37 @@ const IC = {
 const ic = n => '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">' + (IC[n] || IC.file) + '</svg>';
 const esc = s => String(s == null ? '' : s)
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+/**
+ * 去掉 emoji（彩色表情与部分图形符号）。
+ *
+ * 界面要保持视觉统一：模型回复、工具输出、用户自己起的会话名里都可能带
+ * emoji，它们与界面的字形体系格格不入。这里只影响**显示**，不改动存储
+ * 的原文 —— 数据仍按原样保留。
+ *
+ * 覆盖：U+1F000–1FAFF（主要 emoji 区）、U+2600–27BF（杂项符号与 dingbat，
+ * 含 ⚠ ✓ ✗ ★ 等）、U+2B00–2BFF、U+FE0F（emoji 变体选择符）、
+ * U+1F1E6–1F1FF（区域指示符，国旗由两个组成）、U+E000–F8FF（私用区，
+ * 部分 emoji 字体的补充平面）。
+ */
+const EMOJI_RE = /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{FE0F}\u{E000}-\u{F8FF}\u{200D}]/gu;
+const noEmoji = s => String(s == null ? '' : s)
+  .replace(EMOJI_RE, '')
+  // 去掉 emoji 后留下的空档：收敛连续空格，并去掉行首/行尾空白
+  .replace(/[ \t]{2,}/g, ' ')
+  .replace(/^\s+|\s+$/gm, '');
+
+/** 递归去掉对象里所有字符串的 emoji（用于工具卡片的 display 结构）。 */
+function stripEmojiDeep(v) {
+  if (typeof v === 'string') return noEmoji(v);
+  if (Array.isArray(v)) return v.map(stripEmojiDeep);
+  if (v && typeof v === 'object') {
+    const out = {};
+    for (const k of Object.keys(v)) out[k] = stripEmojiDeep(v[k]);
+    return out;
+  }
+  return v;
+}
 /* ---------------------------------------------------------------- i18n */
 const L = {
   zh: {
@@ -1788,6 +1824,8 @@ $('#jump').onclick = () => {
 
 /** Full render of a markdown-ish string into `cur` (animated unless `inst`). */
 async function inline(cur, text, sig, inst, sp0) {
+  // 界面统一性：正文里的 emoji 去掉（只影响显示，存储保留原文）
+  text = noEmoji(text);
   const an = S.stream && !inst;
   const wait = () => inst ? 0 : sleep(sp0 || S.speed);
   let word = null, inl = null, host = cur;
@@ -1843,7 +1881,8 @@ function mkInline(host, ink, noanim) {
   return { host, cur: host, ih: host, inl: null, word: null, pend: '', ink: ink || null, noanim: !!noanim };
 }
 function iwrite(st, text, sig) {
-  let s = st.pend + text;
+  // 界面统一性：流式正文里的 emoji 去掉
+  let s = noEmoji(st.pend + text);
   st.pend = '';
   const an = S.stream && !st.noanim;
   const mk = ch => {
@@ -2257,7 +2296,7 @@ function uMsg(q, idx, atts) {
   }
   if (q) {
     const tx = document.createElement('div');
-    tx.textContent = q;
+    tx.textContent = noEmoji(q);
     b.append(tx);
   }
   // 操作条在消息下方、靠右；存储下标未知时禁用编辑/删除（避免静默失效）
@@ -2478,6 +2517,9 @@ function fillToolCard(e, display, ok, title) {
 
   if (!display || !display.kind) return;
 
+  // 工具输出里的 emoji 也去掉（只影响显示）
+  display = stripEmojiDeep(display);
+
   if (display.kind === 'read') {
     diff.textContent = t('rdn').replace('{n}', display.total || 0);
     const df = document.createElement('div');
@@ -2688,7 +2730,7 @@ function renderReasoning(text) {
     if (!thinkStart) thinkStart = Date.now();
   }
   const body = curThinkEl.querySelector('.thbody');
-  body.textContent = (body.textContent || '') + (text || '');
+  body.textContent = noEmoji((body.textContent || '') + (text || ''));
   follow();
   // 思考过长自动半收起：超过阈值折起（头部状态仍可见），
   // 避免长思考占满整个屏幕。用户手动展开过则不再干预。
@@ -2735,7 +2777,7 @@ function replayEvent(ev) {
           pre.className = 'prog';
           card.querySelector('.dc-in').append(pre);
         }
-        pre.textContent = (pre.textContent || '') + ev.chunk;
+        pre.textContent = noEmoji((pre.textContent || '') + ev.chunk);
       }
       break;
     }
@@ -2833,7 +2875,7 @@ function dispatch(ev) {
         const prevT = conv && conv.title;
         conv = { id: ev.sessionId, title: prevT || ev.title || '', workspace: (conv && conv.workspace) || ev.workspace || '' };
         ignoreSid = '';
-        $('#ttl').textContent = conv.title || ev.title || '';
+        $('#ttl').textContent = noEmoji(conv.title || ev.title || '');
         if (wasNew) {
           addRc({ id: conv.id, t: conv.title || ev.title || '', ts: Date.now() });
           loadSessions(true);
@@ -3183,7 +3225,7 @@ async function run(q) {
   if (!conv) {
     conv = { id: null, title, workspace: '', pendingText: q || '' };
     document.body.classList.add('chat');
-    $('#ttl').textContent = title;
+    $('#ttl').textContent = noEmoji(title);
     apply();
   } else if (!conv.id) {
     conv.pendingText = q || '';
@@ -3215,7 +3257,7 @@ async function run(q) {
       if (!conv.id) {
         conv.id = res.sessionId;
         conv.title = title;
-        $('#ttl').textContent = title;
+        $('#ttl').textContent = noEmoji(title);
         addRc({ id: conv.id, t: title, ts: Date.now() });
         loadSessions(true);
         refreshGoalBadge();
@@ -3760,7 +3802,7 @@ function addRc(c) {
   d.dataset.id = c.id;
   d.innerHTML = '<span class="rci">' + ic('pin') + '</span><span class="rct"></span>' +
     '<span class="rcmeta"><span class="rcdt"></span><span class="rcd"></span></span>';
-  d.querySelector('.rct').textContent = c.t;
+  d.querySelector('.rct').textContent = noEmoji(c.t);   // 标题里的 emoji 也要去掉
   d.querySelector('.rcd').textContent = fmtAgo(+d.dataset.ts);
   if (c.arch) { d.classList.add('arch'); $('#rca').append(d); }
   else if (c.pin) { d.classList.add('pin'); d.dataset.pinAt = c.pinAt || Date.now(); $('#rcp').append(d); }
@@ -3804,7 +3846,7 @@ async function loadSessions(quiet) {
       seen.add(c.id);
       let el = document.querySelector('#rcs .rc[data-id="' + c.id + '"]');
       if (el) {
-        el.querySelector('.rct').textContent = c.t;
+        el.querySelector('.rct').textContent = noEmoji(c.t);
         if (c.ts) el.dataset.ts = c.ts;
         el.classList.remove('in');
         el.classList.toggle('arch', !!c.arch);
@@ -3881,7 +3923,7 @@ async function openSession(id, focusMsg) {
     feed.innerHTML = '';
     resetTurn();
     document.body.classList.add('chat');
-    $('#ttl').textContent = conv.title;
+    $('#ttl').textContent = noEmoji(conv.title);
     document.querySelectorAll('.rc.on').forEach(e => e.classList.remove('on'));
     const el = document.querySelector('.rc[data-id="' + id + '"]');
     if (el) el.classList.add('on');
@@ -4870,7 +4912,7 @@ function panel() {
         ct.className = 'ct tcs';
         ct.innerHTML = [['light', '#faf9f5,#f5f4ed'], ['auto', '#faf9f5 50%,#262624 50%'], ['dark', '#262624,#1f1e1d']]
           .map(([a, g]) => '<button class="tc' + (a === v ? ' on' : '') + '" data-v="' + a + '">' +
-            '<i style="background:linear-gradient(90deg,' + g + ')"></i>' + t(a) + '</button>').join('');
+            '<i style="background:linear-gradient(90deg,' + g + ')"></i><span>' + t(a) + '</span></button>').join('');
         ct.onclick = e => {
           const b = e.target.closest('button');
           if (b) { S.theme = b.dataset.v; apply(); f(); }
