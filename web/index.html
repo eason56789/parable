@@ -171,6 +171,7 @@ body.chat #chat{opacity:1;pointer-events:auto}
 .wk .wd{width:5px;height:5px;border-radius:50%;background:var(--accent);flex:none;
     animation:wdp calc(1.6s * var(--animd)) ease-in-out infinite}
 @keyframes wdp{0%,100%{opacity:.35;transform:scale(.75)}50%{opacity:1;transform:scale(1)}}
+.wk.done{opacity:1;transform:none}
 .wk.done .wd{animation:none;opacity:.55;transform:none}
 .acts{display:flex;gap:2px;opacity:0;transform:translateY(4px);pointer-events:none;transition:opacity calc(.5s * var(--animd)),transform calc(.5s * var(--animd))}
 .acts.show{opacity:1;transform:none;pointer-events:auto}.acts .ib{width:28px;height:28px}.acts .ib svg{width:16px;height:16px}
@@ -1279,7 +1280,7 @@ const L = {
     ago_now:'刚刚', ago_m:'{n}分', ago_h:'{n}小时', ago_d:'{n}天',
     ph:'今天我能帮你什么？', ph2:'回复 Parable…',
     thinking:'思考中…', thought:'思考了 {n} 秒', worked:'已工作 {t}',
-    working:'工作中', worked_done:'工作中 {t}', sec_unit:'秒',
+    working:'工作中', worked_done:'已工作 {t}', sec_unit:'秒',
     dur_s:'{n} 秒', dur_m:'{n} 分',
     copy:'复制', copied:'已复制', save:'保存', saved:'已保存', rd:'已读取', rdn:'{n} 行', ed:'已编辑',
     fetched:'已获取', searched:'已搜索',
@@ -3960,11 +3961,25 @@ function editAgent(el) {
     k.classList.contains('ec') || k.classList.contains('th') || k.classList.contains('wf'));
   const box = document.createElement('textarea');
   box.className = 'tx';
-  box.rows = Math.min(18, current.split('\n').length + 2);
   box.value = current;
-  box.style.cssText = 'width:100%;font:14px/1.6 var(--sans);margin:6px 0';
+  box.style.cssText = 'width:100%;font:14px/1.6 var(--sans);margin:6px 0;resize:vertical';
+
+  // 高度按「实际渲染后的内容」算，而不是按换行数：一段没有换行的长文本
+  // 会自动折成十几行，只给 1 行高的话编辑框几乎没法用。
+  // scrollHeight 要等元素进了文档才有值，所以先挂上去再量。
+  const autosize = () => {
+    box.style.height = 'auto';
+    const min = 44;                                   // 至少两行
+    const max = Math.round(window.innerHeight * 0.6); // 别把整屏撑满
+    const h = Math.max(min, Math.min(box.scrollHeight + 2, max));
+    box.style.height = h + 'px';
+    box.style.overflowY = box.scrollHeight + 2 > max ? 'auto' : 'hidden';
+  };
+
   body.innerHTML = '';
   body.append(box);
+  autosize();
+  box.addEventListener('input', autosize);
   const bar = document.createElement('div');
   bar.className = 'macts';
   bar.style.cssText = 'opacity:1;transform:none;justify-content:flex-start';
@@ -4439,6 +4454,15 @@ async function restamp() {
       break;
     }
   }
+  // 配对循环可能在中途 break（DOM 与存储短暂不同步），剩下的节点就永远
+  // 停在 .off——看起来像按钮坏了。只要回填到了存储下标，这条消息就是
+  // 可编辑/重试/删除的，所以兜底点亮。
+  nodes.forEach(n => {
+    if (n.dataset.mi === undefined) return;
+    const ac = n.querySelector('.acts');
+    if (ac) ac.classList.add('show');
+    n.querySelectorAll('.acts .ib.off').forEach(b => b.classList.remove('off'));
+  });
 }
 
 /**
