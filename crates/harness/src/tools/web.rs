@@ -25,7 +25,7 @@ pub async fn fetch(a: &Value, ctx: &ToolCtx) -> Result<ToolOutcome, HarnessError
 
     ctx.authorize("web_fetch", &url, Risk::Network).await?;
 
-    let client = reqwest::Client::builder()
+    let client = crate::config::apply_proxy(reqwest::Client::builder())
         .connect_timeout(std::time::Duration::from_secs(15))
         .timeout(std::time::Duration::from_secs(45))
         .user_agent("Parable-Harness/0.1")
@@ -411,7 +411,7 @@ pub async fn multi_search(a: &Value, ctx: &ToolCtx) -> Result<ToolOutcome, Harne
         ("搜狗 (Sogou)", format!("https://www.sogou.com/web?query={}", urlencode(&query))),
     ];
 
-    let client = reqwest::Client::builder()
+    let client = crate::config::apply_proxy(reqwest::Client::builder())
         .connect_timeout(std::time::Duration::from_secs(12))
         .timeout(std::time::Duration::from_secs(30))
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36")
@@ -510,7 +510,7 @@ pub async fn deepseek_search(a: &Value, ctx: &ToolCtx) -> Result<ToolOutcome, Ha
         body["ori_question"] = serde_json::json!(ori_question);
     }
 
-    let client = reqwest::Client::builder()
+    let client = crate::config::apply_proxy(reqwest::Client::builder())
         .connect_timeout(std::time::Duration::from_secs(12))
         .timeout(std::time::Duration::from_secs(30))
         .build()?;

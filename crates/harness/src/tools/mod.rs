@@ -177,6 +177,8 @@ pub struct ToolCtx {
     pub computer: Option<Arc<crate::computer::ComputerBridge>>,
     /// OS 级桌面桥（截屏 + UIA + SendInput；仅 Windows）。
     pub desktop: Option<Arc<crate::desktop::DesktopBridge>>,
+    /// ask_user 自动裁决超时（毫秒；0 = 关闭，一直等用户）。
+    pub ask_timeout_ms: u64,
 }
 
 impl ToolCtx {
@@ -1351,7 +1353,29 @@ impl Registry {
             json!({"callId": ctx.call_id, "question": question, "options": options.clone()}),
         );
 
-        let answer = ctx.questions.ask(&ctx.call_id).await;
+        // ask_timeout_ms > 0（设置 → Agent 行为 → 提问自动裁决）：超时自动选
+        // 第一项；没有选项就用空串（仍算"已回答"，走既有 None/Some 语义）。
+        let answer = if ctx.ask_timeout_ms > 0 {
+            match tokio::time::timeout(
+                std::time::Duration::from_millis(ctx.ask_timeout_ms),
+                ctx.questions.ask(&ctx.call_id),
+            )
+            .await
+            {
+                Ok(a) => a,
+                Err(_) => {
+                    let auto = options.first().cloned().unwrap_or_default();
+                    ctx.hub.publish(
+                        &ctx.session_id,
+                        "question.resolved",
+                        json!({"callId": ctx.call_id, "answer": auto, "auto": true}),
+                    );
+                    Some(auto)
+                }
+            }
+        } else {
+            ctx.questions.ask(&ctx.call_id).await
+        };
         // `None` = timed out / interrupted; `Some("")` = the user submitted
         // an empty answer, which is still an explicit answer.
         let answered = answer.is_some();

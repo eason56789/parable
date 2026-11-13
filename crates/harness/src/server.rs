@@ -248,6 +248,9 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/plugins", get(list_plugins))
         .route("/plugins/{id}/toggle", post(toggle_plugin))
         .route("/plugins/{id}", axum::routing::delete(delete_plugin))
+        // 会话数据治理：全量导出 / 危险区清空（设置 → 数据）
+        .route("/sessions/export", get(export_sessions))
+        .route("/sessions/clear-all", post(clear_all_sessions))
         // 断线重连后恢复权限面板;聊天附件上传
         .route("/pending", get(pending_permissions))
         .route("/attachments", post(upload_attachment))
@@ -855,6 +858,8 @@ async fn patch_config(
     // 先处理删除标记({id, deleted:true}),再做字段合并。
     crate::config::apply_patch_deletions(&mut cfg, &v);
     merge_config(&mut cfg, &v);
+    // 代理设置即时生效（下次请求用新 client）
+    crate::config::set_proxy(cfg.http_proxy.clone(), cfg.http_no_proxy.clone());
     if let Err(e) = cfg.save() {
         return server_error(e);
     }
@@ -930,6 +935,58 @@ fn merge_config(cfg: &mut Config, v: &Value) {
                     let s = val.as_str().unwrap_or("queue");
                     if matches!(s, "queue" | "steer") {
                         cfg.followup_mode = s.to_string();
+                    }
+                }
+                // ---- Agent 行为 ----
+                "compactionEnabled" | "compaction_enabled" => {
+                    cfg.compaction_enabled = val.as_bool().unwrap_or(true);
+                }
+                "compactionPct" | "compaction_pct" => {
+                    cfg.compaction_pct = val.as_u64().unwrap_or(85).clamp(50, 95) as u32;
+                }
+                "maxSteps" | "max_steps" => {
+                    cfg.max_steps = val.as_u64().unwrap_or(100).clamp(20, 500) as u32;
+                }
+                "askAutoResolve" | "ask_auto_resolve" => {
+                    cfg.ask_auto_resolve = val.as_bool().unwrap_or(false);
+                }
+                "keepAwake" | "keep_awake" => {
+                    cfg.keep_awake = val.as_bool().unwrap_or(false);
+                }
+                "ctxWarnPct" | "ctx_warn_pct" => {
+                    cfg.ctx_warn_pct = val.as_u64().unwrap_or(80).clamp(50, 95) as u32;
+                }
+                // ---- 通知 ----
+                "notify" => cfg.notify = val.as_bool().unwrap_or(true),
+                "notifySound" | "notify_sound" => {
+                    cfg.notify_sound = val.as_bool().unwrap_or(false);
+                }
+                // ---- 会话管理 ----
+                "autoArchiveDays" | "auto_archive_days" => {
+                    cfg.auto_archive_days = val.as_u64().unwrap_or(0).clamp(0, 365) as u32;
+                }
+                // ---- 代码块 ----
+                "codeLineNumbers" | "code_line_numbers" => {
+                    cfg.code_line_numbers = val.as_bool().unwrap_or(true);
+                }
+                "codeWrap" | "code_wrap" => {
+                    cfg.code_wrap = val.as_bool().unwrap_or(false);
+                }
+                // ---- 网络与隐私 ----
+                "httpProxy" | "http_proxy" => {
+                    cfg.http_proxy = val.as_str().unwrap_or("").trim().to_string();
+                }
+                "httpNoProxy" | "http_no_proxy" => {
+                    cfg.http_no_proxy = val.as_str().unwrap_or("").trim().to_string();
+                }
+                "modelIoLog" | "model_io_log" => {
+                    cfg.model_io_log = val.as_bool().unwrap_or(false);
+                }
+                // ---- 输入行为 ----
+                "enterMode" | "enter_mode" => {
+                    let s = val.as_str().unwrap_or("enter");
+                    if matches!(s, "enter" | "ctrl") {
+                        cfg.enter_mode = s.to_string();
                     }
                 }
                 "systemPrompt" | "system_prompt" => {
@@ -1620,6 +1677,59 @@ async fn delete_session(
         Ok(()) => Json(json!({"ok": true})).into_response(),
         Err(e) => server_error(e),
     }
+}
+
+/// GET /api/sessions/export — 全部会话打包为单个 JSON（备份/迁移用）。
+async fn export_sessions(State(state): State<SharedState>, headers: HeaderMap) -> Response {
+    use axum::http::header;
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    let mut out: Vec<Value> = Vec::new();
+    for s in state.store.list("").await {
+        if let Some(full) = state.store.load(&s.id).await {
+            if let Ok(v) = serde_json::to_value(&full) {
+                out.push(v);
+            }
+        }
+    }
+    let body = serde_json::to_vec(&json!({
+        "app": "parable",
+        "exported_at": crate::event::now_ms(),
+        "count": out.len(),
+        "sessions": out,
+    }))
+    .unwrap_or_else(|_| b"{}".to_vec());
+    let filename = format!(
+        "parable-sessions-{}.json",
+        chrono::Local::now().format("%Y%m%d-%H%M%S")
+    );
+    (
+        [
+            (header::CONTENT_TYPE, "application/json; charset=utf-8"),
+            (
+                header::CONTENT_DISPOSITION,
+                Box::leak(format!("attachment; filename=\"{filename}\"").into_boxed_str()),
+            ),
+        ],
+        body,
+    )
+        .into_response()
+}
+
+/// POST /api/sessions/clear-all — 删除全部会话（危险区，前端二次确认）。
+async fn clear_all_sessions(State(state): State<SharedState>, headers: HeaderMap) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    let list = state.store.list("").await;
+    let mut n = 0usize;
+    for s in &list {
+        if state.store.delete(&s.id).await.is_ok() {
+            n += 1;
+        }
+    }
+    Json(json!({"ok": true, "deleted": n})).into_response()
 }
 
 // ---------------------------------------------------------------- archive
@@ -2766,6 +2876,36 @@ pub async fn serve_in(
     let store: SharedStore = Arc::new(SessionStore::with_root(home.join("sessions")));
     // 用量日志：每轮一条记录，供「使用统计」页聚合。
     let usage = Arc::new(crate::usage::UsageJournal::new(home.join("usage")));
+
+    // 代理设置初始化（http_client / apply_proxy 工厂用）。
+    {
+        let cfg = config.read().await;
+        crate::config::set_proxy(cfg.http_proxy.clone(), cfg.http_no_proxy.clone());
+    }
+    // 自动归档：N 天未活跃的非置顶会话移入归档（设置 → 会话管理；0 = 关闭）。
+    {
+        let store = store.clone();
+        let config = config.clone();
+        tokio::spawn(async move {
+            let days = config.read().await.auto_archive_days;
+            if days == 0 {
+                return;
+            }
+            let cutoff = crate::event::now_ms() as u64 - (days as u64) * 86_400_000;
+            let mut n = 0usize;
+            for s in store.list("").await {
+                if s.archived || s.pinned || s.updated_at >= cutoff {
+                    continue;
+                }
+                if store.update_meta(&s.id, |m| m.archived = true).await.is_ok() {
+                    n += 1;
+                }
+            }
+            if n > 0 {
+                tracing::info!("auto-archived {n} stale sessions (>{days}d)");
+            }
+        });
+    }
     let sched_store = Arc::new(crate::schedule::ScheduleStore::new());
 
     // schedule 不依赖 runtime,先建;workspace 根取全局配置(定时任务建会话用),

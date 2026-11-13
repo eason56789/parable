@@ -205,6 +205,78 @@ pub struct Config {
     /// current turn) or `steer` (inject at the next model-step boundary).
     #[serde(default = "default_followup_mode")]
     pub followup_mode: String,
+
+    // ---- Agent 行为 ---------------------------------------------------
+    /// 上下文将满时自动压缩历史（Claude autoCompact / Gemini compression
+    /// 同款标配）。关闭后超限的轮次直接报错。
+    #[serde(default = "default_true")]
+    pub compaction_enabled: bool,
+    /// 压缩触发阈值：上下文占用百分比（50-95）。
+    #[serde(default = "default_compaction_pct")]
+    pub compaction_pct: u32,
+    /// 单轮最大工具步数（20-500），超过即收尾并说明。
+    #[serde(default = "default_max_steps")]
+    pub max_steps: u32,
+    /// ask_user 提问 120 秒无应答时自动选第一项（无人值守/定时任务场景）。
+    #[serde(default)]
+    pub ask_auto_resolve: bool,
+    /// turn 运行期间阻止系统休眠（Windows SetThreadExecutionState）。
+    #[serde(default)]
+    pub keep_awake: bool,
+    /// 上下文用量告警阈值（前端用量条变色点，50-95）。
+    #[serde(default = "default_ctx_warn")]
+    pub ctx_warn_pct: u32,
+
+    // ---- 通知 ---------------------------------------------------------
+    /// turn 结束且页面在后台时弹系统通知。
+    #[serde(default = "default_true")]
+    pub notify: bool,
+    /// 通知附带提示音（Web Audio 短哔）。
+    #[serde(default)]
+    pub notify_sound: bool,
+
+    // ---- 会话管理 -----------------------------------------------------
+    /// 自动归档 N 天未活跃的会话（0 = 关闭；3/7/14/30 常用档位）。
+    #[serde(default)]
+    pub auto_archive_days: u32,
+
+    // ---- 代码块 -------------------------------------------------------
+    /// 代码块显示行号。
+    #[serde(default = "default_true")]
+    pub code_line_numbers: bool,
+    /// 代码块长行自动换行（默认横向滚动）。
+    #[serde(default)]
+    pub code_wrap: bool,
+
+    // ---- 网络与隐私 ---------------------------------------------------
+    /// 出站 HTTP 代理（http(s)://host:port），作用于模型请求与 web 工具。
+    #[serde(default)]
+    pub http_proxy: String,
+    /// 不走代理的主机后缀/网段列表，逗号分隔。
+    #[serde(default)]
+    pub http_no_proxy: String,
+    /// 调试：把每次发往模型的请求体（system+tools+history）追加落盘到
+    /// logs/model-io.jsonl。只记请求侧（流式响应无完整原文）。
+    #[serde(default)]
+    pub model_io_log: bool,
+
+    // ---- 输入行为 -----------------------------------------------------
+    /// 发送键策略：`enter` = Enter 发送 / Ctrl+Enter 换行；`ctrl` = 反之。
+    #[serde(default = "default_enter_mode")]
+    pub enter_mode: String,
+}
+
+fn default_compaction_pct() -> u32 {
+    85
+}
+fn default_max_steps() -> u32 {
+    100
+}
+fn default_ctx_warn() -> u32 {
+    80
+}
+fn default_enter_mode() -> String {
+    "enter".into()
 }
 
 fn default_search_pref() -> String {
@@ -299,6 +371,21 @@ impl Default for Config {
             search_key: String::new(),
             search_pref: default_search_pref(),
             followup_mode: default_followup_mode(),
+            compaction_enabled: true,
+            compaction_pct: default_compaction_pct(),
+            max_steps: default_max_steps(),
+            ask_auto_resolve: false,
+            keep_awake: false,
+            ctx_warn_pct: default_ctx_warn(),
+            notify: true,
+            notify_sound: false,
+            auto_archive_days: 0,
+            code_line_numbers: true,
+            code_wrap: false,
+            http_proxy: String::new(),
+            http_no_proxy: String::new(),
+            model_io_log: false,
+            enter_mode: default_enter_mode(),
         }
     }
 }
@@ -535,4 +622,66 @@ pub fn apply_patch_deletions(cfg: &mut Config, v: &serde_json::Value) {
             pp.models.retain(|m| !to_delete.contains(&m.id));
         }
     }
+}
+
+// ---- 代理感知 HTTP client ------------------------------------------------
+
+static PROXY: std::sync::RwLock<Option<(String, String)>> = std::sync::RwLock::new(None);
+static CLIENT_CACHE: std::sync::Mutex<Option<(String, reqwest::Client)>> =
+    std::sync::Mutex::new(None);
+
+/// 运行时更新代理设置（启动与每次 PATCH /config 后调用）。
+/// 传入 (proxy, no_proxy)；proxy 为空 = 直连。
+pub fn set_proxy(proxy: String, no_proxy: String) {
+    *PROXY.write().expect("proxy lock") = Some((proxy, no_proxy));
+}
+
+/// 代理感知的共享 HTTP client：模型请求、web 工具共用。按当前代理串缓存，
+/// 设置变更后自动重建。connect_timeout 20s（与原各处手搓 builder 一致）。
+/// 给任意 ClientBuilder 套上当前代理设置（保留调用方的 UA/重定向/超时定制）。
+pub fn apply_proxy(b: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
+    let (proxy, no_proxy) = PROXY
+        .read()
+        .expect("proxy lock")
+        .clone()
+        .unwrap_or_default();
+    if proxy.is_empty() {
+        return b;
+    }
+    match reqwest::Proxy::all(&proxy) {
+        Ok(p) => {
+            let p = if no_proxy.is_empty() {
+                p
+            } else {
+                p.no_proxy(reqwest::NoProxy::from_string(&no_proxy))
+            };
+            b.proxy(p)
+        }
+        Err(e) => {
+            tracing::warn!("代理配置无效({proxy}): {e}");
+            b
+        }
+    }
+}
+
+/// 代理感知的共享 HTTP client：简单场景直接用（按当前代理串缓存）。
+pub fn http_client() -> reqwest::Client {
+    let key = {
+        let p = PROXY.read().expect("proxy lock");
+        p.clone().unwrap_or_default()
+    };
+    let sig = format!("{}\u{1f}{}", key.0, key.1);
+    let mut cache = CLIENT_CACHE.lock().expect("client cache");
+    if let Some((k, c)) = cache.as_ref() {
+        if *k == sig {
+            return c.clone();
+        }
+    }
+    let client = apply_proxy(
+        reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(20)),
+    )
+    .build()
+    .unwrap_or_else(|_| reqwest::Client::new());
+    *cache = Some((sig, client.clone()));
+    client
 }

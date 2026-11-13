@@ -580,9 +580,8 @@ impl Provider for OpenAiBase {
         } else {
             (self.endpoint("chat/completions"), build_chat_body(&req))
         };
-        let client = reqwest::Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(20))
-            .build()?;
+        // 代理感知共享 client（设置 → 网络与隐私 → HTTP 代理）
+        let client = crate::config::http_client();
         let resp = client.post(&url).headers(self.headers()).json(&body).send().await?;
         if !resp.status().is_success() {
             let status = resp.status();
@@ -629,9 +628,8 @@ impl Provider for OpenAiBase {
                 models: vec![],
             });
         }
-        let client = reqwest::Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(15))
-            .build()?;
+        // 代理感知共享 client
+        let client = crate::config::http_client();
         // The models list validates the key without spending tokens.
         let url = self.endpoint("models");
         let resp = client.get(&url).headers(self.headers()).send().await;

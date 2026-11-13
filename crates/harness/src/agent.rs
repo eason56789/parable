@@ -19,6 +19,15 @@ use tokio_util::sync::CancellationToken;
 
 pub const MAX_STEPS: usize = 100;
 
+/// turn 级行为开关：run_turn 入口从 config 一次性快照，避免每步读锁。
+struct TurnCfg {
+    max_steps: usize,
+    compaction_enabled: bool,
+    compaction_pct: u64,
+    keep_awake: bool,
+    model_io_log: bool,
+}
+
 // ---------------------------------------------------------------- questions
 
 pub struct QuestionBroker {
@@ -194,6 +203,15 @@ impl AgentRuntime {
             search_pref: search_pref.to_string(),
             computer: Some(self.computer.clone()),
             desktop: Some(self.desktop.clone()),
+            // ask_user 自动裁决：配置开启时 120s 无应答自动选第一项
+            ask_timeout_ms: {
+                let cfg = self.config.read().await;
+                if cfg.ask_auto_resolve {
+                    120_000
+                } else {
+                    0
+                }
+            },
         }
     }
 }
@@ -1052,8 +1070,8 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
             json!({"turnId": turn_id, "model": opts.model_sel, "text": user_text}),
         );
 
-        // ---- resolve model + workspace
-        let (workspace, model_sel, ctx_limit, search_key, search_pref) = {
+        // ---- resolve model + workspace + turn 级行为开关
+        let (workspace, model_sel, ctx_limit, search_key, search_pref, tcfg) = {
             let cfg = self.config.read().await;
             let ws = if cfg.workspace.is_empty() {
                 std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
@@ -1070,8 +1088,48 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
                 .or_else(|| cfg.active_model())
                 .map(|(_, m)| m.context)
                 .unwrap_or(128_000);
-            (ws, sel, limit, cfg.search_key.clone(), cfg.search_pref.clone())
+            let tcfg = TurnCfg {
+                max_steps: cfg.max_steps.max(1) as usize,
+                compaction_enabled: cfg.compaction_enabled,
+                compaction_pct: cfg.compaction_pct as u64,
+                keep_awake: cfg.keep_awake,
+                model_io_log: cfg.model_io_log,
+            };
+            (ws, sel, limit, cfg.search_key.clone(), cfg.search_pref.clone(), tcfg)
         };
+
+        // 防休眠看门狗：独立线程周期性持锁，turn 结束即归还
+        // （SetThreadExecutionState 按线程生效，tokio 工作线程不可靠）。
+        let awake_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        if tcfg.keep_awake {
+            #[cfg(windows)]
+            {
+                let flag = awake_done.clone();
+                std::thread::Builder::new()
+                    .name("parable-keepawake".into())
+                    .spawn(move || {
+                        use windows::Win32::System::Power::{
+                            SetThreadExecutionState, ES_CONTINUOUS, ES_SYSTEM_REQUIRED,
+                        };
+                        unsafe {
+                            let _ =
+                                SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED);
+                        }
+                        while !flag.load(std::sync::atomic::Ordering::Relaxed) {
+                            std::thread::sleep(std::time::Duration::from_secs(30));
+                            unsafe {
+                                let _ = SetThreadExecutionState(
+                                    ES_CONTINUOUS | ES_SYSTEM_REQUIRED,
+                                );
+                            }
+                        }
+                        unsafe {
+                            let _ = SetThreadExecutionState(ES_CONTINUOUS);
+                        }
+                    })
+                    .ok();
+            }
+        }
 
         // ---- provider
         let (provider, model_id) = match self.resolve_provider(&model_sel).await {
@@ -1136,8 +1194,11 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
             if cancel.is_cancelled() {
                 break 'turn Ok("cancelled".to_string());
             }
-            if steps >= MAX_STEPS {
-                let notice = "\n\n> Stopped: reached the 100-step limit for one turn.";
+            if steps >= tcfg.max_steps {
+                let notice = format!(
+                    "\n\n> Stopped: reached the {}-step limit for one turn.",
+                    tcfg.max_steps
+                );
                 self.hub.publish(
                     session_id,
                     "text.delta",
@@ -1173,17 +1234,27 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
             // the older part before sending anything to the model.
             let tools = registry.specs();
             let fixed_tokens = estimate_fixed(&system, &tools);
+            let compaction = tcfg.compaction_pct.clamp(50, 95);
+            let compact_fut = async {
+                if !tcfg.compaction_enabled {
+                    Ok((0usize, None::<String>))
+                } else {
+                    compact_history(
+                        &*provider,
+                        &mut history,
+                        &self.hub,
+                        session_id,
+                        ctx_limit,
+                        fixed_tokens,
+                        compaction,
+                    )
+                    .await
+                }
+            };
             let compact_result = tokio::select! {
                 biased;
                 _ = cancel.cancelled() => break 'turn Ok("cancelled".to_string()),
-                r = compact_history(
-                    &*provider,
-                    &mut history,
-                    &self.hub,
-                    session_id,
-                    ctx_limit,
-                    fixed_tokens,
-                ) => r,
+                r = compact_fut => r,
             };
             match compact_result {
                 Ok((n, summary)) => {
@@ -1218,6 +1289,29 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
                 // provider 侧按 0 关闭思考。
                 thinking_level: opts.thinking_level,
             };
+            // 调试：请求体落盘（设置 → 网络与隐私 → 记录模型请求）。只记请求侧。
+            if tcfg.model_io_log {
+                let dir = crate::config::Config::home_dir().join("logs");
+                let _ = std::fs::create_dir_all(&dir);
+                let line = json!({
+                    "ts": crate::event::now_ms(),
+                    "session": session_id,
+                    "turn": turn_id,
+                    "step": steps,
+                    "model": req.model,
+                    "system": system,
+                    "tools": serde_json::to_value(&*tools).unwrap_or_default(),
+                    "messages": serde_json::to_value(&req.messages).unwrap_or_default(),
+                });
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(dir.join("model-io.jsonl"))
+                {
+                    use std::io::Write;
+                    let _ = writeln!(f, "{line}");
+                }
+            }
             let (ctx_sys, ctx_tools, ctx_msgs) = provider::estimate_request(&req);
             {
                 let mut st = self.stats.lock().await;
@@ -1541,6 +1635,8 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
         self.fallback_steering(session_id, turn_id).await;
 
         // 统一收尾：所有出口（正常/取消/出错）都走这里记账并发布 turn.end。
+        // 先归还防休眠锁（看门狗线程随之退出）。
+        awake_done.store(true, std::sync::atomic::Ordering::Relaxed);
         let final_stop = match &result {
             Ok(s) => s.clone(),
             Err(_) => "error".to_string(),
@@ -1832,14 +1928,14 @@ pub async fn compact_history(
     session_id: &str,
     ctx_limit: u64,
     fixed_tokens: usize,
+    threshold_pct: u64,
 ) -> Result<(usize, Option<String>), HarnessError> {
     const KEEP: usize = 6;
-    const THRESHOLD_PCT: u64 = 85;
 
     let msg_tokens: usize = history.iter().map(|m| m.estimate()).sum();
     let used = fixed_tokens + msg_tokens;
     let limit = ctx_limit.max(8_000) as usize;
-    if used * 100 / limit < THRESHOLD_PCT as usize {
+    if used * 100 / limit < threshold_pct as usize {
         return Ok((0, None));
     }
     if history.len() <= KEEP + 2 {
@@ -2345,7 +2441,7 @@ mod tests {
         };
         let hub = EventHub::new();
         let mut h = fill(3);
-        let (n, _) = compact_history(&p, &mut h, &hub, "s", 1_000_000, 0)
+        let (n, _) = compact_history(&p, &mut h, &hub, "s", 1_000_000, 0, 85)
             .await
             .unwrap();
         assert_eq!(n, 0, "short history must not be compacted");
@@ -2363,7 +2459,7 @@ mod tests {
         // 85% line even against the 8k floor that guards tiny ctx_limits.
         let mut h = fill(120);
         let before = h.len();
-        let (n, body) = compact_history(&p, &mut h, &hub, "s", 200, 0)
+        let (n, body) = compact_history(&p, &mut h, &hub, "s", 200, 0, 85)
             .await
             .unwrap();
         assert!(n > 0, "expected compaction to fire, got 0 of {before}");
@@ -2390,7 +2486,7 @@ mod tests {
         let hub = EventHub::new();
         let mut h = fill(120);
         let before = h.len();
-        let (n, _) = compact_history(&p, &mut h, &hub, "s", 200, 0)
+        let (n, _) = compact_history(&p, &mut h, &hub, "s", 200, 0, 85)
             .await
             .unwrap();
         assert_eq!(n, 0);

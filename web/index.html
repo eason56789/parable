@@ -1353,6 +1353,11 @@ body.dragging #main{outline:2px dashed var(--accent);outline-offset:-8px}
 .spdr:last-of-type{border-bottom:0}
 .spdcmd{margin-top:10px;padding:8px 10px;border-radius:8px;background:var(--hov);font:12px var(--mono);color:var(--fg2);overflow-x:auto;white-space:nowrap}
 .spdhint{margin:12px 0 0;color:var(--fg2);font-size:12px;line-height:1.6}
+/* 上下文用量条：贴在输入框上方，随 status 事件更新 */
+#ctxbar { height:3px; border-radius:2px; margin:10px 12px 0; background:rgba(128,128,128,.18); overflow:hidden; }
+#ctxbar i { display:block; height:100%; width:0%; background:var(--accent); transition:width .4s; }
+#ctxbar.warn i { background:#e0a03c; }
+#ctxbar.hot i { background:#d4574c; }
 </style>
 </head>
 <body>
@@ -1408,6 +1413,7 @@ body.dragging #main{outline:2px dashed var(--accent);outline-offset:-8px}
           <div id="qlist"></div>
         </div>
         <div class="box">
+          <div id="ctxbar" hidden><i></i></div>
           <div id="sl"></div>
           <div id="atts"></div>
           <textarea id="ta" rows="1" autofocus></textarea>
@@ -1612,7 +1618,28 @@ const L = {
     l0:'关闭', l1:'低', l2:'中', l3:'高',
     s_g:'通用', s_s:'网络搜索', s_a:'外观', s_m:'模型设置', s_p:'权限与思考', s_n:'动画', s_base:'基础设置',
     s_u:'使用统计', s_data:'数据与统计', s_agent:'Agent 能力',
-    s_mem:'记忆', s_sk:'技能',
+    s_mem:'记忆', s_sk:'技能', s_bh:'Agent 行为', s_net:'网络与隐私', s_d:'数据',
+    cmpEn:'上下文自动压缩', cmpEnH:'上下文将满时自动把较早历史交给模型做结构化摘要（关闭后超限的轮次直接报错）',
+    cmpPct:'压缩触发阈值', cmpPctH:'上下文占用达到该百分比时触发压缩（改动下一轮生效）',
+    maxSteps:'单轮步数上限', maxStepsH:'一轮对话最多执行的工具步数，达到后收尾并说明',
+    askAuto:'提问自动裁决', askAutoH:'ask_user 提问 120 秒无应答时自动选第一项（适合无人值守/定时任务）',
+    keepAwake:'运行中阻止休眠', keepAwakeH:'turn 运行期间阻止系统进入睡眠',
+    ctxWarn:'上下文告警阈值', ctxWarnH:'输入框上方用量条达到该百分比时变警示色',
+    notify:'后台完成通知', notifySound:'通知提示音', notifyH:'页面在后台时，一轮结束弹系统通知',
+    notifySoundH:'通知伴随一声短提示音（需要允许通知）',
+    autoArchive:'自动归档旧会话', autoArchiveH:'超过所选天数未活跃的非置顶会话自动归档（服务启动时执行）',
+    aar_0:'关闭', aar_3:'3 天', aar_7:'7 天', aar_14:'14 天', aar_30:'30 天',
+    em_enter:'Enter 发送', em_ctrl:'Ctrl+Enter 发送',
+    enterMode:'发送键', enterModeH:'输入框的发送/换行策略',
+    codeLN:'代码块行号', codeLNH:'代码块左侧显示行号',
+    codeWrap:'代码块换行', codeWrapH:'长行自动换行（默认横向滚动）',
+    proxy:'HTTP 代理', proxyH:'模型请求与 web 工具出站走该代理（http://host:port，留空直连），保存后即时生效',
+    noProxy:'代理例外', noProxyH:'不走代理的主机后缀，逗号分隔（如 localhost,127.0.0.1,.internal）',
+    mioLog:'记录模型请求', mioLogH:'把每次发往模型的请求体（system+tools+history）追加到 ~/.parable/logs/model-io.jsonl（调试用，只记请求侧）',
+    expAll:'导出全部会话', expAllH:'打包为单个 JSON 文件下载（备份/迁移用）',
+    dangerT:'危险区', dangerH:'以下操作不可恢复，执行前请想清楚',
+    dangerBtn:'清空全部会话…', dangerDone:'已删除 {n} 个会话',
+    cfClearAll:'确定删除全部会话？所有对话历史将永久丢失！',
     mem_title:'记忆', mem_desc:'Parable 会在对话中参考这些内容，可随时编辑、补充或删除。',
     mem_enable:'启用记忆', mem_enable_h:'关闭后对话不再读取任何记忆。',
     mem_auto:'自动提取记忆', mem_auto_h:'从对话中总结值得长期记住的内容，加入下方列表。',
@@ -1777,7 +1804,28 @@ const L = {
     l0:'Off', l1:'Low', l2:'Medium', l3:'High',
     s_g:'General', s_s:'Web search', s_a:'Appearance', s_m:'Model settings', s_p:'Permissions', s_n:'Animation', s_base:'Basics',
     s_u:'Usage', s_data:'Data & stats', s_agent:'Agent capabilities',
-    s_mem:'Memory', s_sk:'Skills',
+    s_mem:'Memory', s_sk:'Skills', s_bh:'Agent behavior', s_net:'Network & privacy', s_d:'Data',
+    cmpEn:'Auto compaction', cmpEnH:'Summarise older history into the model when the context nears its limit (off = over-limit turns fail loudly)',
+    cmpPct:'Compaction threshold', cmpPctH:'Fire compaction when context usage reaches this percent (applies to the next turn)',
+    maxSteps:'Max steps per turn', maxStepsH:'Tool steps a single turn may take before wrapping up',
+    askAuto:'Auto-resolve questions', askAutoH:'After 120s without an answer, pick the first option (good for unattended runs)',
+    keepAwake:'Keep system awake', keepAwakeH:'Prevent system sleep while a turn is running',
+    ctxWarn:'Context warn threshold', ctxWarnH:'The usage bar above the input turns warning-colored at this percent',
+    notify:'Background notifications', notifySound:'Notification sound', notifyH:'System notification when a turn finishes while the page is hidden',
+    notifySoundH:'Play a short beep with the notification (permission required)',
+    autoArchive:'Auto-archive old chats', autoArchiveH:'Archive non-pinned sessions idle beyond the selected days (runs at startup)',
+    aar_0:'Off', aar_3:'3 days', aar_7:'7 days', aar_14:'14 days', aar_30:'30 days',
+    em_enter:'Enter sends', em_ctrl:'Ctrl+Enter sends',
+    enterMode:'Send key', enterModeH:'How the composer sends vs inserts a newline',
+    codeLN:'Code line numbers', codeLNH:'Show line numbers beside code blocks',
+    codeWrap:'Wrap code lines', codeWrapH:'Wrap long lines (default: horizontal scroll)',
+    proxy:'HTTP proxy', proxyH:'Route model requests and web tools through this proxy (http://host:port; empty = direct). Applies immediately',
+    noProxy:'Proxy exceptions', noProxyH:'Hosts that bypass the proxy, comma-separated (e.g. localhost,127.0.0.1,.internal)',
+    mioLog:'Log model requests', mioLogH:'Append every outbound request body (system+tools+history) to ~/.parable/logs/model-io.jsonl (debug; request side only)',
+    expAll:'Export all sessions', expAllH:'Download every session as a single JSON file (backup/migration)',
+    dangerT:'Danger zone', dangerH:'These actions are irreversible. Think twice',
+    dangerBtn:'Delete all sessions…', dangerDone:'Deleted {n} sessions',
+    cfClearAll:'Delete ALL sessions? Every conversation will be lost permanently!',
     mem_title:'Memory', mem_desc:'Things Parable should keep in mind across chats. Edit, add or delete them any time.',
     mem_enable:'Enable memory', mem_enable_h:'When off, chats stop reading any memory.',
     mem_auto:'Auto-extract memories', mem_auto_h:'Summarise durable facts from a conversation and add them below.',
@@ -1939,7 +1987,12 @@ const DEF = {
   uiSize:13, lineHeight:1.5, codeSize:13, density:'cozy', inkOn:true,
   speed:22, cd:650, blur:8, sf:1.5, anim:1, stream:true, think:true, toolThink:false, side:true,
   prefs:'', systemPrompt:'', systemPromptRaw:'', model:'', perm:'ask', lvl:2,
-  searchKey:'', spref:'auto', plan:false, mem:true, memAuto:true, followupMode:'queue'
+  searchKey:'', spref:'auto', plan:false, mem:true, memAuto:true, followupMode:'queue',
+  // 精装修新增：Agent 行为 / 通知 / 会话管理 / 代码块 / 网络与隐私 / 输入
+  compactionEnabled:true, compactionPct:85, maxSteps:100, askAutoResolve:false, keepAwake:false, ctxWarnPct:80,
+  notify:true, notifySound:false, autoArchiveDays:0,
+  codeLineNumbers:true, codeWrap:false,
+  httpProxy:'', httpNoProxy:'', modelIoLog:false, enterMode:'enter'
 };
 let S = { ...DEF };
 try { S = { ...DEF, ...JSON.parse(localStorage.getItem('cd-s') || '{}') }; } catch (e) {}
@@ -2054,7 +2107,12 @@ function apply(pushToServer) {
         width: S.w, accent: S.accent, speed: S.speed, cd: S.cd, blur: S.blur,
         sf: S.sf, anim: S.anim, stream: S.stream, think: S.think, side: S.side,
         uiSize: S.uiSize, lineHeight: S.lineHeight, codeSize: S.codeSize, density: S.density,
-        prefs: S.prefs, systemPrompt: S.systemPrompt, systemPromptRaw: S.systemPromptRaw, model: S.model, permissionMode: S.perm, thinkingLevel: S.lvl, searchKey: S.searchKey, searchPref: S.spref, followupMode: S.followupMode
+        prefs: S.prefs, systemPrompt: S.systemPrompt, systemPromptRaw: S.systemPromptRaw, model: S.model, permissionMode: S.perm, thinkingLevel: S.lvl, searchKey: S.searchKey, searchPref: S.spref, followupMode: S.followupMode,
+        compactionEnabled: S.compactionEnabled, compactionPct: S.compactionPct, maxSteps: S.maxSteps,
+        askAutoResolve: S.askAutoResolve, keepAwake: S.keepAwake, ctxWarnPct: S.ctxWarnPct,
+        notify: S.notify, notifySound: S.notifySound, autoArchiveDays: S.autoArchiveDays,
+        codeLineNumbers: S.codeLineNumbers, codeWrap: S.codeWrap,
+        httpProxy: S.httpProxy, httpNoProxy: S.httpNoProxy, modelIoLog: S.modelIoLog, enterMode: S.enterMode
       }}).catch(() => {});
     }
   }, 300);
@@ -2069,6 +2127,18 @@ async function greetAnim() {
   greetAnim.s = s;
   await inline(g, greet(), s, false, 45);
   if (k === gk) gAnim = false;
+}
+
+function beep() {
+  try {
+    const ac = beep.ac || (beep.ac = new (window.AudioContext || window.webkitAudioContext)());
+    const o = ac.createOscillator(), g = ac.createGain();
+    o.frequency.value = 880;
+    o.connect(g); g.connect(ac.destination);
+    g.gain.setValueAtTime(0.08, ac.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.0001, ac.currentTime + 0.25);
+    o.start(); o.stop(ac.currentTime + 0.26);
+  } catch (e) {}
 }
 
 function toast(m) {
@@ -3048,6 +3118,7 @@ function renderCode(host, text) {
     '<button class="cp" data-cp>' + t('copy') + '</button>' +
     '<button class="cp" data-wr>' + t('wrap') + '</button></span>';
   const pre = document.createElement('pre');
+  if (S.codeWrap) pre.classList.add('wrapit');
   d.append(hd, pre);
   host.append(d);
   hd.querySelector('[data-cp]').onclick = e => {
@@ -3055,7 +3126,8 @@ function renderCode(host, text) {
   };
   hd.querySelector('[data-wr]').onclick = () => pre.classList.toggle('wrapit');
   pre.textContent = body;
-  numCode(pre);
+  // 行号开关（设置 → 外观）：关闭时不画行号槽
+  if (S.codeLineNumbers !== false) numCode(pre);
 }
 
 /**
@@ -4634,6 +4706,17 @@ function dispatch(ev) {
       sync();
       // 问答等待中若本轮被中断/结束，立即收回底部问答面板。
       if (QBOX.active && !QBOX.closing) qsReset(true);
+      // 后台通知（设置 → 通用）：页面隐藏时 turn 结束弹系统通知
+      if (S.notify && document.hidden && 'Notification' in window && Notification.permission === 'granted') {
+        try {
+          new Notification(conv && conv.title ? conv.title : 'Parable', {
+            body: S.lang === 'zh' ? '本轮已完成' : 'Turn finished',
+            tag: 'parable-turn',
+            silent: !S.notifySound,
+          });
+          if (S.notifySound) beep();
+        } catch (e) {}
+      }
       // 清掉本轮渲染状态：不清理的话下一轮 turn（定时投递、重试）会把回答
       // 续写进上一轮的气泡里，两段回答挤在一个消息中，存储却各归各。
       resetTurn();
@@ -4707,6 +4790,16 @@ function applyStatus(ev) {
   const used = cx.used || 0, limit = cx.limit || 128000;
   const pct = limit ? Math.round((used / limit) * 100) : 0;
   $('#sb-ctx-tx').textContent = pct + '%';
+  // 上下文用量条：告警阈值来自设置（默认 80%），+10 进入红色
+  {
+    const bar = $('#ctxbar');
+    if (bar) {
+      bar.hidden = pct <= 0;
+      bar.firstElementChild.style.width = Math.min(100, pct) + '%';
+      const warn = S.ctxWarnPct || 80;
+      bar.className = pct >= warn + 10 ? 'hot' : pct >= warn ? 'warn' : '';
+    }
+  }
   $('#p-ctx-pct').textContent = pct + '%';
   $('#p-ctx-val').textContent = '~' + kfmt(used) + ' / ' + kfmt(limit);
   const denom = used || 1;
@@ -5199,9 +5292,17 @@ ta.addEventListener('keydown', e => {
     sync();
     return;
   }
-  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
-    e.preventDefault();
-    send((e.ctrlKey || e.metaKey) ? 'toggle' : '');
+  // 发送键策略（设置 → 通用）：enter = Enter 发送 / Ctrl+Enter 切换；
+  // ctrl = Ctrl+Enter 发送，裸 Enter 与 Shift+Enter 都换行。
+  if (e.key === 'Enter' && !e.isComposing) {
+    if (S.enterMode === 'ctrl') {
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey) { e.preventDefault(); send(''); }
+      return;
+    }
+    if (!e.shiftKey) {
+      e.preventDefault();
+      send((e.ctrlKey || e.metaKey) ? 'toggle' : '');
+    }
   }
 });
 sd.onclick = () => send();
@@ -7301,9 +7402,9 @@ $('#mb').onclick = e => {
 const TAB = ['g', 's', 'a', 'n', 'm', 'p', 'mem', 'sk', 'u'];
 /** 导航分组：基础设置 / Agent 能力 / 数据与统计 */
 const TGRP = [
-  { k: 's_base', tabs: ['g', 'a', 'n', 's'] },
-  { k: 's_agent', tabs: ['m', 'p', 'mem', 'sk'] },
-  { k: 's_data', tabs: ['u'] }
+  { k: 's_base', tabs: ['g', 'a', 'n', 's', 'net'] },
+  { k: 's_agent', tabs: ['m', 'p', 'mem', 'sk', 'bh'] },
+  { k: 's_data', tabs: ['u', 'd'] }
 ];
 const SW = ['#d97757', '#6a9bcc', '#788c5d', '#9b87f5', '#d4637a', '#c9a227'];
 const SC = {
@@ -7313,6 +7414,10 @@ const SC = {
     { k:'think', t:'tg', l:'think' },
     { k:'toolThink', t:'tg', l:'toolThink', h:'toolThinkH' },
     { k:'followupMode', t:'seg', l:'followupMode', h:'followupModeH', o:['queue','steer'], i:1, p:'fu_' },
+    { k:'enterMode', t:'seg', l:'enterMode', h:'enterModeH', o:['enter','ctrl'], i:1, p:'em_' },
+    { k:'notify', t:'tg', l:'notify', h:'notifyH' },
+    { k:'notifySound', t:'tg', l:'notifySound', h:'notifySoundH' },
+    { k:'autoArchiveDays', t:'seg', l:'autoArchive', h:'autoArchiveH', o:[0,3,7,14,30], i:1, p:'aar_', num:1 },
     { k:'prefs', t:'ta', l:'prefs', h:'prefsh' },
     { k:'systemPrompt', t:'ta', l:'sysprompt', h:'sysprompth' },
     { k:'systemPromptRaw', t:'ta', l:'sysraw', h:'sysrawh' },
@@ -7333,7 +7438,9 @@ const SC = {
     { k:'density', t:'seg', l:'density', o:['airy','cozy','compact'], i:1, p:'dens_' },
     { k:'w', t:'rg', l:'w', min:600, max:960, step:20, u:'px' },
     { k:'accent', t:'sw', l:'accent' },
-    { k:'side', t:'tg', l:'side' }
+    { k:'side', t:'tg', l:'side' },
+    { k:'codeLineNumbers', t:'tg', l:'codeLN', h:'codeLNH' },
+    { k:'codeWrap', t:'tg', l:'codeWrap', h:'codeWrapH' }
   ],
   p:[
     { k:'perm', t:'rl', l:'permT', h:'permH', o:PK },
@@ -7348,9 +7455,27 @@ const SC = {
     { k:'blur', t:'rg', l:'blur', min:0, max:20, step:1, u:'px' },
     { k:'sf', t:'rg', l:'sf', min:1, max:3, step:0.1, u:'×' },
     { t:'pv' }
+  ],
+  bh:[
+    { k:'compactionEnabled', t:'tg', l:'cmpEn', h:'cmpEnH' },
+    { k:'compactionPct', t:'rg', l:'cmpPct', h:'cmpPctH', min:50, max:95, step:5, u:'%' },
+    { k:'maxSteps', t:'rg', l:'maxSteps', h:'maxStepsH', min:20, max:500, step:10, u:'' },
+    { k:'askAutoResolve', t:'tg', l:'askAuto', h:'askAutoH' },
+    { k:'keepAwake', t:'tg', l:'keepAwake', h:'keepAwakeH' },
+    { k:'ctxWarnPct', t:'rg', l:'ctxWarn', h:'ctxWarnH', min:50, max:95, step:5, u:'%' }
+  ],
+  net:[
+    { k:'httpProxy', t:'tx', l:'proxy', h:'proxyH' },
+    { k:'httpNoProxy', t:'tx', l:'noProxy', h:'noProxyH' },
+    { k:'modelIoLog', t:'tg', l:'mioLog', h:'mioLogH' }
+  ],
+  d:[
+    { l:'expAll', h:'expAllH', t:'exp' },
+    { l:'dangerT', h:'dangerH', t:'danger' }
   ]
 };
 let tab = 'g', pvs = null;
+try { const st = localStorage.getItem('cd-settab'); if (st && SC[st]) tab = st; } catch (e) {}
 
 function nav() {
   const z = S.lang === 'zh';
@@ -7592,7 +7717,7 @@ function panel() {
         ct.onclick = e => {
           const b = e.target.closest('button');
           if (!b) return;
-          S[c.k] = (c.k === 'lvl') ? +b.dataset.v : b.dataset.v;
+          S[c.k] = (c.k === 'lvl' || c.num) ? +b.dataset.v : b.dataset.v;
           apply();
           if (c.k === 'lang') { nav(); panel(); }
           else f();
@@ -7654,7 +7779,14 @@ function panel() {
         ct.firstChild.value = v;
       } else if (c.t === 'tg') {
         ct.innerHTML = '<button class="tg' + (v ? ' on' : '') + '"></button>';
-        ct.firstChild.onclick = () => { S[c.k] = !S[c.k]; apply(); f(); };
+        ct.firstChild.onclick = () => {
+          S[c.k] = !S[c.k];
+          // 首次开启系统通知时向浏览器申请权限
+          if (c.k === 'notify' && S.notify && 'Notification' in window && Notification.permission === 'default') {
+            Notification.requestPermission();
+          }
+          apply(); f();
+        };
       } else if (c.t === 'rs') {
         ct.className = '';
         ct.innerHTML = '<button class="btn">' + t('reset') + '</button>';
@@ -7671,6 +7803,34 @@ function panel() {
               ? '逐字符模糊放大，像墨水在纸上化开。**Each character** settles into focus.'
               : 'Each character blurs in and **settles into focus**, like ink spreading on paper.',
             pvs, false);
+        };
+      } else if (c.t === 'exp') {
+        ct.className = '';
+        ct.innerHTML = '<button class="btn">' + t('expAll') + '</button>';
+        ct.firstChild.onclick = async () => {
+          try {
+            const r = await fetch('/api/sessions/export', { headers: { 'X-Parable-Token': TOKEN } });
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            const blob = await r.blob();
+            const a = document.createElement('a');
+            const cd = r.headers.get('Content-Disposition') || '';
+            a.href = URL.createObjectURL(blob);
+            a.download = (cd.match(/filename="(.+)"/) || [])[1] || 'parable-sessions.json';
+            document.body.append(a); a.click(); a.remove();
+            setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+          } catch (e) { toast(e.message); }
+        };
+      } else if (c.t === 'danger') {
+        ct.className = '';
+        ct.innerHTML = '<button class="btn" style="color:#d4574c;border-color:#d4574c">' + t('dangerBtn') + '</button>';
+        ct.firstChild.onclick = async () => {
+          if (!(await confirmBox(t('cfClearAll'), { danger: true }))) return;
+          try {
+            const r = await api('/sessions/clear-all', { method: 'POST' });
+            toast((t('dangerDone') || '').replace('{n}', r.deleted != null ? r.deleted : 0));
+            loadSessions(true);
+            if (conv && conv.id) newChat();
+          } catch (e) { toast(e.message); }
         };
       } else if (c.t === 'sp') {
         // Show the exact system text the harness will send to the model server
@@ -11355,7 +11515,22 @@ async function boot() {
       uiSize: c.ui_size ?? S.uiSize,
       lineHeight: c.line_height ?? S.lineHeight,
       codeSize: c.code_size ?? S.codeSize,
-      density: c.density ?? S.density
+      density: c.density ?? S.density,
+      compactionEnabled: c.compaction_enabled ?? S.compactionEnabled,
+      compactionPct: c.compaction_pct ?? S.compactionPct,
+      maxSteps: c.max_steps ?? S.maxSteps,
+      askAutoResolve: c.ask_auto_resolve ?? S.askAutoResolve,
+      keepAwake: c.keep_awake ?? S.keepAwake,
+      ctxWarnPct: c.ctx_warn_pct ?? S.ctxWarnPct,
+      notify: c.notify ?? S.notify,
+      notifySound: c.notify_sound ?? S.notifySound,
+      autoArchiveDays: c.auto_archive_days ?? S.autoArchiveDays,
+      codeLineNumbers: c.code_line_numbers ?? S.codeLineNumbers,
+      codeWrap: c.code_wrap ?? S.codeWrap,
+      httpProxy: c.http_proxy ?? S.httpProxy,
+      httpNoProxy: c.http_no_proxy ?? S.httpNoProxy,
+      modelIoLog: c.model_io_log ?? S.modelIoLog,
+      enterMode: c.enter_mode ?? S.enterMode
     });
   } catch (e) { /* offline: use local cache */ }
 

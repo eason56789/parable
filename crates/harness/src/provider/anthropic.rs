@@ -221,9 +221,8 @@ impl Provider for AnthropicProvider {
             return Err(HarnessError::Provider("no model id set for this request".into()));
         }
         let body = build_body(&req, self.thinking_supported);
-        let client = reqwest::Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(20))
-            .build()?;
+        // 代理感知共享 client（设置 → 网络与隐私 → HTTP 代理）
+        let client = crate::config::http_client();
         let resp = client
             .post(self.url())
             .headers(self.headers())
@@ -262,9 +261,8 @@ impl Provider for AnthropicProvider {
                 models: vec![],
             });
         }
-        let client = reqwest::Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(15))
-            .build()?;
+        // 代理感知共享 client
+        let client = crate::config::http_client();
         let body = json!({
             "model": self.model,
             "max_tokens": 1,
