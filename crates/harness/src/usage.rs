@@ -579,6 +579,56 @@ fn build_snapshot(recs: &[UsageRecord], range: &str, now: u64) -> Value {
         .map(|(i, v)| serde_json::json!({"tokens": v, "turns": activity.weekday_turns[i]}))
         .collect();
 
+    // The busiest hour of the day is derived from the all-time totals, so it
+    // never flips around when the range changes.
+    let (peak_hour_idx, peak_hour_tokens) = activity
+        .hours
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, v)| **v)
+        .map(|(i, v)| (i, *v))
+        .unwrap_or((0, 0));
+    let peak_hour = if peak_hour_tokens == 0 {
+        Value::Null
+    } else {
+        serde_json::json!(peak_hour_idx)
+    };
+
+    // Favourite model: the model that consumed the most tokens in range.
+    let favorite_model = {
+        let mut best: Option<(String, u64)> = None;
+        for r in recs {
+            if let Some(c) = &cutoff {
+                if r.day.as_str() < c.as_str() {
+                    continue;
+                }
+            }
+            let t = r.total();
+            match &mut best {
+                None => best = Some((r.model.clone(), t)),
+                Some((m, v)) => {
+                    if *m == r.model {
+                        *v += t;
+                    } else if t > *v {
+                        *m = r.model.clone();
+                        *v = t;
+                    }
+                }
+            }
+        }
+        match best {
+            Some((m, v)) => {
+                let share = if range_total == 0 {
+                    0.0
+                } else {
+                    v as f64 / range_total as f64
+                };
+                serde_json::json!({"modelId": m, "totalTokens": v, "share": share})
+            }
+            None => Value::Null,
+        }
+    };
+
     serde_json::json!({
         "range": range,
         "generatedAt": now,
@@ -596,6 +646,7 @@ fn build_snapshot(recs: &[UsageRecord], range: &str, now: u64) -> Value {
             "longestStreakDays": longest_streak,
             "longestSessionMs": longest_session_ms,
             "peakDayTokens": peak_day,
+            "favoriteModel": favorite_model,
         },
         "heatmap": heatmap,
         "daily": daily,
@@ -603,6 +654,7 @@ fn build_snapshot(recs: &[UsageRecord], range: &str, now: u64) -> Value {
         "activity": {
             "hours": hours,
             "weekdays": weekdays,
+            "peakHour": peak_hour,
         },
         "topSessions": top_sessions,
     })

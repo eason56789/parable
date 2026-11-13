@@ -40,7 +40,11 @@ impl Default for EventHub {
 
 impl EventHub {
     pub fn new() -> Self {
-        let (tx, _) = broadcast::channel(4096);
+        // `text.delta` fires once per token, so a single long answer can be
+        // thousands of events. A small buffer made slow clients lag and lose
+        // events — including `turn.end`, which left the UI stuck on "thinking"
+        // forever. 64k events is a few MB at most and absorbs bursts.
+        let (tx, _) = broadcast::channel(64 * 1024);
         Self {
             tx,
             seq: Arc::new(AtomicU64::new(1)),
@@ -62,5 +66,56 @@ impl EventHub {
 
     pub fn subscribe(&self) -> broadcast::Receiver<Event> {
         self.tx.subscribe()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sequence_numbers_are_monotonic() {
+        let hub = EventHub::new();
+        let a = hub.publish("s", "turn.start", serde_json::json!({}));
+        let b = hub.publish("s", "turn.end", serde_json::json!({}));
+        assert!(b.seq > a.seq, "seq must increase");
+    }
+
+    #[tokio::test]
+    async fn slow_subscriber_is_told_it_lagged() {
+        // A subscriber that never reads must eventually get `Lagged` rather
+        // than silently missing events — that silence is what left the UI
+        // stuck on "thinking" (the missing turn.end never arrived).
+        let hub = EventHub::new();
+        let mut rx = hub.subscribe();
+        // Fill well past the buffer capacity.
+        for i in 0..70_000u32 {
+            hub.publish("s", "text.delta", serde_json::json!({ "i": i }));
+        }
+        // Drain until the receiver reports the gap. Events still in the
+        // buffer come first; the gap surfaces once those are consumed.
+        let mut lagged = false;
+        for _ in 0..200_000 {
+            match rx.recv().await {
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    assert!(n > 0);
+                    lagged = true;
+                    break;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                Ok(_) => {}
+            }
+        }
+        assert!(lagged, "a stalled subscriber must be told it lagged");
+    }
+
+    #[tokio::test]
+    async fn events_reach_a_prompt_subscriber() {
+        let hub = EventHub::new();
+        let mut rx = hub.subscribe();
+        hub.publish("s1", "turn.end", serde_json::json!({ "ms": 12 }));
+        let ev = rx.recv().await.expect("event must arrive");
+        assert_eq!(ev.kind, "turn.end");
+        assert_eq!(ev.session_id, "s1");
     }
 }
