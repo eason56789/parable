@@ -6,7 +6,7 @@
 <title>Parable</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&family=Inter:wght@400;500;600&display=swap">
 <style>
-:root{--bg:#faf9f5;--side:#f5f4ed;--fg:#141413;--fg2:#73726c;--line:rgba(31,30,29,.14);--input:#fff;--bubble:#f0eee6;--hov:rgba(31,30,29,.06);--accent:#d97757;--sans:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;--serif:"Source Serif 4",ui-serif,Georgia,"Songti SC","Noto Serif CJK SC",serif;--mono:ui-monospace,"SF Mono",Menlo,Consolas,"PingFang SC",monospace;--chat:var(--serif);--fs:16px;--w:760px;--blur:8px;--sf:1.5;--cd:calc(.65s * var(--animd));--animd:1;--anim:1;--code-bg:#1e1e1e;--code-fg:#d4d4d4;--code-ln:#6b7280;--uch1:#0b7fff;--uch2:#1e8a3e;--uch3:#9e77ed;--uch4:#e03131;--uch5:#e07b00;--uch6:#0aa7a7;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+:root{--bg:#faf9f5;--side:#f5f4ed;--fg:#141413;--fg2:#73726c;--line:rgba(31,30,29,.14);--input:#fff;--bubble:#f0eee6;--hov:rgba(31,30,29,.06);--accent:#d97757;--sans:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei","Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-serif;--serif:"Source Serif 4",ui-serif,Georgia,"Songti SC","Noto Serif CJK SC","Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",serif;--mono:ui-monospace,"SF Mono",Menlo,Consolas,"PingFang SC","Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",monospace;--chat:var(--serif);--fs:16px;--w:760px;--blur:8px;--sf:1.5;--cd:calc(.65s * var(--animd));--animd:1;--anim:1;--code-bg:#1e1e1e;--code-fg:#d4d4d4;--code-ln:#6b7280;--uch1:#0b7fff;--uch2:#1e8a3e;--uch3:#9e77ed;--uch4:#e03131;--uch5:#e07b00;--uch6:#0aa7a7;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
 @media(prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#262624;--side:#1f1e1d;--fg:#faf9f5;--fg2:#9c9a92;--line:rgba(222,220,209,.15);--input:#30302e;--bubble:#141413;--hov:rgba(222,220,209,.08);--uch1:#4099ff;--uch2:#46bf72;--uch3:#7b5ce5;--uch4:#ff5c5c;--uch5:#ff8a30;--uch6:#42c8c8}}
 :root[data-theme="dark"]{--bg:#262624;--side:#1f1e1d;--fg:#faf9f5;--fg2:#9c9a92;--line:rgba(222,220,209,.15);--input:#30302e;--bubble:#141413;--hov:rgba(222,220,209,.08);--uch1:#4099ff;--uch2:#46bf72;--uch3:#7b5ce5;--uch4:#ff5c5c;--uch5:#ff8a30;--uch6:#42c8c8}
 *{box-sizing:border-box}
@@ -443,11 +443,28 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 .mseg button:active{transform:scale(.93)}
 #toast{position:fixed;left:50%;bottom:calc(60px + env(safe-area-inset-bottom,0px));transform:translate(-50%,20px);background:var(--fg);color:var(--bg);padding:9px 16px;border-radius:10px;opacity:0;pointer-events:none;transition:opacity calc(.35s * var(--animd)),transform calc(.5s * var(--animd)) cubic-bezier(.16,.84,.3,1);z-index:110}
 #toast.show{opacity:1;transform:translate(-50%,0)}
+/* 自写的确认框：居中弹层 + 背景模糊（不用浏览器的 window.confirm） */
+#cfm{position:fixed;inset:0;z-index:120;display:grid;place-items:center;padding:20px;
+  background:rgba(0,0,0,0);-webkit-backdrop-filter:blur(0);backdrop-filter:blur(0);
+  opacity:0;pointer-events:none;
+  transition:opacity calc(.28s * var(--animd)) ease,background-color calc(.28s * var(--animd)) ease,backdrop-filter calc(.28s * var(--animd)) ease}
+#cfm.open{opacity:1;pointer-events:auto;background:rgba(0,0,0,.34);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)}
+.cfmb{width:min(400px,92vw);background:var(--bg);border:.5px solid var(--line);border-radius:14px;
+  padding:22px 24px 18px;box-shadow:0 24px 64px rgba(0,0,0,.34);
+  opacity:0;transform:translateY(10px) scale(.97);
+  transition:opacity calc(.26s * var(--animd)) ease,transform calc(.34s * var(--animd)) cubic-bezier(.16,.84,.3,1)}
+#cfm.open .cfmb{opacity:1;transform:none}
+.cfmt{font:400 15px/1.55 var(--sans);color:var(--fg);white-space:pre-wrap;word-break:break-word}
+.cfma{display:flex;justify-content:flex-end;gap:8px;margin-top:20px}
+.cfma .btn{min-width:78px;justify-content:center}
+.cfma .btn.ghost{background:none;color:var(--fg2);border:.5px solid var(--line)}
+.cfma .btn.ghost:hover{color:var(--fg);background:var(--hov)}
+.cfma .btn.danger{background:#c0392b;color:#fff;border:0}
+.cfma .btn.danger:hover{filter:brightness(1.08)}
 
 /* —— 模型设置 —— */
 .mp{display:flex;flex-direction:column;gap:16px;min-height:100%;max-width:1100px;margin:0 auto;padding:38px 44px 60px}
-@media(max-width:760px){.mp{padding:22px 20px 40px}}
-.mp-h{display:flex;align-items:flex-start;justify-content:space-between;gap:20px}
+@media(max-width:760px){.mp{padding:22px 20px 40px}}.mp-h{display:flex;align-items:flex-start;justify-content:space-between;gap:20px}
 .mp-h h2{margin:0;font:600 24px/1.2 var(--serif)}
 .mp-h p{margin:5px 0 0;color:var(--fg2);font-size:13px;line-height:1.5}
 .mp-ha{display:flex;align-items:center;gap:8px;flex:none}
@@ -886,6 +903,10 @@ body.dragging #main{outline:2px dashed var(--accent);outline-offset:-8px}
 <div id="modal"><div id="card"><nav id="snav"></nav><div id="sp"></div></div></div>
 <div id="cmdk"><div class="cmdb"><input id="cmdin" class="cmdin" placeholder="搜索对话或输入命令…" spellcheck="false" autocomplete="off"><div class="cmdl" id="cmdl"></div><div class="cmdf"><span><b>↑↓</b>选择</span><span><b>↵</b>打开</span><span><b>esc</b>关闭</span></div></div></div>
 <div id="kbd"><div class="kbdc" id="kbdc"></div></div>
+<div id="cfm"><div class="cfmb">
+  <div class="cfmt"></div>
+  <div class="cfma"><button class="btn ghost" data-cf="0"></button><button class="btn danger" data-cf="1"></button></div>
+</div></div>
 <div id="toast"></div>
 <div id="cm"></div>
 <input type="file" id="fileIn" multiple hidden>
@@ -1280,6 +1301,52 @@ function toast(m) {
   toast.h = setTimeout(() => e.classList.remove('show'), 2200);
 }
 
+/* ---- 自写的确认框 --------------------------------------------------
+   不用 window.confirm：浏览器原生弹窗在 WebView 里样式突兀、无法定制，
+   还会阻塞整个渲染进程。改成页面内的一个居中弹层：背景高斯模糊，
+   卡片淡入上浮，返回 Promise<boolean>。 */
+function confirmBox(message, opts) {
+  opts = opts || {};
+  const z = S.lang === 'zh';
+  const okText = opts.ok || (z ? '确定' : 'Confirm');
+  const cancelText = opts.cancel || (z ? '取消' : 'Cancel');
+  const wrap = $('#cfm');
+  const box = wrap.querySelector('.cfmb');
+  box.querySelector('.cfmt').textContent = message || '';
+  const okBtn = box.querySelector('[data-cf="1"]');
+  const cancelBtn = box.querySelector('[data-cf="0"]');
+  okBtn.textContent = okText;
+  cancelBtn.textContent = cancelText;
+  okBtn.className = 'btn ' + (opts.danger === false ? '' : 'danger');
+  cancelBtn.className = 'btn ghost';
+
+  return new Promise(resolve => {
+    let done = false;
+    const finish = v => {
+      if (done) return;
+      done = true;
+      wrap.classList.remove('open');
+      document.removeEventListener('keydown', onKey, true);
+      okBtn.onclick = null;
+      cancelBtn.onclick = null;
+      wrap.onclick = null;
+      resolve(v);
+    };
+    const onKey = e => {
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); finish(false); }
+      else if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); finish(true); }
+    };
+    okBtn.onclick = () => finish(true);
+    cancelBtn.onclick = () => finish(false);
+    // 点背景 = 取消
+    wrap.onclick = e => { if (e.target === wrap) finish(false); };
+    document.addEventListener('keydown', onKey, true);
+    wrap.classList.add('open');
+    // 焦点落在确认按钮上，回车直接确认
+    setTimeout(() => okBtn.focus(), 60);
+  });
+}
+
 document.addEventListener('click', e => {
   const x = e.target.closest('[data-toast]');
   if (x) toast(x.dataset.toast);
@@ -1421,7 +1488,7 @@ function bindAutoPage(root) {
       b.onclick = async () => {
         const act = b.dataset.act;
         // 删除任务不可恢复，先轻确认
-        if (act === 'del' && !window.confirm(z ? '确定删除这个任务？' : 'Delete this task?')) return;
+        if (act === 'del' && !(await confirmBox(z ? '确定删除这个任务？' : 'Delete this task?'))) return;
         try {
           if (act === 'del') {
             await api('/schedule/' + id, { method: 'DELETE' });
@@ -1686,8 +1753,8 @@ function bindTeamPage(root) {
     row.querySelectorAll('[data-act]').forEach(b => {
       b.onclick = async () => {
         const act = b.dataset.act;
-        if (act === 'claim' && !window.confirm(z ? '认领这个任务？' : 'Claim this task?')) return;
-        if (act === 'delete' && !window.confirm(z ? '删除这个任务？' : 'Delete this task?')) return;
+        if (act === 'claim' && !(await confirmBox(z ? '认领这个任务？' : 'Claim this task?'))) return;
+        if (act === 'delete' && !(await confirmBox(z ? '删除这个任务？' : 'Delete this task?'))) return;
         try {
           await api('/team/tasks/' + encodeURIComponent(tid), {
             method: 'PATCH',
@@ -2599,7 +2666,116 @@ let sessRefreshAt = 0;   // 他会话事件触发侧边栏静默刷新的去抖�
  *  - tool.result 在后端 fold+落库之后才发出，此刻缓冲里全是已入库内容，清零；
  *  - turn.end 时整个 turn 都已落库，整个缓冲删掉。
  *  于是缓冲里始终只剩「未落库的在途文本」，切回来补渲染不会重复也不会丢。 */
+/**
+ * 渲染一段思考内容（实时流与切回重放共用）。
+ */
+function renderReasoning(text) {
+  if (!curA) return;
+  if (!curThinkEl) {
+    curThinkEl = document.createElement('div');
+    curThinkEl.className = 'th open';
+    curThinkEl.innerHTML = '<button class="thh"><span class="shim">' + t('thinking') + '</span>' +
+      ic('chev') + '</button><div class="thb"><div class="thbody"></div></div>';
+    const thinkEl = curThinkEl;
+    thinkEl.querySelector('.thh').onclick = () => {
+      // 用户点过头的块不再自动收起——人已经接管了这个块的开合
+      thinkEl.dataset.user = '1';
+      thinkEl.classList.toggle('open');
+    };
+    // Append at the current end of the body: reasoning that happens after a
+    // tool call belongs visually after that card, not above every card.
+    curA.querySelector('.ab').append(curThinkEl);
+    if (!thinkStart) thinkStart = Date.now();
+  }
+  const body = curThinkEl.querySelector('.thbody');
+  body.textContent = (body.textContent || '') + (text || '');
+  follow();
+  // 思考过长自动半收起：超过阈值折起（头部状态仍可见），
+  // 避免长思考占满整个屏幕。用户手动展开过则不再干预。
+  if (!curThinkEl.dataset.user && !curThinkEl.dataset.folded) {
+    const txt = body.textContent || '';
+    if ((txt.match(/\n/g) || []).length > 8) {
+      curThinkEl.classList.remove('open');
+      curThinkEl.dataset.folded = '1';
+    }
+  }
+}
+
+/**
+ * 重放一条在途事件（切走再切回来时用）。
+ *
+ * 只重建视图，不重新记账 —— 否则重放会再次写进 SHADOW，越滚越大。
+ */
+function replayEvent(ev) {
+  if (!curA) return;
+  switch (ev.type) {
+    case 'reasoning.delta':
+      renderReasoning(ev.text || '');
+      break;
+    case 'tool.call': {
+      finishThink(curThinkEl);
+      curThinkEl = null;
+      thinkStart = 0;
+      curStream = null;
+      const card = toolCard(curA.querySelector('.ab'), ev.callId, ev.tool, ev.title || ev.tool);
+      toolEls[ev.callId] = card;
+      break;
+    }
+    case 'tool.result': {
+      const card = toolEls[ev.callId];
+      fillToolCard(card, ev.display, ev.ok, ev.title);
+      break;
+    }
+    case 'tool.progress': {
+      const card = toolEls[ev.callId];
+      if (card && ev.chunk != null && ev.chunk !== '') {
+        let pre = card.querySelector('.prog');
+        if (!pre) {
+          pre = document.createElement('pre');
+          pre.className = 'prog';
+          card.querySelector('.dc-in').append(pre);
+        }
+        pre.textContent = (pre.textContent || '') + ev.chunk;
+      }
+      break;
+    }
+  }
+}
+
 const SHADOW = {};
+/** 在途事件序列：思考块、工具卡片都记一份。切走再切回来时按序重放，
+ *  思考过程与工具卡片才不会被截断。
+ *  记账规则：
+ *  - reasoning.delta 合并进同一条（连续思考块只是一段文本）；
+ *  - tool.progress 每个 callId 只留最后一条（增量输出）；
+ *  - text.delta 不进序列（正文由 sh.text 单独累加）。 */
+function shadowPush(sid, ev) {
+  const sh = (SHADOW[sid] ||= { text: '', events: [] });
+  if (ev.type === 'text.delta') return;
+  if (ev.type === 'tool.result') {
+    // 落库点：此刻之前的内容（思考块、工具卡片）都已入库，切回来从存储
+    // 里就能读到，序列里必须清掉，否则重放会和历史消息重复。
+    sh.events = [];
+    sh.text = '';
+    return;
+  }
+  if (ev.type === 'reasoning.delta') {
+    const last = sh.events[sh.events.length - 1];
+    if (last && last.type === 'reasoning.delta') {
+      last.text = (last.text || '') + (ev.text || '');
+      return;
+    }
+    sh.events.push({ type: 'reasoning.delta', text: ev.text || '' });
+    return;
+  }
+  if (ev.type === 'tool.progress') {
+    const i = sh.events.findIndex(e => e.type === 'tool.progress' && e.callId === ev.callId);
+    if (i >= 0) sh.events.splice(i, 1);
+    sh.events.push(ev);
+    return;
+  }
+  sh.events.push(ev);
+}
 /** 每个会话「turn 在途」标记：turn.start 置位、turn.end 清除。文本还没开始
  *  流时 SHADOW 里没有条目，切回来要靠它恢复流式 UI（否则 sig 还挂着 stop，
  *  后续正文字符会被逐字写入循环全部丢弃）。 */
@@ -2634,9 +2810,11 @@ function dispatch(ev) {
     return;
   }
   if (ev.type === 'text.delta') {
-    (SHADOW[ev.sessionId] ||= { text: '' }).text += (ev.text || '');
-  } else if (ev.type === 'tool.result' && SHADOW[ev.sessionId]) {
-    SHADOW[ev.sessionId].text = '';
+    (SHADOW[ev.sessionId] ||= { text: '', events: [] }).text += (ev.text || '');
+  } else if (ev.type === 'reasoning.delta' || ev.type === 'tool.call' ||
+             ev.type === 'tool.result' || ev.type === 'tool.progress') {
+    // 记下在途事件序列：切走再切回来时按序重放，思考块与工具卡片才不会被截断。
+    shadowPush(ev.sessionId, ev);
   }
   // conv.id 为 null（新会话首条消息在途、POST /chat 响应未返回）时不能丢事件：
   // session.start 事件会先到并绑定 id，这里只对「已绑定且不匹配」的会话过滤。
@@ -2699,36 +2877,7 @@ function dispatch(ev) {
       // 思考强度设为「关闭」时，供应商仍会吐 reasoning_content；直接丢弃，
       // 不要造出一个既点不开又没内容的思考块。
       if (S.lvl === 0) break;
-      if (!curThinkEl && curA) {
-        curThinkEl = document.createElement('div');
-        curThinkEl.className = 'th open';
-        curThinkEl.innerHTML = '<button class="thh"><span class="shim">' + t('thinking') + '</span>' +
-          ic('chev') + '</button><div class="thb"><div class="thbody"></div></div>';
-        const thinkEl = curThinkEl;
-        thinkEl.querySelector('.thh').onclick = () => {
-          // 用户点过头的块不再自动收起——人已经接管了这个块的开合
-          thinkEl.dataset.user = '1';
-          thinkEl.classList.toggle('open');
-        };
-        // Append at the current end of the body: reasoning that happens after a
-        // tool call belongs visually after that card, not above every card.
-        curA.querySelector('.ab').append(curThinkEl);
-        if (!thinkStart) thinkStart = Date.now();
-      }
-      if (curThinkEl) {
-        const body = curThinkEl.querySelector('.thbody');
-        body.textContent = (body.textContent || '') + (ev.text || '');
-        follow();
-        // 思考过长自动半收起：超过阈值折起（头部状态仍可见），
-        // 避免长思考占满整个屏幕。用户手动展开过则不再干预。
-        if (!curThinkEl.dataset.user && !curThinkEl.dataset.folded) {
-          const txt = body.textContent || '';
-          if ((txt.match(/\n/g) || []).length > 8) {
-            curThinkEl.classList.remove('open');
-            curThinkEl.dataset.folded = '1';
-          }
-        }
-      }
+      renderReasoning(ev.text || '');
       break;
 
     case 'text.delta':
@@ -3346,8 +3495,11 @@ function collapseGone(el, done) {
  * group of them (assistant steps + merged tool results), so its range is
  * [mi, miEnd). Deleting the visible bubble deletes exactly that range.
  */
-function deleteMsg(el) {
+async function deleteMsg(el) {
   if (!el || busy) return;   // 生成中不动消息，避免与在途下标错位
+  const z = S.lang === 'zh';
+  // 删除不可恢复，确认一下
+  if (!(await confirmBox(z ? '确定删除这条消息？' : 'Delete this message?', { danger: false }))) return;
   const idx = el.dataset.mi;
   collapseGone(el, restamp);
   if (conv && conv.id && idx != null && idx !== 'null') {
@@ -3811,16 +3963,22 @@ async function openSession(id, focusMsg) {
     }
     // 切走期间该会话的 turn 还在跑（SHADOW 记账 / INFLIGHT 在途标记）：
     // 恢复流式 UI——否则 sig 还挂着 stop、curA 是空的，后续 delta 无处追加。
-    // 影子里有在途文本的话一并补渲染回去。
     const sh = SHADOW[id];
     if (sh || INFLIGHT[id]) {
       busy = true;
       sig = { stop: false };
       sync();
       startTurnUI();
+      // 先按序重放在途事件：思考块与工具卡片必须回到原位，否则切回来
+      // 只剩最后一段正文，思考过程看起来被截断。
+      if (sh && sh.events && sh.events.length) {
+        for (const e of sh.events) replayEvent(e);
+      }
       // 在途文本作为已提交块直接渲染，不逐字动画——逐字会让几百个字符
       // 各自排队 1 秒的 pop，视觉上像卡住。
       if (sh && sh.text.trim()) {
+        curStream = null;
+        curThinkEl = null;
         renderBlocks(curA.querySelector('.ab'), sh.text);
         curText = sh.text;
         follow();
@@ -4035,21 +4193,23 @@ function renameChat(c, el) {
 function deleteChat(c, el) {
   if (!el) return;
   // 删除会话不可恢复，先轻确认（双语）
-  if (!window.confirm(t('cf_del_chat'))) return;
-  el.style.height = el.offsetHeight + 'px';
-  void el.offsetHeight;
-  el.classList.add('out');
-  setTimeout(() => {
-    el.style.height = '0px';
-    el.style.paddingTop = '0px';
-    el.style.paddingBottom = '0px';
-  }, A(360));
-  setTimeout(() => {
-    el.remove();
-    sortRcs();
-    if (conv && conv.id === c.id) newChat();
-  }, A(760));
-  api('/sessions/' + c.id, { method: 'DELETE' }).catch(() => {});
+  confirmBox(t('cf_del_chat')).then(ok => {
+    if (!ok) return;
+    el.style.height = el.offsetHeight + 'px';
+    void el.offsetHeight;
+    el.classList.add('out');
+    setTimeout(() => {
+      el.style.height = '0px';
+      el.style.paddingTop = '0px';
+      el.style.paddingBottom = '0px';
+    }, A(360));
+    setTimeout(() => {
+      el.remove();
+      sortRcs();
+      if (conv && conv.id === c.id) newChat();
+    }, A(760));
+    api('/sessions/' + c.id, { method: 'DELETE' }).catch(() => {});
+  });
 }
 
 CM.addEventListener('click', e => {
@@ -5429,7 +5589,7 @@ $('#sp').addEventListener('click', async e => {
   if (e.target.closest('[data-ugref]')) { loadUsage(); return; }
 });
 
-$('#sp').addEventListener('click', e => {
+$('#sp').addEventListener('click', async e => {
   if (tab !== 'm') return;
   const sel = e.target.closest('[data-mpsel]');
   if (sel) { mpSel = sel.dataset.mpsel; mpList(); mpDetail(); return; }
@@ -5472,7 +5632,7 @@ $('#sp').addEventListener('click', e => {
     const p = mpCur();
     const m = (p.models || [])[+md.dataset.mpmdel];
     if (!m) return;
-    if (!window.confirm(t('mp_del_model').replace('{n}', m.name || m.id))) return;
+    if (!(await confirmBox(t('mp_del_model').replace('{n}', m.name || m.id)))) return;
     pushProvider({ id: p.id, models: [{ id: m.id, deleted: true }] });
     return;
   }
@@ -5482,7 +5642,7 @@ $('#sp').addEventListener('click', e => {
   if (pd) {
     const p = mpCur();
     if (!p) return;
-    if (!window.confirm(t('mp_del_confirm').replace('{n}', mpName(p)))) return;
+    if (!(await confirmBox(t('mp_del_confirm').replace('{n}', mpName(p))))) return;
     api('/config', { method: 'PATCH', body: { providers: [{ id: p.id, deleted: true }] } })
       .then(() => {
         mpSel = null;

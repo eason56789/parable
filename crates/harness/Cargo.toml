@@ -45,6 +45,9 @@ hex = { workspace = true }
 clap = { workspace = true }
 regex = "1"
 shell-words = "1"
+# Windows 控制台/cmd 输出是系统 ANSI 码页（中文是 GBK/GB18030），
+# 按 UTF-8 解会整段乱码。encoding_rs 提供 GBK 与 UTF-8 的严格解码。
+encoding_rs = "0.8"
 cron = "0.15"
 tokio-tungstenite = "0.24"
 chrono-tz = "0.10"

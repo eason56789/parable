@@ -24,7 +24,7 @@ fn shell_pair() -> (String, Vec<String>) {
             .output()
             .ok()
             .and_then(|o| {
-                String::from_utf8_lossy(&o.stdout)
+                decode_bytes(&o.stdout)
                     .lines()
                     .next()
                     .map(|s| s.trim().to_string())
@@ -64,12 +64,27 @@ fn kill_tree(child: &mut tokio::process::Child) {
     let _ = child.start_kill();
 }
 
-/// 把一行原始字节(可能含坏 UTF-8)安全转成字符串,去掉行尾换行;
-/// 坏字节以替换符呈现,不再让整段输出丢失或提前收尾。
+/// 把一行原始字节转成字符串,去掉行尾换行。
+///
+/// Windows 上 cmd / PowerShell / 多数原生程序输出的是**系统 ANSI 码页**
+/// (简体中文是 GBK/GB18030),按 UTF-8 解会整段变成 `�`。所以先严格试
+/// UTF-8,不是合法 UTF-8 时回退到 GB18030(GBK 的超集,兼容 CP936)。
+/// 两者都不成立才用替换符兜底,不让整段输出丢失。
 fn decode_line(raw: &[u8]) -> String {
-    String::from_utf8_lossy(raw)
-        .trim_end_matches(|c| c == '\r' || c == '\n')
+    let s = decode_bytes(raw);
+    s.trim_end_matches(|c| c == '\r' || c == '\n')
         .to_string()
+}
+
+/// 按内容猜编码地解码一段字节。
+fn decode_bytes(raw: &[u8]) -> String {
+    // 严格 UTF-8 优先:Unix 工具与刻意输出 UTF-8 的程序都走这条。
+    if let Ok(s) = std::str::from_utf8(raw) {
+        return s.to_string();
+    }
+    // Windows 系统码页:简体中文是 CP936(GBK),GB18030 是其超集。
+    let (cow, _, _) = encoding_rs::GB18030.decode(raw);
+    cow.into_owned()
 }
 
 /// Run `command` in `cwd`, streaming its output.
@@ -330,7 +345,65 @@ mod tests {
         assert_eq!(decode_line(b"hello\r\n"), "hello");
         assert_eq!(decode_line(b"hello\n"), "hello");
         assert_eq!(decode_line(b"hello"), "hello");
-        // 坏字节 → 替换符,行不丢
+    }
+
+    #[test]
+    fn decode_line_reads_gbk_chinese() {
+        // Windows 命令的输出是系统 ANSI 码页(中文 CP936/GBK)。
+        // 按 UTF-8 解会整段变乱码 —— 这正是「命令跑出来全是 �」的根因。
+        let gbk: Vec<u8> = encoding_rs::GBK.encode("无法识别 MAYBE_FIRST_START.Name 的名称").0.into_owned();
+        assert!(!gbk.is_ascii());
+        // 不是合法 UTF-8，必须走 GB18030 回退
+        assert!(std::str::from_utf8(&gbk).is_err());
+        assert_eq!(decode_line(&gbk), "无法识别 MAYBE_FIRST_START.Name 的名称");
+    }
+
+    #[test]
+    fn decode_line_prefers_utf8() {
+        // 合法 UTF-8 优先，不能被 GBK 误解码
+        assert_eq!(decode_line("中文 ok".as_bytes()), "中文 ok");
+    }
+
+    #[test]
+    fn decode_line_survives_undecodable_bytes() {
+        // 两边都解不了时用替换符兜底，行不能丢
         assert_eq!(decode_line(&[0x61, 0xff, 0x62]), "a\u{FFFD}b");
+    }
+}
+
+#[cfg(test)]
+mod live_windows_tests {
+    //! 在真实 Windows 上验证码页解码（只在 Windows 上跑）。
+    use super::*;
+
+    #[tokio::test]
+    #[cfg(windows)]
+    async fn decodes_real_gbk_command_output() {
+        // PowerShell 的中文错误信息是 GBK/CP936 —— 之前整段显示为乱码。
+        // 用 cmd 触发一条中文错误消息（"不是内部或外部命令"），它是 GBK 编码。
+        let out = tokio::process::Command::new("cmd")
+            .args(["/C", "echo 中文测试 & 不存在的命令名"])
+            .output()
+            .await;
+        let out = match out {
+            Ok(o) => o,
+            Err(_) => return,   // 环境没有 powershell，跳过
+        };
+        let raw: Vec<u8> = [
+            out.stdout.as_slice(),
+            out.stderr.as_slice(),
+        ].concat();
+        if raw.is_empty() {
+            return;
+        }
+        let decoded = decode_bytes(&raw);
+        // 关键：不能出现替换符（那说明按错误编码解了）
+        assert!(
+            !decoded.contains('\u{FFFD}'),
+            "decoded output must not contain replacement chars: {decoded}"
+        );
+        // 至少要能解出中文
+        let has_cjk = decoded.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c));
+        assert!(has_cjk, "expected CJK text in decoded output, got: {decoded}");
     }
 }

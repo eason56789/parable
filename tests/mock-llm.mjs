@@ -10,12 +10,16 @@
 import http from 'node:http';
 
 const PORT = Number(process.argv[2] || 8899);
+// 每段之间的延迟（毫秒）。设大一点可以模拟慢模型，用来测「切走再切回」。
+const DELAY = Number(process.argv[3] || 0);
 
 function sse(res, obj) {
   const name = obj.type || 'message';
   res.write(`event: ${name}\n`);
   res.write(`data: ${JSON.stringify(obj)}\n\n`);
 }
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 const server = http.createServer((req, res) => {
   if (req.method !== 'POST' || !req.url.endsWith('/v1/messages')) {
@@ -24,7 +28,7 @@ const server = http.createServer((req, res) => {
   }
   let body = '';
   req.on('data', c => (body += c));
-  req.on('end', () => {
+  req.on('end', async () => {
     let payload = {};
     try { payload = JSON.parse(body); } catch (e) {}
 
@@ -47,30 +51,46 @@ const server = http.createServer((req, res) => {
       },
     });
 
-    const emitText = (index, text) => {
+    const emitText = async (index, text) => {
       sse(res, {
         type: 'content_block_start', index,
         content_block: { type: 'text', text: '' },
       });
       for (const chunk of split(text)) {
+        if (DELAY) await sleep(DELAY);
         sse(res, { type: 'content_block_delta', index, delta: { type: 'text_delta', text: chunk } });
       }
       sse(res, { type: 'content_block_stop', index });
     };
 
-    if (!hasResult) {
-      emitText(0, 'I will read the README first, then answer.');
+    // 思考块（thinking）：与真实 provider 一样单独一个 content block。
+    const emitThinking = async (index, text) => {
       sse(res, {
-        type: 'content_block_start', index: 1,
+        type: 'content_block_start', index,
+        content_block: { type: 'thinking', thinking: '' },
+      });
+      for (const chunk of split(text)) {
+        if (DELAY) await sleep(DELAY);
+        sse(res, { type: 'content_block_delta', index, delta: { type: 'thinking_delta', thinking: chunk } });
+      }
+      sse(res, { type: 'content_block_stop', index });
+    };
+
+    if (!hasResult) {
+      await emitThinking(0, 'The user asks for a short answer. I should read the README first, then reply.');
+      await emitText(1, 'I will read the README first, then answer.');
+      sse(res, {
+        type: 'content_block_start', index: 2,
         content_block: { type: 'tool_use', id: 'toolu_mock1', name: 'read_file', input: {} },
       });
       const args = JSON.stringify({ path: 'Cargo.toml', limit: 5 });
       for (const chunk of split(args)) {
-        sse(res, { type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: chunk } });
+        sse(res, { type: 'content_block_delta', index: 2, delta: { type: 'input_json_delta', partial_json: chunk } });
       }
-      sse(res, { type: 'content_block_stop', index: 1 });
+      sse(res, { type: 'content_block_stop', index: 2 });
     } else {
-      emitText(0, 'Done. The workspace has a Cargo workspace with two crates.');
+      await emitThinking(0, 'The README has been read. Now I can answer.');
+      await emitText(1, 'Done. The workspace has a Cargo workspace with two crates.');
     }
 
     sse(res, {

@@ -1586,6 +1586,7 @@ dependencies = [
  "clap",
  "cron",
  "dirs 6.0.0",
+ "encoding_rs",
  "eventsource-stream",
  "futures",
  "globset",
