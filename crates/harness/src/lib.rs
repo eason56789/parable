@@ -2,6 +2,7 @@
 
 pub mod agent;
 pub mod computer;
+pub mod desktop;
 pub mod config;
 pub mod error;
 pub mod event;

@@ -175,6 +175,8 @@ pub struct ToolCtx {
     pub search_pref: String,
     /// Computer-use bridge (CDP); present when the runtime mounts it.
     pub computer: Option<Arc<crate::computer::ComputerBridge>>,
+    /// OS 级桌面桥（截屏 + UIA + SendInput；仅 Windows）。
+    pub desktop: Option<Arc<crate::desktop::DesktopBridge>>,
 }
 
 impl ToolCtx {
@@ -854,6 +856,83 @@ skill matches the current request, then follow the steps it contains. Read-only.
                     "until_text": str_prop("Keep waiting (within seconds) until this text appears"),
                 }), &[]),
             },
+            // ---- desktop use（OS 级：真实鼠标键盘 + UIA 无障碍树；仅 Windows）----
+            ToolSpec {
+                name: "desktop_snapshot".into(),
+                description: "PRIMARY desktop observation: the foreground window's UIA accessibility tree (interactive elements carry stable [rN] refs + physical screen coordinates, edit values, focused/disabled marks) AND a full-screen screenshot in ONE call. Coordinates align with screenshot pixels unless a scale note is present. Re-snapshot whenever the screen changed.".into(),
+                input_schema: obj(json!({
+                    "scope": str_prop("focused (default) | all — all walks every visible window"),
+                }), &[]),
+            },
+            ToolSpec {
+                name: "desktop_screenshot".into(),
+                description: "Capture ONLY a desktop screenshot (full virtual screen, or a region with x/y/width/height in physical pixels). Screens wider than 1568px are downscaled with a scale note — use tree coordinates for actions.".into(),
+                input_schema: obj(json!({
+                    "x": int_prop("Region left (with y/width/height)"),
+                    "y": int_prop("Region top"),
+                    "width": int_prop("Region width"),
+                    "height": int_prop("Region height"),
+                }), &[]),
+            },
+            ToolSpec {
+                name: "desktop_extract".into(),
+                description: "Read the focused window's textual content (document/edit/text nodes + input values) as plain text — cheapest way to read what an app shows.".into(),
+                input_schema: obj(json!({
+                    "hwnd": int_prop("Optional window handle (default: foreground window)"),
+                }), &[]),
+            },
+            ToolSpec {
+                name: "desktop_click".into(),
+                description: "Click with the REAL mouse: by ref from the latest desktop_snapshot (preferred) or physical screen coordinates. Sends a mouse-move first. button: left/right/middle; clicks: 1-3.".into(),
+                input_schema: obj(json!({
+                    "ref": int_prop("Element ref rN from the latest desktop_snapshot (preferred)"),
+                    "x": int_prop("Physical screen X (fallback when no ref)"),
+                    "y": int_prop("Physical screen Y"),
+                    "button": str_prop("left | right | middle (default left)"),
+                    "clicks": int_prop("1 = single, 2 = double, 3 = triple (default 1)"),
+                }), &[]),
+            },
+            ToolSpec {
+                name: "desktop_type".into(),
+                description: "Type text with the REAL keyboard into whatever has focus (unicode-safe incl. Chinese; newline = Enter). desktop_click the field first.".into(),
+                input_schema: obj(json!({
+                    "text": str_prop("Text to type"),
+                }), &["text"]),
+            },
+            ToolSpec {
+                name: "desktop_key".into(),
+                description: "Press a real key or combo: Enter, Tab, Escape, Backspace, Delete, Home, End, PageUp, PageDown, arrows, F1-F24, letters/digits, or combos like Control+c, Alt+Tab, Meta (Win key).".into(),
+                input_schema: obj(json!({
+                    "key": str_prop("Key name or modifier combo"),
+                }), &["key"]),
+            },
+            ToolSpec {
+                name: "desktop_scroll".into(),
+                description: "Real mouse wheel at the cursor, at x/y, or at a ref's position. direction: up/down/left/right; notches: wheel clicks (default 1).".into(),
+                input_schema: obj(json!({
+                    "direction": str_prop("up | down | left | right"),
+                    "notches": int_prop("Wheel notches (default 1)"),
+                    "ref": int_prop("Scroll at this element's position"),
+                    "x": int_prop("Physical screen X"),
+                    "y": int_prop("Physical screen Y"),
+                }), &["direction"]),
+            },
+            ToolSpec {
+                name: "desktop_drag".into(),
+                description: "Press, drag with interpolated real mouse moves, release (sliders, canvas, window moving). from/to each take {ref} or {x,y} (flat x1/y1/x2/y2 also accepted).".into(),
+                input_schema: obj(json!({
+                    "from": json!({"type":"object","description":"Start: {ref} or {x,y}"}),
+                    "to": json!({"type":"object","description":"End: {ref} or {x,y}"}),
+                }), &[]),
+            },
+            ToolSpec {
+                name: "desktop_window".into(),
+                description: "Manage real windows: list (visible windows with hwnd, * = foreground), focus, minimize, maximize, close (graceful WM_CLOSE — the app decides whether to exit).".into(),
+                input_schema: obj(json!({
+                    "action": str_prop("list | focus | minimize | maximize | close"),
+                    "hwnd": int_prop("Window handle (from action=list)"),
+                }), &[]),
+            },
             // ---- plugin management & authoring (the agent maintains its own plugins) ----
             ToolSpec {
                 name: "plugin_list".into(),
@@ -962,6 +1041,15 @@ skill matches the current request, then follow the steps it contains. Read-only.
             "computer_navigate" => crate::computer::navigate(args, ctx).await,
             "computer_tabs" => crate::computer::tabs(args, ctx).await,
             "computer_wait" => crate::computer::wait_ms(args, ctx).await,
+            "desktop_snapshot" => crate::desktop::snapshot(args, ctx).await,
+            "desktop_screenshot" => crate::desktop::screenshot(args, ctx).await,
+            "desktop_extract" => crate::desktop::extract(args, ctx).await,
+            "desktop_click" => crate::desktop::click(args, ctx).await,
+            "desktop_type" => crate::desktop::type_text(args, ctx).await,
+            "desktop_key" => crate::desktop::key(args, ctx).await,
+            "desktop_scroll" => crate::desktop::scroll(args, ctx).await,
+            "desktop_drag" => crate::desktop::drag(args, ctx).await,
+            "desktop_window" => crate::desktop::window(args, ctx).await,
             "plugin_list" | "plugin_create" | "plugin_edit" | "plugin_toggle" | "plugin_delete" => {
                 let r = crate::tools::plugin_admin(name, args, ctx).await;
                 if r.is_ok()
