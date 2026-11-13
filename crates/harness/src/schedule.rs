@@ -71,11 +71,6 @@ impl Timing {
         }
     }
 
-    /// True when the rule produces no further occurrences after `after`.
-    pub fn is_exhausted_after(&self, after: DateTime<Utc>) -> bool {
-        self.next_after(after, None).is_none()
-    }
-
     /// Next occurrence strictly after `after`, in UTC.
     ///
     /// `anchor` is the previously committed occurrence for interval rules, so
@@ -355,22 +350,49 @@ pub struct ScheduleStore {
 impl ScheduleStore {
     pub fn new() -> Self {
         let path = crate::config::Config::home_dir().join("schedule.json");
-        let inner = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|s| serde_json::from_str::<Persisted>(&s).ok())
-            .map(|p| p.tasks.into_iter().map(|t| (t.id.clone(), t)).collect())
-            .unwrap_or_default();
+        let inner = match std::fs::read_to_string(&path) {
+            Ok(s) => match serde_json::from_str::<Persisted>(&s) {
+                Ok(p) => p.tasks.into_iter().map(|t| (t.id.clone(), t)).collect(),
+                Err(e) => {
+                    // 损坏文件：先备份原始数据再回退空表，绝不静默清空。
+                    let ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    let mut bak = path.clone().into_os_string();
+                    bak.push(format!(".corrupt-{ts}"));
+                    let backup = PathBuf::from(bak);
+                    match std::fs::rename(&path, &backup) {
+                        Ok(()) => tracing::error!(
+                            "schedule.json parse failed ({e}); original backed up to {}",
+                            backup.display()
+                        ),
+                        Err(be) => tracing::error!(
+                            "schedule.json parse failed ({e}); backup rename failed: {be}, file left in place"
+                        ),
+                    }
+                    HashMap::new()
+                }
+            },
+            Err(_) => HashMap::new(),
+        };
         Self {
             path,
             inner: RwLock::new(inner),
         }
     }
 
+    /// 原子落盘（lib.rs 的 atomic_write：临时文件 + rename），失败记 error。
     async fn persist(&self, map: &HashMap<String, Task>) {
         let mut tasks: Vec<Task> = map.values().cloned().collect();
         tasks.sort_by(|a, b| a.created_at.cmp(&b.created_at));
-        if let Ok(json) = serde_json::to_string_pretty(&Persisted { tasks }) {
-            let _ = std::fs::write(&self.path, json);
+        match serde_json::to_string_pretty(&Persisted { tasks }) {
+            Ok(json) => {
+                if let Err(e) = crate::atomic_write(&self.path, json.as_bytes()) {
+                    tracing::error!("schedule.json persist failed: {e}");
+                }
+            }
+            Err(e) => tracing::error!("schedule.json serialize failed: {e}"),
         }
     }
 
@@ -417,11 +439,38 @@ impl ScheduleStore {
 pub struct ScheduleService {
     store: Arc<ScheduleStore>,
     hub: EventHub,
+    /// 注入的共享 SessionStore（`with_sessions`）；未注入时退回临时 store。
+    sessions: Option<crate::session::SharedStore>,
+    /// 注入的 workspace 根（`with_workspace`）；Reuse/NewEachTime 建会话用。
+    workspace: PathBuf,
 }
 
 impl ScheduleService {
     pub fn new(store: Arc<ScheduleStore>, hub: EventHub) -> Self {
-        Self { store, hub }
+        Self {
+            store,
+            hub,
+            sessions: None,
+            workspace: PathBuf::from("."),
+        }
+    }
+
+    /// 注入共享 SessionStore（server.rs 装配时调用）。
+    pub fn with_sessions(mut self, sessions: crate::session::SharedStore) -> Self {
+        self.sessions = Some(sessions);
+        self
+    }
+
+    /// 注入 workspace 根路径（server.rs 装配时调用）。
+    pub fn with_workspace(mut self, workspace: PathBuf) -> Self {
+        self.workspace = workspace;
+        self
+    }
+
+    fn session_store(&self) -> crate::session::SharedStore {
+        self.sessions
+            .clone()
+            .unwrap_or_else(|| Arc::new(crate::session::SessionStore::new()))
     }
 
     pub fn store(&self) -> Arc<ScheduleStore> {
@@ -484,6 +533,14 @@ impl ScheduleService {
 
     /// Tasks that are due at `now`, with catch-up applied.
     /// Returns `(task, fired_at)` pairs; the caller delivers and then records the run.
+    ///
+    /// 竞态说明：catch_up 的"读-改-写"放进同一把写锁里完成，消除了原先
+    /// `get()` 克隆副本与 `update()` 回写之间的窗口。last_run_at / run_count
+    /// 的推进语义：投递在本函数之外由调用方 fire-and-forget 执行（拿不到
+    /// 投递结果），因此这里在**任何投递 spawn 之前**就推进 scheduled_at
+    /// （catch_up 本身）并把 last_run_at 记为本次应触发的 fired 时刻——
+    /// 采用 latest-only 语义：即使投递失败也不会重复触发同一次 occurrence，
+    /// 代价是投递丢失只留下调用方日志。
     pub async fn due(&self, now: DateTime<Utc>) -> Vec<(Task, DateTime<Utc>)> {
         let mut out = Vec::new();
         let ids: Vec<String> = {
@@ -494,47 +551,77 @@ impl ScheduleService {
                 .collect()
         };
         for id in ids {
-            // Catch up on a mutable copy, then persist the advanced state.
-            if let Some(mut t) = self.store.get(&id).await {
-                let fired = t.catch_up(now);
-                if let Some(f) = fired {
-                    self.store
-                        .update(&id, |x| {
-                            x.scheduled_at = t.scheduled_at.clone();
-                            x.status = t.status;
-                            x.last_run_at =
-                                Some(now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
-                            x.run_count += 1;
-                        })
-                        .await
-                        .ok();
-                    out.push((t, f));
-                } else {
-                    self.store
-                        .update(&id, |x| {
-                            x.scheduled_at = t.scheduled_at.clone();
-                            x.status = t.status;
-                        })
-                        .await
-                        .ok();
+            let (changed, fired) = {
+                let mut m = self.store.inner.write().await;
+                let Some(t) = m.get_mut(&id) else { continue };
+                let before = (
+                    t.scheduled_at.clone(),
+                    t.status,
+                    t.last_run_at.clone(),
+                    t.run_count,
+                );
+                let f = t.catch_up(now);
+                if let Some(fired_at) = f {
+                    // last_run_at 记为“应触发”的 fired 时刻（而非投递时刻）。
+                    t.last_run_at =
+                        Some(fired_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+                    t.run_count += 1;
                 }
+                let changed = before
+                    != (
+                        t.scheduled_at.clone(),
+                        t.status,
+                        t.last_run_at.clone(),
+                        t.run_count,
+                    );
+                (changed, f.map(|fired_at| (t.clone(), fired_at)))
+            };
+            if changed {
+                let m = self.store.inner.read().await;
+                self.store.persist(&m).await;
+            }
+            if let Some(pair) = fired {
+                out.push(pair);
             }
         }
         out
     }
 
     /// Resolve the session a task should deliver into, creating one if needed.
+    ///
+    /// 会话创建/校验走注入的共享 `SessionStore`（`with_sessions`）；新建会话
+    /// 归属注入的 workspace 根（`with_workspace`），不再退回 current_dir()。
     pub async fn resolve_session(&self, t: &mut Task) -> Result<String, HarnessError> {
+        let store = self.session_store();
         match &t.target {
-            Target::Existing { session_id } => Ok(session_id.clone()),
+            Target::Existing { session_id } => {
+                // 明确校验：会话必须存在且未归档，否则报错（调用方据此把本轮
+                // 投递标失败并记录原因），绝不静默制造/投进幽灵会话。
+                if !store.exists(session_id).await {
+                    return Err(HarnessError::NotFound(format!(
+                        "target session {session_id} does not exist (task `{}` delivery aborted)",
+                        t.id
+                    )));
+                }
+                if store.is_archived(session_id).await {
+                    return Err(HarnessError::Other(format!(
+                        "target session {session_id} is archived (task `{}` delivery aborted)",
+                        t.id
+                    )));
+                }
+                Ok(session_id.clone())
+            }
             Target::Reuse => {
                 if let Some(s) = &t.bound_session_id {
-                    return Ok(s.clone());
+                    // 绑定会话仍在且未归档才复用；被删除/归档则重建一个，
+                    // 避免此后每次投递都失败。
+                    if store.exists(s).await && !store.is_archived(s).await {
+                        return Ok(s.clone());
+                    }
                 }
-                let s = crate::session::SessionStore::new();
-                let created = s
+                let created = store
                     .create(
-                        &std::env::current_dir().unwrap_or_default().to_string_lossy(),
+                        &self.workspace.to_string_lossy(),
                         &format!("⏱ {}", t.name),
                     )
                     .await;
@@ -547,10 +634,9 @@ impl ScheduleService {
                 Ok(id)
             }
             Target::NewEachTime => {
-                let s = crate::session::SessionStore::new();
-                let created = s
+                let created = store
                     .create(
-                        &std::env::current_dir().unwrap_or_default().to_string_lossy(),
+                        &self.workspace.to_string_lossy(),
                         &format!("⏱ {}", t.name),
                     )
                     .await;

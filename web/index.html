@@ -158,6 +158,10 @@ body.chat #chat{opacity:1;pointer-events:auto}
 #goalbar button{background:none;border:0;cursor:pointer;color:var(--fg2);font:12px var(--sans);padding:2px 7px;border-radius:6px;flex:none}
 #goalbar button:hover{background:var(--hov);color:var(--fg)}
 @keyframes spin{to{transform:rotate(360deg)}}
+/* 生成中旋转指示（欢迎语 spark 与 assistant 气泡共用 .sp） */
+.sp{width:22px;height:22px;color:var(--accent);flex:none}
+.sp.spin{animation:spin calc(2.6s * var(--animd)) linear infinite}
+.arow .asp{display:grid;place-items:center}
 .acts{display:flex;gap:2px;opacity:0;transform:translateY(4px);pointer-events:none;transition:opacity calc(.5s * var(--animd)),transform calc(.5s * var(--animd))}
 .acts.show{opacity:1;transform:none;pointer-events:auto}.acts .ib{width:28px;height:28px}.acts .ib svg{width:16px;height:16px}
 .dn svg{transform:rotate(180deg)}
@@ -174,6 +178,8 @@ textarea::placeholder{color:var(--fg2)}
 .tools{display:flex;align-items:center;gap:2px;margin-top:8px}.tools .fl{flex:1}
 .ms{display:flex;gap:4px;align-items:center;border:0;background:none;color:var(--fg2);padding:6px 8px;border-radius:8px;cursor:pointer;transition:background-color calc(.2s * var(--animd)),color calc(.2s * var(--animd))}
 .ms:hover{background:var(--hov);color:var(--fg)}.ms svg{width:14px;height:14px}
+/* 计划模式开启时的可见标识 */
+#planflag{display:none;align-items:center;gap:4px;padding:3px 9px;border-radius:99px;background:color-mix(in srgb,var(--accent) 14%,transparent);color:var(--accent);font:12px var(--sans);white-space:nowrap}
 #mm{right:0;bottom:calc(100% + 6px);min-width:280px;transform-origin:bottom right}
 .send{width:32px;height:32px;border-radius:8px;border:0;background:var(--accent);color:#fff;display:grid;place-items:center;cursor:pointer;margin-left:4px;transition:opacity calc(.3s * var(--animd)),transform calc(.3s * var(--animd)),filter calc(.2s * var(--animd))}
 .send svg{width:18px;height:18px}.send:disabled{opacity:.35;cursor:default}
@@ -182,6 +188,9 @@ textarea::placeholder{color:var(--fg2)}
 .chips button{background:none;border:.5px solid var(--line);color:var(--fg2);border-radius:10px;padding:7px 14px;cursor:pointer;transition:background-color calc(.25s * var(--animd)),color calc(.25s * var(--animd)),transform calc(.3s * var(--animd))}
 .chips button:hover{background:var(--hov);color:var(--fg);transform:translateY(-1px)}
 body.chat .chips{max-height:0;opacity:0;margin-top:0}
+/* 免责声明：进入对话后浮现（orig 设计稿同款） */
+.disc{text-align:center;color:var(--fg2);font-size:12px;max-height:0;opacity:0;overflow:hidden;transition:max-height calc(.7s * var(--animd)),opacity calc(.7s * var(--animd)),margin calc(.7s * var(--animd))}
+body.chat .disc{max-height:30px;opacity:1;margin-top:8px}
 
 /* —— 底部状态栏 —— */
 #sbar{display:flex;justify-content:center;gap:8px;margin-top:0;opacity:0;transform:translateY(8px);pointer-events:none;transition:margin calc(.5s * var(--animd)),opacity calc(.4s * var(--animd)),transform calc(.4s * var(--animd))}
@@ -203,11 +212,13 @@ body.chat #sbar{margin-top:10px;opacity:1;transform:none;pointer-events:auto}
 .spbar i{display:block;height:100%;transition:width .4s cubic-bezier(.32,.72,0,1)}
 .spbar .b1{background:#c5c5c5}.spbar .b2{background:#a78bfa}.spbar .b3{background:#60a5fa}
 .dot{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:4px;vertical-align:-1px}
+/* 窄窗口：状态栏只留图标，避免文字溢出 */
+@media(max-width:480px){.sbtn{padding:4px 8px;gap:0}.sbtn>span:nth-child(2){display:none}}
 
 #modal{position:fixed;inset:0;z-index:50;display:grid;place-items:center;background:rgba(0,0,0,0);pointer-events:none;transition:background-color calc(.5s * var(--animd)),backdrop-filter calc(.5s * var(--animd))}
 #modal.open{background:rgba(0,0,0,.42);backdrop-filter:blur(4px);pointer-events:auto}
-#card{width:100vw;height:100vh;height:100dvh;background:var(--bg);border-radius:0;display:flex;overflow:hidden;opacity:0;transform:translateY(16px) scale(.96);box-shadow:0 24px 80px rgba(0,0,0,.3);transition:opacity calc(.45s * var(--animd)),transform calc(.6s * var(--animd)) cubic-bezier(.16,.84,.3,1),background-color calc(.6s * var(--animd)),width calc(.55s * var(--animd)) cubic-bezier(.32,.72,0,1)}
-#card.wide{width:100vw}
+#card{width:min(820px,94vw);height:min(600px,86vh);background:var(--bg);border-radius:18px;display:flex;overflow:hidden;opacity:0;transform:translateY(16px) scale(.96);box-shadow:0 24px 80px rgba(0,0,0,.3);transition:opacity calc(.45s * var(--animd)),transform calc(.6s * var(--animd)) cubic-bezier(.16,.84,.3,1),background-color calc(.6s * var(--animd)),width calc(.55s * var(--animd)) cubic-bezier(.32,.72,0,1)}
+#card.wide{width:min(1080px,94vw)}
 #modal.open #card{opacity:1;transform:none}
 #snav{width:200px;flex:none;background:var(--side);padding:20px 12px;display:flex;flex-direction:column;gap:2px;transition:background-color calc(.6s * var(--animd))}
 #snav h3{margin:0 10px 14px;font:600 18px var(--serif)}
@@ -379,6 +390,20 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 .pm button:hover{background:var(--hov);transform:translateY(-1px);box-shadow:0 2px 8px rgba(0,0,0,.06)}
 .pm button:active{transform:scale(.95)}
 .pm button[data-d=always]{background:var(--accent);border-color:transparent;color:#fff}
+/* 权限面板：tool/path/reason/risk/diffPreview 详情 + 倒计时 */
+.pm>.pmwrap{display:flex;flex-direction:column;align-items:stretch;gap:8px;width:100%}
+.pm>.pmwrap>div{display:flex;align-items:center;gap:8px;flex-wrap:wrap;width:100%}
+.pmin{display:flex;flex-direction:column;gap:6px;min-width:0}
+.pmr{display:flex;align-items:baseline;gap:8px;min-width:0;flex-wrap:wrap}
+.pmr code{font:12px/1.5 var(--mono);color:var(--fg);background:var(--hov);border-radius:5px;padding:2px 7px;overflow-wrap:anywhere;word-break:break-all;white-space:normal}
+.pmk{flex:none;min-width:44px;margin-right:0;color:var(--fg2);font:10.5px var(--sans);text-transform:uppercase;letter-spacing:.05em}
+.preason{color:var(--fg);font:13px/1.55 var(--sans)}
+.pmdiff{margin:0;padding:8px 10px;background:var(--code-bg);color:var(--code-fg);border-radius:8px;font:12px/1.55 var(--mono);max-height:220px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere}
+.riskchip{flex:none;margin-right:0;padding:1px 8px;border-radius:99px;font:10.5px var(--sans);align-self:center}
+.riskchip.hi{background:color-mix(in srgb,#e5534b 18%,transparent);color:#e5534b}
+.riskchip.md{background:color-mix(in srgb,#c9a227 20%,transparent);color:#c9a227}
+.riskchip.lo{background:var(--hov);color:var(--fg2)}
+.ptimer{font-family:var(--mono);font-weight:600}
 
 .rl{display:grid;gap:8px}.ro{display:flex;gap:12px;align-items:flex-start;text-align:left;background:none;border:1.5px solid var(--line);border-radius:12px;padding:10px 12px;cursor:pointer;transition:border-color calc(.3s * var(--animd)),background-color calc(.3s * var(--animd)),transform calc(.3s * var(--animd))}
 .ro:hover{transform:translateX(2px)}
@@ -447,7 +472,7 @@ select.mp-in{appearance:none;background-image:linear-gradient(45deg,transparent 
 @media(max-width:1000px){.mp-shell{flex-direction:column;min-height:0}.mp-list{width:auto;flex:none;display:flex;gap:4px;padding:8px;border-right:0;border-bottom:.5px solid var(--line);overflow-x:auto;overflow-y:hidden}.mp-gl{padding:0 4px;align-self:center;white-space:nowrap}.mp-item{width:auto;flex:none;padding:6px 9px}.mp-detail{padding:16px}.mp-mn{max-width:160px}}
 @media(max-width:760px){.mp-h{flex-direction:column;gap:10px}.mp-ha{align-self:flex-end}.mp-detail{padding:14px}}
 
-@media(max-width:760px){.tabs{display:none}#body{position:relative}#side{position:absolute;z-index:30;top:0;bottom:0;left:0;width:280px!important;background:var(--side);box-shadow:0 0 40px rgba(0,0,0,.2)}#scr{display:block;position:absolute;inset:0;z-index:29;background:rgba(0,0,0,.35);transition:opacity calc(.5s * var(--animd))}body.sc #scr{opacity:0;pointer-events:none}body.sc #side{transform:translateX(-102%)}body.sc #sin{opacity:1}.gr{font-size:30px}#card{flex-direction:column}#snav{width:auto;flex-direction:row;padding:12px;overflow-x:auto}#snav h3{display:none}.sr .ct{width:150px}}
+@media(max-width:760px){.tabs{display:none}#body{position:relative}#side{position:absolute;z-index:30;top:0;bottom:0;left:0;width:280px!important;background:var(--side);box-shadow:0 0 40px rgba(0,0,0,.2)}#scr{display:block;position:absolute;inset:0;z-index:29;background:rgba(0,0,0,.35);transition:opacity calc(.5s * var(--animd))}body.sc #scr{opacity:0;pointer-events:none}body.sc #side{transform:translateX(-102%)}body.sc #sin{opacity:1}.gr{font-size:30px}#card{width:100vw;height:100vh;height:100dvh;border-radius:0;flex-direction:column}#snav{width:auto;flex-direction:row;padding:12px;overflow-x:auto}#snav h3{display:none}.sr .ct{width:150px}}
 @media(prefers-reduced-motion:reduce){.msg,.pn,.sr,.rc,.c,.shim,.pop.open>*,.es.fx{animation:none}}
 
 /* ============ 命令面板 ============ */
@@ -483,6 +508,10 @@ select.mp-in{appearance:none;background-image:linear-gradient(45deg,transparent 
 .att b{font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .att .x{cursor:pointer;color:var(--fg2);display:grid;place-items:center;border-radius:4px;padding:0 1px;font-size:13px;line-height:1}
 .att .x:hover{color:var(--fg);background:var(--line)}
+/* 图片附件的小缩略图（输入框 chip 与用户气泡共用） */
+.att .attimg{width:18px;height:18px;border-radius:4px;object-fit:cover;flex:none}
+.uatt .att .attimg{width:34px;height:34px;border-radius:6px}
+.att.upl{opacity:.6}
 body.dragging #main{outline:2px dashed var(--accent);outline-offset:-8px}
 
 /* ============ 回到最新 ============ */
@@ -525,7 +554,7 @@ body.dragging #main{outline:2px dashed var(--accent);outline-offset:-8px}
       <button id="jump" title="回到最新"><span data-ic="chev"></span></button>
       <div id="pg"><div></div></div>
       <div id="comp">
-        <div class="gr"><span id="gt"></span></div>
+        <div class="gr"><span id="gsp"></span><span id="gt"></span></div>
         <div id="goalbar"></div>
         <div class="box">
           <div id="sl"></div>
@@ -533,55 +562,56 @@ body.dragging #main{outline:2px dashed var(--accent);outline-offset:-8px}
           <textarea id="ta" rows="1" autofocus></textarea>
           <div class="tools">
             <button class="ib" id="attbtn" data-ic="clip" title="添加附件"></button>
-            <span style="position:relative"><button class="ms" id="tb2"><span data-ic="tune" style="display:grid"></span><span id="pml"></span></button><div class="pop" id="tp"></div></span><span class="fl"></span>
+            <span style="position:relative"><button class="ms" id="tb2"><span data-ic="tune" style="display:grid"></span><span id="pml"></span></button><div class="pop" id="tp"></div></span><span id="planflag"></span><span class="fl"></span>
             <span style="position:relative"><button class="ms" id="mb"><span id="ml"></span><span data-ic="chev" style="display:grid"></span></button><div class="pop" id="mm"></div></span>
             <button class="send" id="sd" disabled></button>
           </div>
         </div>
         <div class="chips" id="chips"></div>
         
-        <!-- 新增：底部详细状态栏 -->
+        <!-- 新增：底部详细状态栏（数值全部 0 起始，由 applyStatus 按 SSE status 事件回填） -->
         <div id="sbar">
           <button class="sbtn" id="sbtn-stats">
             <span data-ic="clock"></span>
-            <span id="sb-stats-tx">2 轮 8 步 · 41 tok/s</span>
+            <span id="sb-stats-tx">0</span>
             <div class="spanel" id="panel-stats">
-              <div class="sph"><span data-ic="clock"></span> 会话统计 <div class="sph-r" id="p-stats-top">2 轮 8 步</div></div>
-              <div class="spr"><span>模型用时</span><span>4分16秒</span></div>
-              <div class="spr"><span>工具调用用时</span><span>44.2秒</span></div>
-              <div class="spr"><span>首 token 平均 (TTFT)</span><span>19.8秒</span></div>
-              <div class="spr"><span>输出速度 (TPS)</span><span id="p-tps">41 tok/s</span></div>
+              <div class="sph"><span data-ic="clock"></span> <span data-i="st_title">会话统计</span> <div class="sph-r" id="p-stats-top">0</div></div>
+              <div class="spr"><span data-i="st_model_ms">模型用时</span><span id="p-model-ms">0</span></div>
+              <div class="spr"><span data-i="st_tool_ms">工具调用用时</span><span id="p-tool-ms">0</span></div>
+              <div class="spr"><span data-i="st_ttft">首 token 平均 (TTFT)</span><span id="p-ttft">0</span></div>
+              <div class="spr"><span data-i="st_tps">输出速度 (TPS)</span><span id="p-tps">0 tok/s</span></div>
             </div>
           </button>
           <button class="sbtn" id="sbtn-token">
             <span data-ic="db"></span>
-            <span id="sb-token-tx">251K tok · 缓存命中 71%</span>
+            <span id="sb-token-tx">0 tok</span>
             <div class="spanel" id="panel-token">
-              <div class="sph"><span data-ic="db"></span> Token 用量 <div class="sph-r" id="p-token-top">251,022 tok</div></div>
-              <div class="spr"><span>缓存命中中</span><span id="p-cache-hit">71%</span></div>
-              <div class="spr"><span>未缓存输入</span><span id="p-uncached">71,640 tok</span></div>
-              <div class="spr"><span>缓存读取</span><span id="p-cache-read">175,360 tok</span></div>
-              <div class="spr"><span>输出</span><span id="p-output">4,022 tok</span></div>
+              <div class="sph"><span data-ic="db"></span> <span data-i="tk_title">Token 用量</span> <div class="sph-r" id="p-token-top">0 tok</div></div>
+              <div class="spr"><span data-i="tk_cache">缓存命中</span><span id="p-cache-hit">0%</span></div>
+              <div class="spr"><span data-i="tk_uncached">未缓存输入</span><span id="p-uncached">0 tok</span></div>
+              <div class="spr"><span data-i="tk_cache_read">缓存读取</span><span id="p-cache-read">0 tok</span></div>
+              <div class="spr"><span data-i="tk_output">输出</span><span id="p-output">0 tok</span></div>
             </div>
           </button>
           <button class="sbtn" id="sbtn-ctx">
             <span data-ic="circle"></span>
-            <span id="sb-ctx-tx">5%</span>
+            <span id="sb-ctx-tx">0%</span>
             <div class="spanel" id="panel-ctx">
-              <div class="sph"><span data-ic="circle"></span> 上下文已用 
-                <div class="sph-r"><span id="p-ctx-pct">5%</span> <span id="p-ctx-val">~53.9K / 1M</span></div>
+              <div class="sph"><span data-ic="circle"></span> <span data-i="cx_title">上下文已用</span>
+                <div class="sph-r"><span id="p-ctx-pct">0%</span> <span id="p-ctx-val">~0 / 0</span></div>
               </div>
               <div class="spbar">
-                <i class="b1" id="p-bar-sys" style="width: 15%"></i>
-                <i class="b2" id="p-bar-tools" style="width: 18%"></i>
-                <i class="b3" id="p-bar-msgs" style="width: 67%"></i>
+                <i class="b1" id="p-bar-sys" style="width: 0%"></i>
+                <i class="b2" id="p-bar-tools" style="width: 0%"></i>
+                <i class="b3" id="p-bar-msgs" style="width: 0%"></i>
               </div>
-              <div class="spr"><span><i class="dot b1"></i>系统提示词</span><span id="p-sys">~7.4K</span></div>
-              <div class="spr"><span><i class="dot b2"></i>工具定义</span><span id="p-tools">~8.8K</span></div>
-              <div class="spr"><span><i class="dot b3"></i>对话消息</span><span id="p-msgs">~28.2K</span></div>
+              <div class="spr"><span><i class="dot b1"></i><span data-i="cx_sys">系统提示词</span></span><span id="p-sys">~0</span></div>
+              <div class="spr"><span><i class="dot b2"></i><span data-i="cx_tools">工具定义</span></span><span id="p-tools">~0</span></div>
+              <div class="spr"><span><i class="dot b3"></i><span data-i="cx_msgs">对话消息</span></span><span id="p-msgs">~0</span></div>
             </div>
           </button>
         </div>
+        <div class="disc" data-i="disc"></div>
       </div>
     </main>
   </div>
@@ -643,7 +673,16 @@ const IC = {
 };
 const ic = n => '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">' + (IC[n] || IC.file) + '</svg>';
 const esc = s => String(s == null ? '' : s)
-  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+/* 欢迎语 / 生成中指示的火花图形（orig 设计稿同款） */
+const spark = c => {
+  let s = '';
+  [9,6.5,8,6,9.5,6,8.5,6.5,9,6,8,6.5].forEach((l, i) => {
+    const a = i * Math.PI / 6;
+    s += '<path d="M12 12L' + (12 + Math.sin(a) * l).toFixed(2) + ' ' + (12 - Math.cos(a) * l).toFixed(2) + '"/>';
+  });
+  return '<svg class="sp ' + (c || '') + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round">' + s + '</svg>';
+};
 
 /* ---------------------------------------------------------------- i18n */
 const L = {
@@ -675,7 +714,7 @@ const L = {
     font:'聊天字体', serif:'衬线', sans:'无衬线', mono:'等宽', size:'字号', w:'内容宽度', accent:'强调色',
     side:'默认展开侧边栏', stream:'逐字模糊动画', speed:'出字间隔', cd:'单字动画时长',
     blur:'模糊强度', sf:'初始放大倍数', animRate:'动画速率', pv:'动画预览', play:'播放', reset:'恢复默认设置',
-    toast:'这是界面复刻，该功能暂未实现',
+    toast:'操作失败，请重试',
     export:'导出对话', exported:'已导出为 Markdown', export_none:'当前还没有对话',
     cm_pin:'置顶', cm_unpin:'取消置顶', cm_rename:'重命名', cm_cpid:'复制对话 ID', cm_delete:'删除', cm_renamed:'已重命名',
     cm_archive:'归档', cm_unarchive:'取消归档', archd:'已归档', arch_done:'已归档', unarch_done:'已取消归档',
@@ -686,6 +725,21 @@ const L = {
     mp_name:'名称', mp_models:'模型列表', mp_addm:'添加模型', mp_newp:'新供应商',
     mp_more:'更多', mp_refresh:'刷新', mp_edit:'编辑', mp_del:'删除', mp_enabled:'启用', mp_vision:'视觉',
     mp_empty:'还没有模型，点击“添加模型”', mp_test:'测试连接', mp_base:'Base URL',
+    mp_refreshed:'已刷新', mp_deleted:'已删除',
+    mp_del_confirm:'确定删除供应商 “{n}” 及其全部模型？', mp_del_model:'确定删除模型 “{n}”？',
+    send_answer:'发送回答', ask_label:'提问', plan_label:'计划', done_label:'结果',
+    copy_fail:'复制失败', conn_lost:'连接断开，重连中…', conn_ok:'连接已恢复',
+    perm_run:'执行中…', perm_timeout:'已超时，自动拒绝', your_answer:'你的回答：',
+    cf_del_chat:'确定删除这个对话？此操作不可恢复。', cf_del_task:'确定删除这个任务？',
+    compacted:'已压缩 {n} 条早期消息以适应上下文窗口',
+    st_title:'会话统计', st_model_ms:'模型用时', st_tool_ms:'工具调用用时', st_ttft:'首 token 平均 (TTFT)', st_tps:'输出速度 (TPS)',
+    tk_title:'Token 用量', tk_cache:'缓存命中', tk_uncached:'未缓存输入', tk_cache_read:'缓存读取', tk_output:'输出',
+    cx_title:'上下文已用', cx_sys:'系统提示词', cx_tools:'工具定义', cx_msgs:'对话消息',
+    cache_hit:'缓存命中', u_turns:'轮', u_steps:'步', u_ms:'毫秒',
+    att_uploading:'上传中…', att_fail:'附件上传失败：',
+    sysprev_empty:'（空 — 下一轮会话将没有 system 提示词）', sysprev_fail:'预览失败：',
+    plan_mode:'计划模式', plan_mode_h:'先制定计划，经确认后再执行', plan_badge:'计划',
+    auto_no_chat:'当前没有会话，不能投递到当前对话', disc:'Parable 是 AI，可能会出错，请核实重要内容',
     g:['夜深了，','早上好，','下午好，','晚上好，'],
     chips:['写作','学习','编程','生活','Parable 的选择'],
     cp:['帮我写一封措辞得体的邮件','用通俗的话讲讲量子纠缠','帮我修个 bug','周末在家做点什么好','给我一个惊喜'],
@@ -721,7 +775,7 @@ const L = {
     accent:'Accent color', side:'Open sidebar by default', stream:'Blur-in text animation',
     speed:'Character interval', cd:'Per-character duration', blur:'Blur strength', sf:'Initial scale',
     animRate:'Animation speed', pv:'Animation preview', play:'Play', reset:'Reset to defaults',
-    toast:'This is a UI replica; that feature is not implemented',
+    toast:'Action failed, please try again',
     export:'Export conversation', exported:'Exported as Markdown', export_none:'No conversation yet',
     cm_pin:'Pin', cm_unpin:'Unpin', cm_rename:'Rename', cm_cpid:'Copy conversation ID', cm_delete:'Delete', cm_renamed:'Renamed',
     cm_archive:'Archive', cm_unarchive:'Unarchive', archd:'Archived', arch_done:'Archived', unarch_done:'Unarchived',
@@ -734,6 +788,21 @@ const L = {
     mp_name:'Name', mp_models:'Models', mp_addm:'Add model', mp_newp:'New provider',
     mp_more:'More', mp_refresh:'Refresh', mp_edit:'Edit', mp_del:'Delete', mp_enabled:'Enabled',
     mp_vision:'Vision', mp_empty:'No models yet. Click “Add model”.', mp_test:'Test connection', mp_base:'Base URL',
+    mp_refreshed:'Refreshed', mp_deleted:'Deleted',
+    mp_del_confirm:'Delete provider “{n}” and all its models?', mp_del_model:'Delete model “{n}”?',
+    send_answer:'Send answer', ask_label:'Asked', plan_label:'Planned', done_label:'Result',
+    copy_fail:'Copy failed', conn_lost:'Connection lost, reconnecting…', conn_ok:'Connection restored',
+    perm_run:'Running…', perm_timeout:'Timed out — auto-denied', your_answer:'Your answer: ',
+    cf_del_chat:'Delete this conversation? This cannot be undone.', cf_del_task:'Delete this task?',
+    compacted:'Compacted {n} earlier messages to fit the context window',
+    st_title:'Session stats', st_model_ms:'Model time', st_tool_ms:'Tool time', st_ttft:'Avg. first token (TTFT)', st_tps:'Output speed (TPS)',
+    tk_title:'Token usage', tk_cache:'Cache hit', tk_uncached:'Uncached input', tk_cache_read:'Cache read', tk_output:'Output',
+    cx_title:'Context used', cx_sys:'System prompt', cx_tools:'Tool definitions', cx_msgs:'Messages',
+    cache_hit:'cache hit', u_turns:'turns', u_steps:'steps', u_ms:'ms',
+    att_uploading:'Uploading…', att_fail:'Attachment upload failed: ',
+    sysprev_empty:'(empty — the next turn will have no system prompt)', sysprev_fail:'Preview failed: ',
+    plan_mode:'Plan mode', plan_mode_h:'Draft a plan first and wait for approval before running', plan_badge:'Plan',
+    auto_no_chat:'No active chat to deliver to', disc:'Parable is AI and can make mistakes. Please double-check important content',
     g:['Burning the midnight oil, ','Good morning, ','Good afternoon, ','Good evening, '],
     chips:['Write','Learn','Code','Life stuff','Parable’s choice'],
     cp:['Help me write a polite email','Explain quantum entanglement simply','Help me fix a bug','What to do at home this weekend','Surprise me'],
@@ -758,7 +827,7 @@ const DEF = {
   lang:'zh', name:'', theme:'auto', font:'serif', size:16, w:760, accent:'#d97757',
   speed:22, cd:650, blur:8, sf:1.5, anim:1, stream:true, think:true, side:true,
   prefs:'', systemPrompt:'', systemPromptRaw:'', model:'', perm:'ask', lvl:2,
-  searchKey:'', spref:'auto'
+  searchKey:'', spref:'auto', plan:false
 };
 let S = { ...DEF };
 try { S = { ...DEF, ...JSON.parse(localStorage.getItem('cd-s') || '{}') }; } catch (e) {}
@@ -770,6 +839,8 @@ const FONT = { serif:'var(--serif)', sans:'var(--sans)', mono:'var(--mono)' };
 const A = ms => Math.max(1, Math.round(ms / (S.anim || 1)));
 
 document.querySelectorAll('[data-ic]').forEach(e => e.innerHTML = ic(e.dataset.ic));
+// 欢迎语旁的火花图形（orig 设计稿同款）
+if ($('#gsp')) $('#gsp').innerHTML = spark();
 
 function greet() {
   const h = new Date().getHours();
@@ -831,6 +902,14 @@ function apply(pushToServer) {
   $('#ml').textContent = modelLabel();
   $('#pml').textContent = t('p_' + S.perm);
   $('#tb2').style.color = S.perm === 'full' ? '#c4553d' : '';
+  // 计划模式可见标识（输入框工具行上的小徽标）
+  {
+    const pf = $('#planflag');
+    if (pf) {
+      pf.style.display = S.plan ? 'inline-flex' : 'none';
+      pf.textContent = t('plan_badge');
+    }
+  }
 
   const cj = t('chips').map((c, i) => '<button data-p="' + i + '">' + c + '</button>').join('');
   if (apply.cj !== cj) { apply.cj = cj; $('#chips').innerHTML = cj; }
@@ -1006,6 +1085,8 @@ function bindAutoPage(root) {
     row.querySelectorAll('[data-act]').forEach(b => {
       b.onclick = async () => {
         const act = b.dataset.act;
+        // 删除任务不可恢复，先轻确认
+        if (act === 'del' && !window.confirm(z ? '确定删除这个任务？' : 'Delete this task?')) return;
         try {
           if (act === 'del') {
             await api('/schedule/' + id, { method: 'DELETE' });
@@ -1032,6 +1113,13 @@ function bindAutoPage(root) {
   };
   kindSel.onchange = syncKind;
   syncKind();
+  // 没有活动会话时「投递到当前会话」没有意义：禁用该选项并标注原因
+  const tgtSel = root.querySelector('#nt-target');
+  const exOpt = tgtSel ? tgtSel.querySelector('option[value="existing"]') : null;
+  if (exOpt && !(conv && conv.id)) {
+    exOpt.disabled = true;
+    exOpt.textContent += z ? '（当前没有会话）' : ' (no active chat)';
+  }
   root.querySelector('#nt-add').onclick = async () => {
     const name = root.querySelector('#nt-name').value.trim();
     const prompt = root.querySelector('#nt-prompt').value.trim();
@@ -1043,6 +1131,10 @@ function bindAutoPage(root) {
     else if (kindSel.value === 'after') timing = { kind: 'after', after_seconds: secs };
     else timing = { kind: 'daily', time: timeInp.value || '09:00', timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone };
     const tgt = root.querySelector('#nt-target').value;
+    if (tgt === 'existing' && !(conv && conv.id)) {
+      toast(z ? '当前没有会话，不能投递到当前对话' : 'No active chat to deliver to');
+      return;
+    }
     try {
       await api('/schedule', {
         method: 'POST',
@@ -1265,10 +1357,28 @@ function classifyBlock(s) {
   return 'p';
 }
 
-/** Index of the next blank-line boundary, or -1. */
+const FENCE_RE = /^[ \t]*```/;
+
+/**
+ * Index of the next blank-line boundary, or -1.
+ * Inside an unclosed ``` fence a blank line is part of the code block, not a
+ * block boundary — so the scanner tracks fence state line by line and only
+ * reports blank lines seen outside a fence. Streaming and final rendering
+ * (splitBlocks) share this state machine.
+ */
 function blankBoundary(s) {
-  const m = /\n[ \t]*\n/.exec(s);
-  return m ? m.index : -1;
+  let open = false, pos = 0;
+  const lines = String(s).split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (FENCE_RE.test(line)) {
+      open = !open;
+    } else if (!open && /^[ \t]*$/.test(line) && pos > 0) {
+      return pos - 1;   // index of the newline that closes the previous block
+    }
+    pos += line.length + 1;
+  }
+  return -1;
 }
 
 function mkStream(host) {
@@ -1340,9 +1450,23 @@ function sflush(st) {
   st.inline = null;
 }
 
-/** Split markdown into blocks on blank lines. */
+/** Split markdown into blocks on blank lines (fence-aware, see blankBoundary). */
 function splitBlocks(text) {
-  return String(text || '').split(/\n[ \t]*\n+/).filter(s => s.trim() !== '');
+  const lines = String(text || '').split('\n');
+  const out = [];
+  let start = 0, open = false;
+  for (let i = 0; i < lines.length; i++) {
+    if (FENCE_RE.test(lines[i])) {
+      open = !open;
+    } else if (!open && /^[ \t]*$/.test(lines[i])) {
+      const done = lines.slice(start, i).join('\n');
+      if (done.trim()) out.push(done);
+      start = i + 1;
+    }
+  }
+  const tail = lines.slice(start).join('\n');
+  if (tail.trim()) out.push(tail);
+  return out;
 }
 
 /** Render inline markup into `el` (bold / inline code). */
@@ -1405,8 +1529,7 @@ function renderCode(host, text) {
   d.append(hd, pre);
   host.append(d);
   hd.querySelector('[data-cp]').onclick = e => {
-    try { navigator.clipboard.writeText(body).catch(() => {}); } catch (x) {}
-    flash(e.target);
+    copyText(body, true).then(ok => { if (ok) flash(e.target); });
   };
   hd.querySelector('[data-wr]').onclick = () => pre.classList.toggle('wrapit');
   pre.textContent = body;
@@ -1422,7 +1545,22 @@ function renderCode(host, text) {
 function renderBlock(host, text, ink, noanim) {
   const t0 = text.replace(/^\n+|\n+$/g, '');
   if (!t0.trim()) return;
-  if (/^```/.test(t0)) { renderCode(host, t0); return; }
+  if (/^```/.test(t0)) {
+    // 围栏在块内闭合、后面还跟着散文行（模型常写 ```code``` 紧贴正文）：
+    // 拆成代码块 + 后续 prose，别把正文吞进代码里。
+    const lns = t0.split('\n');
+    let close = -1;
+    for (let k = 1; k < lns.length; k++) {
+      if (FENCE_RE.test(lns[k])) { close = k; break; }
+    }
+    if (close >= 0 && close < lns.length - 1) {
+      renderCode(host, lns.slice(0, close + 1).join('\n'));
+      renderBlock(host, lns.slice(close + 1).join('\n'), ink, noanim);
+      return;
+    }
+    renderCode(host, t0);
+    return;
+  }
   if (isTable(t0)) { renderTable(host, t0); return; }
 
   const lines = t0.split('\n');
@@ -1468,12 +1606,27 @@ function renderBlock(host, text, ink, noanim) {
       i++;
       continue;
     }
-    // Prose run.
+    // Fenced code: gather from the opening ``` through the closing ``` (or the
+    // end of the block when the fence is never closed) and render as code.
+    if (FENCE_RE.test(lines[i])) {
+      const grp = [lines[i]];
+      i++;
+      while (i < lines.length) {
+        const l = lines[i];
+        grp.push(l);
+        i++;
+        if (FENCE_RE.test(l)) break;
+      }
+      renderCode(host, grp.join('\n'));
+      continue;
+    }
+    // Prose run (stops at list / quote / hr / fence openers).
     const grp = [];
     while (i < lines.length
       && !/^\s*[-*+]\s+/.test(lines[i])
       && !/^\s*\d+[.)]\s+/.test(lines[i])
       && !/^>\s?/.test(lines[i])
+      && !FENCE_RE.test(lines[i])
       && !/^(-{3,}|\*{3,}|_{3,})$/.test(lines[i].trim())) {
       grp.push(lines[i]);
       i++;
@@ -1519,8 +1672,11 @@ function uMsg(q, idx, atts) {
     atts.forEach(a => {
       const s = document.createElement('span');
       s.className = 'att';
-      s.innerHTML = ic('file') + '<b></b>';
-      s.querySelector('b').textContent = a.name;
+      // 图片附件带本地预览缩略图（URL.createObjectURL，随消息一起传入）
+      s.innerHTML = (a && a.url ? '<img class="attimg" alt="">' : ic('file')) + '<b></b>';
+      const im = s.querySelector('.attimg');
+      if (im) im.src = a.url;
+      s.querySelector('b').textContent = a.name || '';
       row.append(s);
     });
     b.append(row);
@@ -1530,35 +1686,43 @@ function uMsg(q, idx, atts) {
     tx.textContent = q;
     b.append(tx);
   }
-  // 操作条在消息下方、靠右
+  // 操作条在消息下方、靠右；存储下标未知时禁用编辑/删除（避免静默失效）
+  const off = idx == null ? ' off' : '';
   const acts = document.createElement('div');
   acts.className = 'macts';
   acts.innerHTML =
-    '<button class="ib" data-ue="' + idx + '" title="' + t('editmsg') + '">' + ic('edit') + '</button>' +
+    '<button class="ib' + off + '" data-ue="' + idx + '" title="' + t('editmsg') + '">' + ic('edit') + '</button>' +
     '<button class="ib" data-uc="' + idx + '" title="' + t('copy') + '">' + ic('copy') + '</button>' +
-    '<button class="ib danger" data-ud="' + idx + '" title="' + t('delmsg') + '">' + ic('trash') + '</button>';
+    '<button class="ib danger' + off + '" data-ud="' + idx + '" title="' + t('delmsg') + '">' + ic('trash') + '</button>';
   d.append(b, acts);
   feed.append(d);
   return d;
 }
 
-function aMsg(idx) {
+function aMsg(idx, spin) {
   const d = document.createElement('div');
   d.className = 'a msg';
   if (idx != null) d.dataset.mi = idx;
   // No fixed .th placeholder: reasoning blocks are created in place as they
   // stream, so they land next to the tool call they actually preceded.
+  // spin=true 时（正在生成的实时 turn）在操作条旁放旋转指示，收尾时移除。
   d.innerHTML =
     '<div class="ab"></div>' +
     '<div class="arow">' +
+    (spin ? '<span class="asp">' + spark('spin') + '</span>' : '') +
     '<div class="acts">' +
     '<button class="ib" data-a="copy" title="' + t('copy') + '">' + ic('copy') + '</button>' +
-    '<button class="ib" data-a="re" title="' + t('regen') + '">' + ic('retry') + '</button>' +
-    '<button class="ib" data-a="edit" title="' + t('editmsg') + '">' + ic('edit') + '</button>' +
-    '<button class="ib danger" data-a="del" title="' + t('delmsg') + '">' + ic('trash') + '</button>' +
+    '<button class="ib' + (idx == null ? ' off' : '') + '" data-a="re" title="' + t('regen') + '">' + ic('retry') + '</button>' +
+    '<button class="ib' + (idx == null ? ' off' : '') + '" data-a="edit" title="' + t('editmsg') + '">' + ic('edit') + '</button>' +
+    '<button class="ib danger' + (idx == null ? ' off' : '') + '" data-a="del" title="' + t('delmsg') + '">' + ic('trash') + '</button>' +
     '</div></div>';
   feed.append(d);
   return d;
+}
+
+/** Remove the in-flight spinner from a finished assistant bubble. */
+function stopSpin(a) {
+  if (a) a.querySelectorAll('.asp').forEach(x => x.remove());
 }
 
 function setActs(a, on) {
@@ -1648,13 +1812,13 @@ function toolCard(host, callId, tool, title) {
 function labelFor(d, tool) {
   if (tool === 'web_search') return t('searched');
   if (tool === 'web_fetch') return t('fetched');
-  if (!d || !d.kind) return t('ed');
-  if (d.kind === 'read') return t('rd');
-  if (d.kind === 'diff') return t('ed');
-  if (d.kind === 'shell') return 'shell';
-  if (d.kind === 'ask') return t('ask');
-  if (d.kind === 'todo') return 'plan';
-  return t('ed');
+  if (d && d.kind === 'read') return t('rd');
+  if (d && d.kind === 'diff') return t('ed');
+  if (d && d.kind === 'shell') return 'shell';
+  if (d && d.kind === 'ask') return t('ask_label');
+  if (d && d.kind === 'todo') return t('plan_label');
+  // plain / 未知类型统一显示「结果」，不再误标成「已编辑」
+  return t('done_label');
 }
 
 function fillToolCard(e, display, ok, title) {
@@ -1756,25 +1920,64 @@ function fillToolCard(e, display, ok, title) {
   // expands. Auto-expanding every card is what produced the tall gaps.
 }
 
-/** Show the three-button permission panel on a tool card. */
-function showPermPanel(e, callId) {
+/** Risk colour chip: shell/network/destructive red, write amber, readonly grey. */
+function riskChip(risk) {
+  const r = String(risk || '').toLowerCase();
+  const cls = (r === 'destructive' || r === 'shell' || r === 'network') ? 'hi'
+    : (r === 'write' ? 'md' : 'lo');
+  return '<span class="riskchip ' + cls + '">' + esc(r || 'readonly') + '</span>';
+}
+
+/**
+ * Show the permission panel on a tool card: tool / path / reason / risk /
+ * diffPreview, plus a 300s countdown (the backend auto-denies after 300s and
+ * emits permission.resolved; the panel closes itself on either signal).
+ * `info` comes from a permission.request event ({callId, tool, path, risk,
+ * reason, diffPreview}) or a GET /api/pending entry ({id, tool, ...}).
+ */
+function showPermPanel(e, callId, info) {
   if (!e) return;
+  info = info || {};
   const pm = e.querySelector('.pm');
-  pm.innerHTML = '<div><span>' + esc(t('wp')) + '</span>' +
+  let html = '<div class="pmwrap"><div class="pmin">' +
+    '<div class="pmr"><span class="pmk">tool</span><code>' + esc(info.tool || '') + '</code>' + riskChip(info.risk) + '</div>';
+  if (info.path) html += '<div class="pmr"><span class="pmk">path</span><code>' + esc(info.path) + '</code></div>';
+  if (info.reason) html += '<div class="preason">' + esc(info.reason) + '</div>';
+  if (info.diffPreview) html += '<pre class="pmdiff">' + esc(info.diffPreview) + '</pre>';
+  html += '</div>' +
+    '<div><span>' + esc(t('wp')) + ' · <b class="ptimer">300</b>s</span>' +
     '<button data-d="once">' + t('a1') + '</button>' +
     '<button data-d="always">' + t('aa') + '</button>' +
-    '<button data-d="deny">' + t('dy') + '</button></div>';
+    '<button data-d="deny">' + t('dy') + '</button></div></div>';
+  pm.innerHTML = html;
   e.dataset.st = 'wait';
   e.querySelector('.st-tx').textContent = t('wt');
   e.classList.remove('collapsed');
+  // 倒计时：300s 与后端超时一致，到点先本地收起提示超时拒绝
+  const clearTimer = () => { if (e._ptimer) { clearInterval(e._ptimer); e._ptimer = null; } };
+  clearTimer();
+  let left = 300;
+  const timerEl = pm.querySelector('.ptimer');
+  e._ptimer = setInterval(() => {
+    left--;
+    if (left <= 0) {
+      clearTimer();
+      pm.innerHTML = '';
+      if (e.dataset.st === 'wait') {
+        e.dataset.st = '';
+        e.querySelector('.st-tx').textContent = t('perm_timeout');
+      }
+    } else if (timerEl) timerEl.textContent = left;
+  }, 1000);
   pm.querySelectorAll('button').forEach(b => {
     b.onclick = ev => {
       ev.stopPropagation();
       const d = b.dataset.d;
       api('/permission', { method: 'POST', body: { call_id: callId, decision: d } })
         .then(() => {
+          clearTimer();
           pm.innerHTML = '';
-          e.querySelector('.st-tx').textContent = d === 'deny' ? t('dnd') : t('ed');
+          e.querySelector('.st-tx').textContent = d === 'deny' ? t('dnd') : t('perm_run');
         })
         .catch(err => toast(err.message));
     };
@@ -1815,7 +2018,7 @@ function resetTurn() {
 }
 
 function startTurnUI() {
-  curA = aMsg();
+  curA = aMsg(null, true);   // 生成中：气泡带旋转指示，turn.end/错误时移除
   curText = '';
   curStream = null;
   curThinkEl = null;
@@ -1839,13 +2042,23 @@ const SHADOW = {};
  *  流时 SHADOW 里没有条目，切回来要靠它恢复流式 UI（否则 sig 还挂着 stop，
  *  后续正文字符会被逐字写入循环全部丢弃）。 */
 const INFLIGHT = {};
+/** 全局事件序号水位：SSE 事件带单调递增 seq，乱序/重复直接丢弃。 */
+let lastSeq = 0;
+// conv 未绑定（首条消息在途）期间闯入的他人会话：其事件全部丢弃直到绑定。
+let ignoreSid = '';
 function dispatch(ev) {
   if (!ev || !ev.type) return;
+  // seq 去重：hello 的 seq=0（falsy）始终放行；重连后在 onopen 里清零水位。
+  if (ev.seq && ev.seq <= lastSeq) return;
+  if (ev.seq) lastSeq = ev.seq;
+  if (ignoreSid && ev.sessionId === ignoreSid) return;
   if (ev.type === 'turn.end') { delete SHADOW[ev.sessionId]; delete INFLIGHT[ev.sessionId]; }
   // Only handle events for the active session (or the initial one).
   // 定时任务等在别的会话里开的 turn（含新建会话、欢迎页 conv 为空的情况）：
   // 静默刷新会话列表，让「⏱ 任务名」对话直接出现在侧边栏，不必手动刷新页面。3 秒去抖。
-  if (ev.sessionId && (!conv || ev.sessionId !== conv.id) &&
+  // conv.id 为空且 expectBubble（首条消息在途）时放行：turn.start 分支会兜底
+  // 绑定会话 id，避免 session.start 丢失后整轮事件被过滤器吃掉。
+  if (ev.sessionId && (!conv || (conv.id ? ev.sessionId !== conv.id : !expectBubble)) &&
       (ev.type === 'turn.start' || ev.type === 'turn.end')) {
     if (ev.type === 'turn.start') INFLIGHT[ev.sessionId] = true;
     const now = Date.now();
@@ -1860,16 +2073,28 @@ function dispatch(ev) {
   } else if (ev.type === 'tool.result' && SHADOW[ev.sessionId]) {
     SHADOW[ev.sessionId].text = '';
   }
-  if (conv && ev.sessionId && ev.sessionId !== conv.id) return;
+  // conv.id 为 null（新会话首条消息在途、POST /chat 响应未返回）时不能丢事件：
+  // session.start 事件会先到并绑定 id，这里只对「已绑定且不匹配」的会话过滤。
+  if (conv && conv.id && ev.sessionId && ev.sessionId !== conv.id) return;
 
   switch (ev.type) {
     case 'hello':
       break;
 
     case 'session.start':
-      if (!conv || conv.id === ev.sessionId) {
-        conv = { id: ev.sessionId, title: ev.title, workspace: ev.workspace };
-        $('#ttl').textContent = ev.title || '';
+      // conv.id 为 null（首条消息在途）时也要认领：服务端在 POST /chat 响应
+      // 返回前就会广播 session.start，错过它后续事件会全部被过滤器丢掉。
+      if (!conv || conv.id === ev.sessionId || !conv.id) {
+        if (conv && !conv.id && ev.sessionId === ignoreSid) break;   // 已标记为他人会话
+        const wasNew = !conv || !conv.id;
+        const prevT = conv && conv.title;
+        conv = { id: ev.sessionId, title: prevT || ev.title || '', workspace: (conv && conv.workspace) || ev.workspace || '' };
+        ignoreSid = '';
+        $('#ttl').textContent = conv.title || ev.title || '';
+        if (wasNew) {
+          addRc({ id: conv.id, t: conv.title || ev.title || '', ts: Date.now() });
+          loadSessions(true);
+        }
         document.body.classList.add('chat');
         apply();
       }
@@ -1877,6 +2102,20 @@ function dispatch(ev) {
 
     case 'turn.start':
       INFLIGHT[ev.sessionId] = true;
+      // 新会话兜底绑定：session.start 丢失（断线重连、乱序）时在此认领 id。
+      // 只认领文本与在途请求一致的 turn，防止并发定时任务被误绑；认领失败
+      // 的一律标记 ignoreSid 丢弃其后续事件。
+      if (conv && !conv.id) {
+        if ((ev.text || '') === (conv.pendingText || '')) {
+          conv.id = ev.sessionId;
+          ignoreSid = '';
+          addRc({ id: conv.id, t: conv.title || '', ts: Date.now() });
+          loadSessions(true);
+        } else {
+          ignoreSid = ev.sessionId;
+          return;
+        }
+      }
       // 非本端发起的 turn（定时投递、重试）靠事件里的 text 补用户气泡；
       // 重试的 text 为空，不画气泡。必须在 .a 之前画，顺序才是「问→答」。
       if (!expectBubble && (ev.text || '').trim()) uMsg(ev.text, null, []);
@@ -1956,6 +2195,26 @@ function dispatch(ev) {
       }
       break;
 
+    case 'tool.progress':
+      // bash 等长工具的 stdout 增量（{callId, chunk}）：懒建 pre 区块持续追加，
+      // tool.result 到达时 fillToolCard 会整体重写卡片主体，进度区自然让位。
+      {
+        const card = toolEls[ev.callId];
+        if (card && ev.chunk != null && ev.chunk !== '') {
+          let pre = card.querySelector('.prog');
+          if (!pre) {
+            pre = document.createElement('div');
+            pre.className = 'df prog';
+            pre.style.cssText = 'white-space:pre-wrap;max-height:240px;overflow:auto';
+            card.querySelector('.dc-in').append(pre);
+          }
+          pre.textContent += /\n$/.test(ev.chunk) ? ev.chunk : ev.chunk + '\n';
+          pre.scrollTop = pre.scrollHeight;
+          follow();
+        }
+      }
+      break;
+
     case 'permission.request':
       {
         let card = toolEls[ev.callId];
@@ -1963,8 +2222,25 @@ function dispatch(ev) {
           card = toolCard(curA.querySelector('.ab'), ev.callId, ev.tool, ev.tool);
           toolEls[ev.callId] = card;
         }
-        showPermPanel(card, ev.callId);
+        showPermPanel(card, ev.callId, ev);
         follow();
+      }
+      break;
+
+    case 'permission.resolved':
+      // {id, decision}：anywhere 决策（本端点按钮、超时自动拒绝）都要收面板
+      {
+        const card = toolEls[ev.id];
+        if (card) {
+          if (card._ptimer) { clearInterval(card._ptimer); card._ptimer = null; }
+          const pm2 = card.querySelector('.pm');
+          if (pm2) pm2.innerHTML = '';
+          if (card.dataset.st === 'wait') {
+            card.dataset.st = '';
+            card.querySelector('.st-tx').textContent =
+              ev.decision === 'deny' ? t('dnd') : t('perm_run');
+          }
+        }
       }
       break;
 
@@ -1979,13 +2255,23 @@ function dispatch(ev) {
           fillToolCard(card, { kind:'ask', question: ev.question, options: ev.options || [] }, true, ev.question);
           const pm = card.querySelector('.pm');
           pm.innerHTML = '<div><span></span><input class="qin" style="flex:1;min-width:160px;padding:5px 8px;border:.5px solid var(--line);border-radius:8px;background:var(--input);color:inherit">' +
-            '<button data-d="send">' + t('a1') + '</button></div>';
+            '<button data-d="send">' + t('send_answer') + '</button></div>';
           pm.querySelector('span').textContent = '';
           const input = pm.querySelector('.qin');
           const sendBtn = pm.querySelector('button');
           const doSend = () => {
             api('/answer', { method: 'POST', body: { call_id: ev.callId, answer: input.value } })
-              .then(() => { pm.innerHTML = ''; })
+              .then(() => {
+                pm.innerHTML = '';
+                // 回答回显进问题卡片，事后翻记录能看到自己答了什么
+                const body = card.querySelector('.dc-in');
+                if (body) {
+                  const ans = document.createElement('div');
+                  ans.style.cssText = 'margin-top:8px;color:var(--fg)';
+                  ans.textContent = t('your_answer') + input.value;
+                  body.append(ans);
+                }
+              })
               .catch(err => toast(err.message));
           };
           sendBtn.onclick = e => { e.stopPropagation(); doSend(); };
@@ -2009,7 +2295,7 @@ function dispatch(ev) {
         const n = ev.compacted || 0;
         const note = document.createElement('p');
         note.style.cssText = 'font:12px var(--sans);color:var(--fg2);margin:0 0 8px;opacity:.75';
-        note.textContent = '已压缩 ' + n + ' 条早期消息以适应上下文窗口';
+        note.textContent = t('compacted').replace('{n}', n);
         if (curA) curA.querySelector('.ab').prepend(note);
       }
       break;
@@ -2025,6 +2311,7 @@ function dispatch(ev) {
       curThinkEl = null;
       thinkStart = 0;
       if (curA) {
+        stopSpin(curA);
         setActs(curA, true);
         foldFlow(curA, ev.ms);
         // 以存储为准校正最终答案：流式期间任何丢失（切换会话、SSE 断连、
@@ -2057,7 +2344,7 @@ function dispatch(ev) {
           if (curA) curA.querySelector('.ab').append(p);
         }
       }
-      if (ev.fatal) { busy = false; sync(); }
+      if (ev.fatal) { stopSpin(curA); busy = false; sync(); }
       break;
   }
 }
@@ -2068,15 +2355,30 @@ const kfmt = v => {
   return v < 1000 ? String(v) : (v / 1000).toFixed(v < 10000 ? 1 : 0) + 'K';
 };
 
+/** ms → 人类可读时长（毫秒 / 秒 / 分秒），用于模型用时、TTFT 等统计。 */
+function fmtMs(ms) {
+  ms = Number(ms) || 0;
+  if (ms <= 0) return t('dur_s').replace('{n}', 0);
+  if (ms < 1000) return ms + ' ' + t('u_ms');
+  const s = ms / 1000;
+  if (s < 60) return t('dur_s').replace('{n}', Math.round(s * 10) / 10);
+  const m = Math.floor(s / 60), r = Math.round(s % 60);
+  return t('dur_m').replace('{n}', m) + ' ' + t('dur_s').replace('{n}', r);
+}
+
 function applyStatus(ev) {
   const turns = ev.turns || 0, steps = ev.steps || 0, tps = ev.tps || 0;
-  $('#sb-stats-tx').textContent = turns + ' 轮 ' + steps + ' 步 · ' + tps + ' tok/s';
-  $('#p-stats-top').textContent = turns + ' 轮 ' + steps + ' 步';
+  $('#sb-stats-tx').textContent = turns + ' ' + t('u_turns') + ' ' + steps + ' ' + t('u_steps') + ' · ' + tps + ' tok/s';
+  $('#p-stats-top').textContent = turns + ' ' + t('u_turns') + ' ' + steps + ' ' + t('u_steps');
   $('#p-tps').textContent = tps + ' tok/s';
+  // 真实计时字段（SSE status / turn.end 的 camelCase 字段）
+  $('#p-model-ms').textContent = fmtMs(ev.modelMs || 0);
+  $('#p-tool-ms').textContent = fmtMs(ev.toolMs || 0);
+  $('#p-ttft').textContent = fmtMs(ev.ttftMs || 0);
 
   const tk = ev.tokens || {};
   const total = tk.total || 0;
-  $('#sb-token-tx').textContent = kfmt(total) + ' tok · 缓存命中 ' + (tk.cacheHit || 0) + '%';
+  $('#sb-token-tx').textContent = kfmt(total) + ' tok · ' + t('cache_hit') + ' ' + (tk.cacheHit || 0) + '%';
   $('#p-token-top').textContent = total.toLocaleString() + ' tok';
   $('#p-cache-hit').textContent = (tk.cacheHit || 0) + '%';
   $('#p-uncached').textContent = (tk.uncached || 0).toLocaleString() + ' tok';
@@ -2127,25 +2429,32 @@ document.addEventListener('click', e => {
    ================================================================== */
 function sync() {
   sd.innerHTML = ic(busy ? 'stop' : 'send');
-  sd.disabled = !busy && !ta.value.trim() && !ATTS.length;
+  // 附件还在上传时也禁用发送（上传失败的会被移出列表）
+  sd.disabled = (!busy && !ta.value.trim() && !ATTS.length) || ATTS.some(a => a.loading);
 }
+
+// 首条消息尚无会话 id 时点停止：先记标记，拿到 sessionId 后补发 interrupt
+let pendingInterrupt = false;
 
 async function run(q) {
   if (busy) return;
+  if (ATTS.some(a => a.loading)) { toast(t('att_uploading')); return; }
   const atts = ATTS.slice();
   ATTS = [];
   renderAtts();
   resetTurn();
+  pendingInterrupt = false;
 
   const title = q ? q.slice(0, 28) : (atts[0] ? atts[0].name : '附件');
   if (!conv) {
-    conv = { id: null, title, workspace: '' };
+    conv = { id: null, title, workspace: '', pendingText: q || '' };
     document.body.classList.add('chat');
     $('#ttl').textContent = title;
     apply();
+  } else if (!conv.id) {
+    conv.pendingText = q || '';
   }
 
-  const attPaths = atts.filter(a => a.path);
   uMsg(q, null, atts);
   expectBubble = true;
   busy = true;
@@ -2158,10 +2467,12 @@ async function run(q) {
       body: {
         session_id: conv.id || '',
         text: q,
-        attachments: attPaths.map(a => ({ path: a.path, name: a.name, size: a.size })),
+        attachments: atts.filter(a => a.path).map(a => ({ path: a.path, name: a.name, size: a.size })),
         model: S.model,
         permission_mode: S.perm,
-        thinking_level: S.lvl
+        // 契约：永远发 0-3，0 = 显式关闭思考
+        thinking_level: Math.max(0, Math.min(3, +S.lvl || 0)),
+        plan_mode: !!S.plan
       }
     });
     if (res && res.sessionId) {
@@ -2173,10 +2484,16 @@ async function run(q) {
         loadSessions(true);
         refreshGoalBadge();
       }
+      // 首条消息期间按了停止：现在才有会话 id，补发 interrupt
+      if (pendingInterrupt) {
+        pendingInterrupt = false;
+        api('/interrupt', { method: 'POST', body: { session_id: conv.id } }).catch(() => {});
+      }
     }
   } catch (e) {
     busy = false;
     expectBubble = false;
+    stopSpin(curA);
     sync();
     toast(e.message);
     const p = document.createElement('p');
@@ -2205,6 +2522,44 @@ async function runCompact() {
     toast(z ? ('已压缩 ' + (r.folded || 0) + ' 条旧消息') : ('Compacted ' + (r.folded || 0) + ' old messages'));
     if (r.folded) openSession(conv.id);
   } catch (e) { toast(e.message); }
+}
+
+/**
+ * /clear：服务端与本地一起清。DELETE /api/sessions/:id/messages
+ * body {from: 0}（TruncateReq.from=0，to 缺省 = 截到末尾）。
+ */
+async function clearConv() {
+  try {
+    if (conv && conv.id) {
+      await api('/sessions/' + conv.id + '/messages', { method: 'DELETE', body: { from: 0 } });
+    }
+    feed.innerHTML = '';
+    resetTurn();
+    toast(t('clear'));
+  } catch (e) { toast(e.message); }
+}
+
+/** /status：GET /api/status 渲染成一条对话内的状态卡片。 */
+async function runStatus() {
+  const z = S.lang === 'zh';
+  let txt;
+  try {
+    const r = await api('/status');
+    txt = (z ? '服务状态' : 'Server status') + '\n' +
+      '· ' + (z ? '运行时长' : 'uptime') + ': ' + fmtDur(r.uptimeMs || 0) + '\n' +
+      '· ' + (z ? '当前模型' : 'model') + ': ' + (r.model || '-') + '\n' +
+      '· ' + (z ? '权限模式' : 'permission') + ': ' + t('p_' + (r.permissionMode || 'ask')) + '\n' +
+      '· ' + (z ? '思考强度' : 'thinking') + ': ' + t('l' + (r.thinkingLevel != null ? r.thinkingLevel : 2)) + '\n' +
+      '· ' + (z ? '工作区' : 'workspace') + ': ' + (r.workspace || '-');
+  } catch (e) { toast(e.message); return; }
+  document.body.classList.add('chat');
+  const a = aMsg();
+  const p = document.createElement('p');
+  p.style.cssText = 'white-space:pre-wrap;font:13px/1.7 var(--mono)';
+  p.textContent = txt;
+  a.querySelector('.ab').append(p);
+  setActs(a, true);
+  follow();
 }
 
 function goalStatusLabel(s) {
@@ -2266,17 +2621,25 @@ async function refreshGoalBadge() {
   } catch (e) { /* 会话未建立等场景静默 */ }
 }
 
+/** Stop the in-flight turn; first-message turns defer until the session id exists. */
+function stopTurn() {
+  if (sig) sig.stop = true;
+  if (conv && conv.id) api('/interrupt', { method: 'POST', body: { session_id: conv.id } }).catch(() => {});
+  else pendingInterrupt = true;
+}
+
 function send() {
   if (busy) {
-    if (sig) sig.stop = true;
-    if (conv && conv.id) api('/interrupt', { method: 'POST', body: { session_id: conv.id } }).catch(() => {});
+    stopTurn();
     return;
   }
   const q = ta.value.trim();
   if (!q && !ATTS.length) return;
+  // 附件还在上传：提示并保留输入，不吞掉用户文字
+  if (ATTS.some(a => a.loading)) { toast(t('att_uploading')); return; }
   // 插件命令：/name <参数> → 展开模板后作为提示词发送
   for (const pc of (PLUGIN_CMDS || [])) {
-    const re = new RegExp('^/' + pc.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?:\\s+([\\s\\S]*))?$');
+    const re = new RegExp('^/' + pc.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?:\\s+([\\s\\S]*))?$', 'i');
     const m = q.match(re);
     if (m && !ATTS.length) {
       ta.value = '';
@@ -2286,13 +2649,15 @@ function send() {
       return;
     }
   }
-  // 斜杠命令不进模型：/compact 立即压缩上下文；/goal 管理持久目标
-  const cmd = q.match(/^\/(compact|goal)(?:\s+([\s\S]*))?$/i);
+  // 斜杠命令不进模型：/compact 压缩上下文；/goal 持久目标；/status 服务状态
+  const cmd = q.match(/^\/(compact|goal|status)(?:\s+([\s\S]*))?$/i);
   if (cmd && !ATTS.length) {
     ta.value = '';
     fit();
     slClose();
-    if (cmd[1].toLowerCase() === 'compact') runCompact();
+    const k = cmd[1].toLowerCase();
+    if (k === 'compact') runCompact();
+    else if (k === 'status') runStatus();
     else runGoal((cmd[2] || '').trim());
     return;
   }
@@ -2349,9 +2714,30 @@ feed.addEventListener('click', e => {
   }
 });
 
-function copyText(s) {
-  try { navigator.clipboard.writeText(s).catch(() => {}); } catch (x) {}
-  toast(t('copied'));
+/**
+ * Copy text to the clipboard. Resolves true on success (toast 已复制 unless
+ * silent), false on failure (toast 复制失败 — never fake success).
+ */
+function copyText(s, silent) {
+  const ok = () => { if (!silent) toast(t('copied')); return true; };
+  const fail = () => { toast(t('copy_fail')); return false; };
+  const legacy = () => {
+    try {
+      const t2 = document.createElement('textarea');
+      t2.value = s;
+      t2.style.cssText = 'position:fixed;opacity:0';
+      document.body.append(t2);
+      t2.select();
+      const done = document.execCommand('copy');
+      t2.remove();
+      return done ? ok() : fail();
+    } catch (x) { return fail(); }
+  };
+  try {
+    return navigator.clipboard.writeText(s).then(ok, legacy);
+  } catch (x) {
+    return Promise.resolve(legacy());
+  }
 }
 
 /** Collapse `el` to zero height and remove it. */
@@ -2374,7 +2760,7 @@ function collapseGone(el, done) {
  * [mi, miEnd). Deleting the visible bubble deletes exactly that range.
  */
 function deleteMsg(el) {
-  if (!el) return;
+  if (!el || busy) return;   // 生成中不动消息，避免与在途下标错位
   const idx = el.dataset.mi;
   collapseGone(el, restamp);
   if (conv && conv.id && idx != null && idx !== 'null') {
@@ -2512,26 +2898,73 @@ const fileIn = $('#fileIn');
 $('#attbtn').onclick = () => fileIn.click();
 fileIn.onchange = () => { addFiles(fileIn.files); fileIn.value = ''; };
 
-function addFiles(list) {
-  [...list].forEach(f => {
-    if (ATTS.length >= 6) return;
-    if (ATTS.some(x => x.name === f.name && x.size === f.size)) return;
-    ATTS.push({ name: f.name, size: f.size, type: f.type, path: f.path || '' });
-  });
-  renderAtts();
-  sync();
+/**
+ * 选择 / 拖入文件后先上传到 POST /api/attachments?name=<encodeURIComponent>，
+ * 成功后把返回的 {path, kind, name, size} 存进 ATTS；发送时 chat 请求带
+ * [{path, name, size}]（Attachment serde 结构）。上传失败 toast 并从列表移除，
+ * 阻止发送。不再依赖浏览器 File.path（该字段根本不存在）。
+ */
+async function addFiles(list) {
+  for (const f of [...list]) {
+    if (ATTS.length >= 6) break;
+    if (ATTS.some(x => x.name === f.name && x.size === f.size)) continue;
+    const att = { name: f.name, size: f.size, type: f.type, path: '', kind: 'file', loading: true, url: null };
+    ATTS.push(att);
+    renderAtts();
+    sync();
+    try {
+      const res = await fetch('/api/attachments?name=' + encodeURIComponent(f.name), {
+        method: 'POST',
+        headers: { 'X-Parable-Token': TOKEN },
+        body: f
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data || !data.path) {
+        throw new Error((data && data.error) || (res.status + ' ' + res.statusText));
+      }
+      att.path = data.path;
+      att.kind = data.kind || 'file';
+      att.loading = false;
+      // 图片附件本地预览：objectURL 只在浏览器内存里，刷新前有效
+      if (att.kind === 'image' && typeof URL.createObjectURL === 'function') {
+        att.url = URL.createObjectURL(f);
+      }
+    } catch (e) {
+      const i = ATTS.indexOf(att);
+      if (i >= 0) ATTS.splice(i, 1);
+      renderAtts();
+      sync();
+      toast(t('att_fail') + e.message);
+      continue;
+    }
+    renderAtts();
+    sync();
+  }
 }
 
 function renderAtts() {
   const el = $('#atts');
   el.innerHTML = ATTS.map((a, i) =>
-    '<span class="att">' + ic('file') + '<b></b><span class="x" data-ax="' + i + '">×</span></span>'
+    '<span class="att' + (a.loading ? ' upl' : '') + '">' +
+    (a.url ? '<img class="attimg" alt="">' : ic('file')) +
+    '<b></b>' + (a.loading ? '<span class="upltxt">…</span>' : '') +
+    '<span class="x" data-ax="' + i + '">×</span></span>'
   ).join('');
-  el.querySelectorAll('b').forEach((b, i) => b.textContent = ATTS[i].name);
+  el.querySelectorAll('.att').forEach((s, i) => {
+    const a = ATTS[i];
+    const im = s.querySelector('.attimg');
+    if (im) im.src = a.url;
+    s.querySelector('b').textContent = a.name + (a.loading ? ' · ' + t('att_uploading') : '');
+  });
 }
 $('#atts').onclick = e => {
   const x = e.target.closest('[data-ax]');
-  if (x) { ATTS.splice(+x.dataset.ax, 1); renderAtts(); sync(); }
+  if (x) {
+    const gone = ATTS.splice(+x.dataset.ax, 1)[0];
+    if (gone && gone.url) { try { URL.revokeObjectURL(gone.url); } catch (err) {} }
+    renderAtts();
+    sync();
+  }
 };
 document.addEventListener('dragover', e => { e.preventDefault(); document.body.classList.add('dragging'); });
 document.addEventListener('dragleave', e => { if (!e.relatedTarget) document.body.classList.remove('dragging'); });
@@ -2618,29 +3051,62 @@ async function loadSessions(quiet) {
       id: s.id, t: s.title, ts: s.updated_at || s.created_at,
       pin: s.pinned, pinAt: s.updated_at, group: s.group, arch: !!s.archived
     }));
-    $('#rcp').innerHTML = '<div class="rch" data-i="pinned">' + t('pinned') + '</div>';
-    $('#rcu').innerHTML = '';
-    $('#rca').innerHTML = '<div class="rch" data-i="archd">' + t('archd') + '</div>';
-    CONVS.forEach(addRc);
+    // 按 dataset.id diff：已存在的节点原位复用（只更新标题/置顶/归档态），
+    // 只给真正新增的节点加 .in 入场动画，避免每次刷新整列重播。
+    const seen = new Set();
+    CONVS.forEach(c => {
+      seen.add(c.id);
+      let el = document.querySelector('#rcs .rc[data-id="' + c.id + '"]');
+      if (el) {
+        el.querySelector('.rct').textContent = c.t;
+        if (c.ts) el.dataset.ts = c.ts;
+        el.classList.remove('in');
+        el.classList.toggle('arch', !!c.arch);
+        el.classList.toggle('pin', !!c.pin && !c.arch);
+        if (c.pin && !c.arch) el.dataset.pinAt = c.pinAt || el.dataset.pinAt || '';
+        else delete el.dataset.pinAt;
+      } else {
+        el = addRc(c);
+      }
+      // 归档态变化时挪组（置顶/归档互斥）
+      const want = c.arch ? $('#rca') : (c.pin ? $('#rcp') : $('#rcu'));
+      if (el.parentElement !== want) {
+        el.classList.remove('in');
+        want.append(el);
+      }
+    });
+    ['rcp', 'rcu', 'rca'].forEach(g => {
+      document.querySelectorAll('#' + g + ' .rc').forEach(el => {
+        if (!seen.has(el.dataset.id)) el.remove();
+      });
+    });
+    sortRcs();
+    refreshTimes();
   } catch (e) {
     if (!quiet) toast(e.message);
   }
 }
 
+let openTok = 0;   // openSession 竞态令牌：连点两个会话时旧请求直接作废
 async function openSession(id) {
+  const my = ++openTok;
   try {
     const res = await api('/sessions/' + id + '/messages');
+    if (my !== openTok) return;
     go(null);
     if (busy && sig) sig.stop = true;
     busy = false;
+    pendingInterrupt = false;
     // busy 变了发送键的图标也得跟着变，否则切到别的对话还挂着停止键
     sync();
     if (document.body.classList.contains('chat')) {
       feed.classList.add('fo');
       $('#ttl').classList.add('fo');
       await sleep(A(300));
+      if (my !== openTok) return;
     }
     conv = { id, title: (CONVS.find(c => c.id === id) || {}).t || '' };
+    ignoreSid = '';
     feed.innerHTML = '';
     resetTurn();
     document.body.classList.add('chat');
@@ -2700,9 +3166,9 @@ async function openSession(id) {
           const card = toolCard(ensureA(), p.id, p.name, toolTitle(p.name, p.args));
           cardById[p.id] = card;
         } else if (p.k === 'text') {
-          const el = document.createElement('p');
-          ensureA().append(el);
-          await inline(el, p.text, { stop: false }, true);
+          // 与实时视图一致：走整块 markdown 渲染（instant，无逐字动画），
+          // 不再用 inline() 拍平 —— 否则代码块/列表在历史里全变成纯文本。
+          renderBlocks(ensureA(), p.text || '');
         }
       }
     }
@@ -2754,6 +3220,8 @@ async function restamp() {
   const nodes = [...feed.children]
     .filter(n => n.classList.contains('u') || n.classList.contains('a'));
   nodes.forEach(n => { delete n.dataset.mi; delete n.dataset.miEnd; delete n.dataset.raw; });
+  // 下标回填成功后重新点亮编辑/删除/重试按钮（渲染时 idx 未知会先挂 .off）
+  const light = n => n.querySelectorAll('.ib.off').forEach(b => b.classList.remove('off'));
   let ni = 0;
   for (let i = 0; i < msgs.length && ni < nodes.length; i++) {
     const m = msgs[i];
@@ -2763,6 +3231,7 @@ async function restamp() {
       if (!node.classList.contains('u')) break;   // DOM 与存储脱节，别乱贴
       node.dataset.mi = i;
       node.dataset.miEnd = i + 1;
+      light(node);
       ni++;
     } else if (node.classList.contains('a')) {
       if (node.dataset.mi === undefined) {
@@ -2770,6 +3239,7 @@ async function restamp() {
         node.dataset.raw = '';
       }
       node.dataset.miEnd = i + 1;
+      light(node);
       if (m.role === 'assistant' && tx.length) {
         const add = tx.map(x => x.text).join('\n\n');
         node.dataset.raw = node.dataset.raw ? node.dataset.raw + '\n\n' + add : add;
@@ -2876,6 +3346,7 @@ function openChatMenu(c, el, x, y) {
     (archd ? '' : it('pin', t(pinned ? 'cm_unpin' : 'cm_pin'))) +
     it('rename', t('cm_rename')) +
     it('cid', t('cm_cpid')) +
+    it('set', t('setnav')) +
     '<div class="csep"></div>' +
     it('delete', t('cm_delete'), ' danger');
   CM.classList.add('open');
@@ -2927,6 +3398,8 @@ function renameChat(c, el) {
 
 function deleteChat(c, el) {
   if (!el) return;
+  // 删除会话不可恢复，先轻确认（双语）
+  if (!window.confirm(t('cf_del_chat'))) return;
   el.style.height = el.offsetHeight + 'px';
   void el.offsetHeight;
   el.classList.add('out');
@@ -2949,10 +3422,7 @@ CM.addEventListener('click', e => {
   const item = e.target.closest('[data-cm]');
   if (!item) return;
   const k = item.dataset.cm;
-  const cp = s => {
-    try { navigator.clipboard.writeText(s).catch(() => {}); } catch (x) {}
-    toast(t('copied'));
-  };
+  const cp = s => { copyText(s); };
   if (k === 'pin') {
     const on = !el.classList.contains('pin');
     el.classList.toggle('pin', on);
@@ -3002,6 +3472,10 @@ CM.addEventListener('click', e => {
     return;
   } else if (k === 'cid') {
     cp(c.id || '');
+  } else if (k === 'set') {
+    closeChatMenu();
+    openSet();
+    return;
   }
   closeChatMenu();
 });
@@ -3013,6 +3487,8 @@ function newChat() {
   go(null);
   if (sig) sig.stop = true;
   busy = false;
+  pendingInterrupt = false;
+  ignoreSid = '';
   sync();
   conv = null;
   refreshGoalBadge();
@@ -3032,22 +3508,39 @@ function newChat() {
 /* ==================================================================
    export
    ================================================================== */
-function exportChat() {
+async function exportChat() {
   if (!conv) { toast(t('export_none')); return; }
-  let md = '# ' + ($('#ttl').textContent || 'conversation') + '\n\n';
-  const walk = feed.querySelectorAll('.u, .a');
-  walk.forEach(el => {
-    if (el.classList.contains('u')) {
-      md += '## You\n\n' + el.querySelector('.ub').innerText + '\n\n';
-    } else {
-      md += '## Parable\n\n' + el.querySelector('.ab').innerText + '\n\n';
-    }
-  });
+  const title = $('#ttl').textContent || 'conversation';
+  let md = '# ' + title + '\n\n';
+  // 优先用服务端存储拼装（完整、与落盘一致）；失败降级为当前 DOM 快照
+  let fromServer = false;
+  if (conv.id) {
+    try {
+      const r = await api('/sessions/' + conv.id + '/messages');
+      for (const m of (r.messages || [])) {
+        const txt = normParts(m.parts).filter(p => p.k === 'text')
+          .map(p => p.text).join('\n\n').trim();
+        if (!txt) continue;
+        md += (m.role === 'user' ? '## You\n\n' : '## Parable\n\n') + txt + '\n\n';
+        fromServer = true;
+      }
+    } catch (e) { /* 降级 DOM */ }
+  }
+  if (!fromServer) {
+    const walk = feed.querySelectorAll('.u, .a');
+    walk.forEach(el => {
+      if (el.classList.contains('u')) {
+        md += '## You\n\n' + el.querySelector('.ub').innerText + '\n\n';
+      } else {
+        md += '## Parable\n\n' + el.querySelector('.ab').innerText + '\n\n';
+      }
+    });
+  }
   try {
     const b = new Blob([md], { type: 'text/markdown;charset=utf-8' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(b);
-    a.download = ($('#ttl').textContent || 'conversation').replace(/[\\/:*?"<>|]/g, '_') + '.md';
+    a.download = title.replace(/[\\/:*?"<>|]/g, '_') + '.md';
     document.body.append(a);
     a.click();
     a.remove();
@@ -3066,11 +3559,8 @@ function slashList() {
   const z = S.lang === 'zh';
   return [
     { k:'new', ic:'plus', t:z?'新对话':'New chat', run: () => newChat() },
-    { k:'clear', ic:'trash', t:z?'清空当前对话':'Clear conversation', run: () => {
-        feed.innerHTML = '';
-        resetTurn();
-        toast(t('clear'));
-      }},
+    { k:'clear', ic:'trash', t:z?'清空当前对话':'Clear conversation', run: () => clearConv() },
+    { k:'status', ic:'clock', t:z?'查看服务状态':'Server status', run: () => runStatus() },
     { k:'export', ic:'dl', t:z?'导出为 Markdown':'Export as Markdown', run: () => exportChat() },
     { k:'theme', ic:'art', t:z?'切换浅色 / 深色':'Toggle light / dark', run: () => {
         S.theme = S.theme === 'dark' ? 'light' : 'dark'; apply();
@@ -3264,7 +3754,10 @@ function tpRender() {
   $('#tp').innerHTML = '<div class="gl">' + t('permT') + '</div>' + PK.map(k =>
     '<div class="mi" data-pk="' + k + '"><div>' + t('p_' + k) + '<small>' + t('d_' + k) + '</small></div>' +
     (S.perm === k ? ic('check') : '') + '</div>'
-  ).join('');
+  ).join('') +
+  '<div class="csep" style="margin:6px 7px"></div>' +
+  '<div class="mi" data-plan="1"><div>' + t('plan_mode') + '<small>' + t('plan_mode_h') + '</small></div>' +
+  (S.plan ? ic('check') : '') + '</div>';
 }
 $('#tb2').onclick = e => {
   e.stopPropagation();
@@ -3274,6 +3767,14 @@ $('#tb2').onclick = e => {
 };
 $('#tp').onclick = e => {
   e.stopPropagation();
+  // 计划模式开关：run() 会把 plan_mode 一并下发给 chat 请求
+  if (e.target.closest('[data-plan]')) {
+    S.plan = !S.plan;
+    apply();
+    tpRender();
+    toast(t('plan_mode') + ' · ' + (S.plan ? 'ON' : 'OFF'));
+    return;
+  }
   const x = e.target.closest('[data-pk]');
   if (!x) return;
   S.perm = x.dataset.pk;
@@ -3508,19 +4009,21 @@ function panel() {
       } else if (c.t === 'sp') {
         // Show the exact system text the harness will send to the model server
         // on the next turn of the current session (raw override included).
+        // 没有活动会话时禁用按钮（.off），而不是点了才报错。
         ct.className = '';
-        ct.innerHTML = '<button class="btn">' + t('sysprev') + '</button>' +
+        ct.innerHTML = '<button class="btn' + (!(conv && conv.id) ? ' off' : '') + '">' + t('sysprev') + '</button>' +
           '<pre id="spp" style="display:none;max-height:280px;overflow:auto;margin-top:12px;' +
           'padding:12px;border:1px solid var(--line);border-radius:10px;white-space:pre-wrap;' +
           'font-family:var(--mono,monospace);font-size:12px;line-height:1.5"></pre>';
         ct.firstChild.onclick = async () => {
+          if (!(conv && conv.id)) { toast(S.lang === 'zh' ? '先发一条消息建立会话' : 'Start a chat first'); return; }
           const pre = $('#spp');
           pre.style.display = 'block';
           pre.textContent = '…';
           try {
             const r = await api('/sessions/' + conv.id + '/prompt');
-            pre.textContent = (r && r.system) ? r.system : '(空 — 下一轮会话将没有 system 提示词)';
-          } catch (e) { pre.textContent = '预览失败：' + e; }
+            pre.textContent = (r && r.system) ? r.system : t('sysprev_empty');
+          } catch (e) { pre.textContent = t('sysprev_fail') + e.message; }
         };
       }
     };
@@ -3586,6 +4089,8 @@ function mpDetail() {
         (m.context ? '<span class="mp-badge">' + esc(kfmt(m.context)) + '</span>' : '') +
         (m.vision ? '<span class="mp-badge">' + t('mp_vision') + '</span>' : '') +
         '<span class="fl"></span>' +
+        '<button class="ib" data-mpmedit="' + i + '" title="' + t('mp_edit') + '">' + ic('edit') + '</button>' +
+        '<button class="ib danger" data-mpmdel="' + i + '" title="' + t('mp_del') + '">' + ic('trash') + '</button>' +
         '<button class="tg' + (m.enabled ? ' on' : '') + '" data-mpm="' + i + '" title="' + t('mp_enabled') + '"></button>' +
         '</div>'
       ).join('')
@@ -3595,6 +4100,7 @@ function mpDetail() {
     '<div class="mp-ph">' +
       '<span class="mp-ic" style="background:' + esc(p.color || '#4d6bfe') + '">' + esc(p.icon || 'S') + '</span>' +
       '<h3 id="mpname">' + esc(mpName(p)) + '</h3>' +
+      '<button class="ib danger" data-mppdel="1" title="' + t('mp_del') + '">' + ic('trash') + '</button>' +
       '<button class="tg' + (p.enabled ? ' on' : '') + '" data-mpp="1" title="' + t('mp_enabled') + '"></button>' +
     '</div>' +
     '<div class="mp-field"><label>' + t('mp_base') + '</label>' +
@@ -3603,7 +4109,7 @@ function mpDetail() {
       '<select class="mp-in" data-mpf="api">' + MPAPI.map(([v, l]) =>
         '<option value="' + v + '"' + (p.api === v ? ' selected' : '') + '>' + l + '</option>').join('') +
       '</select></div>' +
-    '<div class="mp-field"><label><span>API Key</span></label>' +
+    '<div class="mp-field"><label><span>API Key</span><a href="#" data-mpgetkey="1">' + t('mp_getkey') + '</a></label>' +
       '<div class="mp-key"><input class="mp-in" type="password" data-mpf="key" value="' + esc(p.key || '') + '" placeholder="sk-..." spellcheck="false">' +
       '<button class="mp-eye" data-mpeye="1" title="API Key">' + ic('eye') + '</button></div></div>' +
     '<div class="mp-field"><label>' + t('mp_name') + '</label>' +
@@ -3654,6 +4160,61 @@ $('#sp').addEventListener('click', e => {
     return;
   }
 
+  // 模型改名：prompt 输入新名，PATCH {id, models:[{id, name}]}
+  const me = e.target.closest('[data-mpmedit]');
+  if (me) {
+    const p = mpCur();
+    const m = (p.models || [])[+me.dataset.mpmedit];
+    if (!m) return;
+    const cur = m.name || m.id;
+    const nn = window.prompt(t('mp_edit'), cur);
+    if (nn && nn.trim() && nn.trim() !== cur) {
+      pushProvider({ id: p.id, models: [{ id: m.id, name: nn.trim() }] });
+    }
+    return;
+  }
+
+  // 删模型：PATCH {id, models:[{id, deleted:true}]}
+  const md = e.target.closest('[data-mpmdel]');
+  if (md) {
+    const p = mpCur();
+    const m = (p.models || [])[+md.dataset.mpmdel];
+    if (!m) return;
+    if (!window.confirm(t('mp_del_model').replace('{n}', m.name || m.id))) return;
+    pushProvider({ id: p.id, models: [{ id: m.id, deleted: true }] });
+    return;
+  }
+
+  // 删供应商：PATCH {id, deleted:true}（连带其全部模型）
+  const pd = e.target.closest('[data-mppdel]');
+  if (pd) {
+    const p = mpCur();
+    if (!p) return;
+    if (!window.confirm(t('mp_del_confirm').replace('{n}', mpName(p)))) return;
+    api('/config', { method: 'PATCH', body: { providers: [{ id: p.id, deleted: true }] } })
+      .then(() => {
+        mpSel = null;
+        toast(t('mp_deleted'));
+        return loadProviders();
+      })
+      .then(() => { mpList(); mpDetail(); })
+      .catch(err => toast(err.message));
+    return;
+  }
+
+  // 按 API 格式打开对应的控制台获取 Key
+  const gk = e.target.closest('[data-mpgetkey]');
+  if (gk) {
+    e.preventDefault();
+    const p = mpCur();
+    const apiFmt = (p && p.api) || 'anthropic';
+    const url = apiFmt === 'anthropic'
+      ? 'https://console.anthropic.com/settings/keys'
+      : 'https://platform.openai.com/api-keys';
+    try { window.open(url, '_blank', 'noopener'); } catch (err) {}
+    return;
+  }
+
   const pt = e.target.closest('[data-mpp]');
   if (pt) {
     const p = mpCur();
@@ -3664,7 +4225,11 @@ $('#sp').addEventListener('click', e => {
 
   if (e.target.closest('[data-mpaddm]')) {
     const p = mpCur();
-    const id = 'new-model-' + ((p.models || []).length + 1);
+    const models = p.models || (p.models = []);
+    // 去重：已有 new-model-N 时跳到下一个可用编号
+    let n = 1;
+    while (models.some(m => m.id === 'new-model-' + n)) n++;
+    const id = 'new-model-' + n;
     pushProvider({ id: p.id, models: [{ id, name: id, context: 128000, vision: false, thinking: false, enabled: true }] });
     return;
   }
@@ -3768,8 +4333,7 @@ addEventListener('keydown', e => {
     if (SLOPEN) { slClose(); return; }
     if ($('#modal').classList.contains('open')) { closeSet(); return; }
     if (busy && sig) {
-      sig.stop = true;
-      if (conv && conv.id) api('/interrupt', { method: 'POST', body: { session_id: conv.id } }).catch(() => {});
+      stopTurn();
     }
     return;
   }
@@ -3786,20 +4350,94 @@ addEventListener('keydown', e => {
    SSE
    ================================================================== */
 let es = null;
+// 重连后 busy 看门狗：断连期间错过 turn.end 会把 busy 卡死。重连成功且仍
+// busy 时启动 15s 静默计时，期间本端收到任何事件即解除；到点仍无事件视为
+// turn 已死（或从未开始），复位 busy。只在「发生过断连」时武装，正常思考
+// 停顿不受影响。
+let busyWatchdog = null;
+function disarmBusyWatchdog() { clearTimeout(busyWatchdog); busyWatchdog = null; }
 function connectEvents() {
   if (es) { try { es.close(); } catch (e) {} }
   es = new EventSource('/api/events?token=' + encodeURIComponent(TOKEN));
   es.onmessage = e => {
+    disarmBusyWatchdog();
     try { dispatch(JSON.parse(e.data)); } catch (err) {}
+  };
+  es.onopen = () => {
+    // 重连成功：清空 seq 去重水位，恢复统计显示与挂起的权限面板；
+    // 顺带纠正卡死的 busy（断连期间错过了 turn.end 且本端没有在途标记）。
+    lastSeq = 0;
+    connectEvents.warned = false;
+    loadServerStatus();
+    restorePending();
+    if (busy && conv && conv.id) {
+      if (!INFLIGHT[conv.id]) {
+        busy = false;
+        stopSpin(curA);
+        sync();
+        // 不在途却断过连：以存储校正一次收尾视图
+        reconcileTail();
+      } else {
+        // INFLIGHT 还挂着：turn 可能在断连期间已结束。挂看门狗兜底；
+        // turn 真还在跑时不动 DOM（reconcileTail 会拆掉在途流式节点）。
+        disarmBusyWatchdog();
+        busyWatchdog = setTimeout(() => {
+          busyWatchdog = null;
+          if (busy) {
+            busy = false;
+            stopSpin(curA);
+            sync();
+            reconcileTail();
+          }
+        }, 15000);
+      }
+    }
   };
   es.onerror = () => {
     // EventSource reconnects on its own; surface it once.
     if (!connectEvents.warned) {
       connectEvents.warned = true;
-      toast('连接中断，正在重连…');
+      toast(t('conn_lost'));
     }
     setTimeout(() => { connectEvents.warned = false; }, 4000);
   };
+}
+
+/**
+ * 断线重连（以及 boot）后恢复：GET /api/pending 拿回挂起的权限请求，
+ * 逐个重建工具卡片 + 权限面板（{id, tool, path, risk, reason, diffPreview}，
+ * id 即事件里的 callId）。
+ */
+async function restorePending() {
+  let list = [];
+  try {
+    const r = await api('/pending');
+    list = r.permissions || [];
+  } catch (e) { return; }
+  for (const p of list) {
+    const callId = p.id || p.callId;
+    if (!callId || toolEls[callId]) continue;
+    if (!curA) startTurnUI();
+    const card = toolCard(curA.querySelector('.ab'), callId, p.tool, p.tool);
+    toolEls[callId] = card;
+    showPermPanel(card, callId, p);
+  }
+  if (list.length) follow();
+}
+
+/**
+ * GET /api/status：恢复服务端配置驱动的显示（模型/权限模式/思考强度）。
+ * boot 与每次 SSE 重连成功后调用。
+ */
+async function loadServerStatus() {
+  try {
+    const r = await api('/status');
+    let dirty = false;
+    if (r.model && r.model !== S.model) { S.model = r.model; dirty = true; }
+    if (r.permissionMode && r.permissionMode !== S.perm) { S.perm = r.permissionMode; dirty = true; }
+    if (r.thinkingLevel !== undefined && +r.thinkingLevel !== +S.lvl) { S.lvl = +r.thinkingLevel || 0; dirty = true; }
+    if (dirty) apply(false);
+  } catch (e) { /* 服务不可达时保持本地值 */ }
 }
 
 /* ==================================================================
@@ -3836,10 +4474,13 @@ async function boot() {
   resetStatus();
   connectEvents();
   greetAnim();
+  // 侧栏相对时间每分钟自动刷新（单页应用常驻即可）
+  setInterval(refreshTimes, 60000);
 
   await Promise.all([
     loadSessions(true),
-    loadModels()
+    loadModels(),
+    loadServerStatus()
   ]);
 }
 

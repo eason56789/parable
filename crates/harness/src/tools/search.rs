@@ -58,6 +58,9 @@ pub fn grep(
     max_results: usize,
 ) -> Result<ToolOutcome, HarnessError> {
     use regex::RegexBuilder;
+    // max_results=0 会让"结果 >= 上限"永远成立,首轮就 cap 且提示荒谬的
+    // "capped at 0 results"——归一成默认值。
+    let max_results = if max_results == 0 { 200 } else { max_results };
     let mut builder = RegexBuilder::new(pattern);
     builder.case_insensitive(ignore_case);
     let re = builder
@@ -92,13 +95,14 @@ pub fn grep(
         if meta.len() > 2 * 1024 * 1024 {
             continue;
         }
-        let Ok(text) = std::fs::read_to_string(path) else {
-            continue;
-        };
+        // 先计数再读:避免实际读取的文件数超过上限一个
         scanned_files += 1;
         if scanned_files > 20_000 {
             break;
         }
+        let Ok(text) = std::fs::read_to_string(path) else {
+            continue;
+        };
         for (i, line) in text.lines().enumerate() {
             if re.is_match(line) {
                 let rel = path.strip_prefix(root).unwrap_or(path);

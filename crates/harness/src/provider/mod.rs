@@ -98,7 +98,8 @@ pub struct ChatRequest {
     pub messages: Vec<Msg>,
     pub tools: Vec<ToolSpec>,
     pub max_tokens: u32,
-    /// 0 = off, 1 = low, 2 = medium, 3 = high. Mapped per provider.
+    /// 思考档位:0 = 显式关闭(不发送任何 thinking/reasoning 参数),1 = low,
+    /// 2 = medium,3 = high。各 provider 自行映射到线上协议的具体字段。
     pub thinking_level: u32,
 }
 
@@ -107,6 +108,11 @@ pub struct ChatRequest {
 pub enum StreamChunk {
     Text(String),
     Reasoning(String),
+    /// 思考流结束:携带 provider 的 thinking 签名,上层回填到
+    /// `AsstPart::Thinking.signature`,Anthropic 回放时必需。
+    ReasoningDone {
+        signature: String,
+    },
     ToolCallStart {
         id: String,
         name: String,

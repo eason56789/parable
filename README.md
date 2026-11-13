@@ -98,18 +98,23 @@ UI 里：设置 → 模型设置 → 添加供应商 → 填 Base URL / API Key 
 
 ## 工具集
 
+核心文件/shell 工具:
+
 | 工具 | 风险 | 说明 |
 |---|---|---|
-| `read_file` | 只读 | 带行号，支持 offset/limit，超限截断并提示续读 |
-| `write_file` | 写 | 覆盖写，已存在文件会先生成 diff 预览进权限面板 |
-| `edit_file` | 写 | 精确字符串替换，唯一性校验，`replace_all` 可选 |
-| `list_dir` | 只读 | 含大小与类型 |
-| `glob` | 只读 | `globset` 语义，尊重 `.gitignore` |
-| `grep` | 只读 | 正则搜索，`ignore` crate 遍历，输出 `file:line:content` |
-| `bash` | shell | 流式 stdout/stderr、超时杀进程组、输出截断保留尾部 |
-| `web_fetch` | 网络 | 抓取并剥离 HTML 成文本 |
-| `todo_write` | 只读 | 计划面板 |
-| `ask_user` | 只读 | 向用户提问并等待 |
+| `read_file` | 只读 | 带行号,支持 offset/limit,超限截断并提示续读;二进制文件有 NUL 嗅探提示 |
+| `write_file` | 写 | 覆盖已有文件记为破坏性风险,生成 diff 预览进权限面板;路径锁定工作区 |
+| `edit_file` | 写 | 精确字符串替换,唯一性校验,`replace_all` 可选,空 `old_string` 拒绝 |
+| `list_dir` | 只读 | 含大小与类型,500 条上限并提示续列 |
+| `glob` | 只读 | `globset` 语义,尊重 `.gitignore` |
+| `grep` | 只读 | 正则搜索,`ignore` crate 遍历,输出 `file:line:content` |
+| `bash` | shell | 流式 stdout/stderr、超时杀整棵进程树(Windows `taskkill /T`,Unix 进程组)、输出截断保留头部+尾部、非 UTF-8 输出按 lossy 解码不丢行 |
+| `web_fetch` | 网络 | 抓取并剥离 HTML 成文本;SSRF 防护(拒绝环回/私网/链路本地地址,重定向逐跳复检),10MB 下载上限 |
+| `web_search` / `deepseek_search` / `multi_search` | 网络 | 聚合搜索(需在设置里配 key) |
+| `todo_write` | 只读 | 计划面板,status 白名单校验 |
+| `ask_user` | 只读 | 向用户提问并等待;会话中断时立即唤醒 |
+
+此外还有:`schedule_*`(定时任务)、`spawn_agent`/`agent_list`/`agent_interrupt`(子代理)、`computer_*`(浏览器观察/操作)、`plugin_*`(插件管理)——全部经过同一个权限网关。
 
 ---
 
@@ -117,14 +122,16 @@ UI 里：设置 → 模型设置 → 添加供应商 → 填 Base URL / API Key 
 
 | 模式 | 行为 |
 |---|---|
-| `ask` | 写类 / 破坏性 / 网络 / shell 都请求确认；只读免确认 |
-| `ws` | 工作区内读写免确认；区外写入、删除、shell、网络仍确认 |
-| `full` | 全部放行，仍记审计日志 |
+| `ask` | 写类 / 破坏性 / 网络 / shell 都请求确认;只读在工作区内免确认,区外读取(含 `~/.parable` 内部)一律确认或拒绝 |
+| `ws` | 工作区内新建/编辑文件免确认,覆盖已有文件需确认;shell、网络、破坏性操作一律确认 |
+| `full` | 全部放行 |
 
-- 决策 `始终允许` 会写入 `~/.parable/permissions.toml` 并持久命中
-- 权限请求带 diff 预览，5 分钟无响应按拒绝处理
-- 每次调用记入 `~/.parable/logs/audit-<date>.jsonl`
-- 路径越界（`..`、符号链接逃逸）在工具层就被拦截
+- 权限请求面板显示工具、路径、风险等级色标、原因(bash 显示**完整命令**)与 diff 预览,300 秒无响应自动拒绝
+- 决策 `始终允许` 对 shell 类工具存**精确命令匹配**规则(不是"该目录下任意命令"),其余工具按精确路径,写入 `~/.parable/permissions.toml`
+- 每次工具执行(含自动放行)都记入 `~/.parable/logs/audit-<date>.jsonl`,含决策来源(auto/requested)与耗时
+- 计划模式(plan mode)在权限引擎层面拦截所有写类/破坏性工具
+- 路径越界(`..`、符号链接/目录联接逃逸、不存在新文件的父目录链接逃逸)在工具层就被拦截
+- 子代理与定时任务的轮次继承会话的权限模式,不再隐式提权到 full
 
 ---
 
@@ -132,15 +139,17 @@ UI 里：设置 → 模型设置 → 添加供应商 → 填 Base URL / API Key 
 
 1. **会话存储用 JSON 文件（`~/.parable/sessions/*.json`），不是 SQLite。**
    理由：`rusqlite` 的 `bundled` 特性在 Windows 上要拉 C 工具链，而本地会话数据量很小。
+   写入走"临时文件 + 原子重命名"，损坏文件自动备份为 `*.corrupt-<ts>`，不会覆写丢失。
    模块 API 面与 spec 一致，后续整体替换只动 `session.rs`。
 
-2. **compaction 已实现**：上下文占用超 85% 时自动把较早的历史交给模型做结构化摘要
-   （Goal / Done / Files changed / Decisions / Open），保留最近 6 条原文，替换折叠区间。
-   摘要为空时无损还原历史。前端会显示「已压缩 N 条早期消息」。
+2. **compaction 已实现且持久化**：上下文占用（含 system+tools 固定开销）超阈值时自动把
+   较早的历史交给模型做结构化摘要，保留最近 6 条原文；切分点对齐 tool_use/tool_result
+   分组，不会把会话切成 provider 拒绝的孤儿 tool_result。压缩结果落盘，重载不回滚。
 
 3. **桌面壳目前是"启动服务 + 开系统默认 webview"**，Tauri v2 窗口封装未接。
 
-4. **MCP / Skills / Hooks / 子代理 / 计划模式** 均未实现（P4）。
+4. **MCP / Skills / Hooks 未实现（P4）；子代理与计划模式已实现**（含权限模式继承与
+   完成判定修复），但子代理不能再嵌套 spawn 子代理。
 
 ---
 
@@ -150,12 +159,16 @@ UI 里：设置 → 模型设置 → 添加供应商 → 填 Base URL / API Key 
 cargo test -p harness
 ```
 
-12 个单元测试覆盖：路径逃逸拦截、`edit_file` 唯一性校验、diff 计数、SSE 分帧解析（含 CRLF）、
-HTML 剥离、grep 匹配、Anthropic 请求体构造（tools + thinking）、compaction 的触发阈值 /
-折叠保留 / 空摘要还原。
+68 个单元测试覆盖：路径逃逸拦截（含符号链接/悬空链接）、`edit_file` 唯一性校验、diff 行号、
+SSE 分帧解析（字节级缓冲，含 CRLF 与跨 chunk 的多字节 UTF-8）、HTML 剥离（自闭合标签/
+引号状态/数字实体）、grep 匹配、Anthropic 请求体构造（tools + thinking 签名回放）、
+compaction 触发阈值 / 折叠保留 / 空摘要还原 / 切分对齐、bash 输出截断（头尾保留与字符边界）、
+二进制嗅探、SSRF 地址校验、浏览器指纹校验等。
 
-集成测试用 `tests/mock-llm.mjs`（说真实 Anthropic SSE 协议的 mock），已在开发中验证
-「流式文本 → tool_use → tool_result 回填 → 第二轮」全链路。
+集成测试用 `tests/mock-llm.mjs`（说真实 Anthropic SSE 协议的 mock，结构化判断
+tool_result），已在开发中验证「流式文本 → tool_use → tool_result 回填 → 第二轮」全链路；
+权限网关（bash 精确命令规则、区外写入拒绝）、附件上传、SSE 鉴权（token/Host/Origin）
+均经真实服务端到端验证。
 
 ---
 
@@ -176,7 +189,14 @@ docs/ARCHITECTURE.md
 ## 安全
 
 - 服务只监听 `127.0.0.1` + 随机端口，每次启动生成随机会话 token
-- 所有 `/api/*`（含 `/api/health`、SSE）必须带 token，缺失或错误返回 401
-- API Key 永不下发给前端（只回掩码），只落 `~/.parable/config.toml`
-- `bash` 用非交互 shell、超时杀进程组、输出长度上限
-- 破坏性操作（删除、覆盖、区外写入）走权限网关
+- 所有路由（含 `/` 静态页与 SSE）必须带 token，缺失或错误返回 401；token 比较为常量时间
+- **Host/Origin 双重校验**：Host 头必须是 `127.0.0.1:<port>` 或 `localhost:<port>`，带 Origin 头的
+  请求只接受同源——阻断 DNS rebinding 与恶意页面跨站调用本地 API 的完整攻击链
+- API Key 永不下发给前端（只回掩码），只落 `~/.parable/config.toml`；落盘后收紧 ACL
+  （Unix 0600 / Windows `icacls` 收敛继承），配置损坏时先备份原文件再回退默认
+- 附件上传走 `POST /api/attachments`（20MB 上限，文件名净化，落 `~/.parable/uploads/`）
+- `bash` 用非交互 shell、超时杀整棵进程树、输出长度上限（保留头尾）
+- `web_fetch` 内置 SSRF 防护：环回/私网/链路本地/云元数据地址一律拒绝，重定向逐跳复检
+- 破坏性操作（删除、覆盖、区外写入、shell、网络）走权限网关，确认面板带命令/diff/风险色标
+- 只读工具读取 `~/.parable` 内部目录（配置、凭据、会话、审计）会被直接拒绝
+- 断线重连后前端经 `GET /api/pending` 恢复挂起的权限请求，`permission.resolved` 事件统一收尾

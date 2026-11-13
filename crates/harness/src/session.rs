@@ -171,16 +171,22 @@ impl SessionStore {
             usage: UsageTotals::default(),
             goal: None,
         };
-        self.persist(&s).await;
+        if let Err(e) = self.persist(&s).await {
+            tracing::error!("session {}: persist failed: {e}", s.meta.id);
+        }
         self.cache.lock().await.insert(id.clone(), s.clone());
         s
     }
 
-    async fn persist(&self, s: &Session) {
+    /// 原子落盘：临时文件 + rename（见 `crate::atomic_write`），失败返回错误由
+    /// 调用方记录——静默丢写会让重载后的会话回退到旧状态。
+    async fn persist(&self, s: &Session) -> Result<(), HarnessError> {
         let p = self.path_for(&s.meta.id);
-        if let Ok(json) = serde_json::to_string_pretty(s) {
-            let _ = std::fs::write(p, json);
-        }
+        let json = serde_json::to_string_pretty(s)
+            .map_err(|e| HarnessError::Other(format!("session {}: serialize failed: {e}", s.meta.id)))?;
+        std::fs::create_dir_all(&self.root)?;
+        crate::atomic_write(&p, json.as_bytes())?;
+        Ok(())
     }
 
     pub async fn load(&self, id: &str) -> Option<Session> {
@@ -191,10 +197,44 @@ impl SessionStore {
             }
         }
         let p = self.path_for(id);
-        let text = std::fs::read_to_string(p).ok()?;
-        let s: Session = serde_json::from_str(&text).ok()?;
-        self.cache.lock().await.insert(id.to_string(), s.clone());
-        Some(s)
+        let text = std::fs::read_to_string(&p).ok()?;
+        match serde_json::from_str::<Session>(&text) {
+            Ok(s) => {
+                self.cache.lock().await.insert(id.to_string(), s.clone());
+                Some(s)
+            }
+            Err(e) => {
+                // 损坏文件处理：改名备份原始数据（rename 失败就留在原地），
+                // 返回 None。这样后续 or_insert_with/重建只会生成空会话，
+                // 不会覆盖丢失的原始记录。
+                let ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let mut bak = p.clone().into_os_string();
+                bak.push(format!(".corrupt-{ts}"));
+                let backup = PathBuf::from(bak);
+                match std::fs::rename(&p, &backup) {
+                    Ok(()) => tracing::error!(
+                        "session {id}: corrupt file ({e}); backed up to {}",
+                        backup.display()
+                    ),
+                    Err(be) => tracing::error!(
+                        "session {id}: corrupt file ({e}); backup rename failed: {be}, file left in place"
+                    ),
+                }
+                None
+            }
+        }
+    }
+
+    /// 会话是否已存在（内存 cache 或磁盘文件），供 schedule 的
+    /// `Target::Existing` 校验，避免把任务投进幽灵会话。
+    pub async fn exists(&self, id: &str) -> bool {
+        if self.cache.lock().await.contains_key(id) {
+            return true;
+        }
+        self.path_for(id).exists()
     }
 
     /// dsh's archived-session gate: cheap check used by start_turn so an
@@ -240,21 +280,24 @@ impl SessionStore {
     }
 
     pub async fn append_message(&self, id: &str, msg: StoredMessage) -> Result<(), HarnessError> {
+        // 仅当内存 cache 已有、或磁盘文件存在时才允许追加——拒绝为不存在的
+        // 会话凭空创建文件（幽灵会话，schedule 投递错目标时尤其危险）。
+        if !self.cache.lock().await.contains_key(id) {
+            self.load(id)
+                .await
+                .ok_or_else(|| HarnessError::NotFound(format!("session {id}")))?;
+        }
         let mut cache = self.cache.lock().await;
         let s = cache
-            .entry(id.to_string())
-            .or_insert_with(|| Session {
-                meta: SessionSummary {
-                    id: id.to_string(),
-                    ..Default::default()
-                },
-                ..Default::default()
-            });
+            .get_mut(id)
+            .ok_or_else(|| HarnessError::NotFound(format!("session {id}")))?;
         s.messages.push(msg);
         s.meta.updated_at = crate::event::now_ms();
         let snapshot = s.clone();
         drop(cache);
-        self.persist(&snapshot).await;
+        if let Err(e) = self.persist(&snapshot).await {
+            tracing::error!("session {id}: persist failed: {e}");
+        }
         Ok(())
     }
 
@@ -275,11 +318,17 @@ impl SessionStore {
         s.meta.updated_at = crate::event::now_ms();
         let snapshot = s.clone();
         drop(cache);
-        self.persist(&snapshot).await;
+        if let Err(e) = self.persist(&snapshot).await {
+            tracing::error!("session {id}: persist failed: {e}");
+        }
         Ok(())
     }
 
     pub async fn add_usage(&self, id: &str, u: &crate::token::Usage, turns: u64, steps: u64, wall_ms: u64) {
+        // cache 未命中先回源磁盘（照 update_meta 的兜底模式）。
+        if !self.cache.lock().await.contains_key(id) {
+            self.load(id).await;
+        }
         let mut cache = self.cache.lock().await;
         if let Some(s) = cache.get_mut(id) {
             s.usage.input_tokens += u.input_tokens;
@@ -291,7 +340,9 @@ impl SessionStore {
             s.usage.wall_ms += wall_ms;
             let snapshot = s.clone();
             drop(cache);
-            self.persist(&snapshot).await;
+            if let Err(e) = self.persist(&snapshot).await {
+                tracing::error!("session {id}: persist failed: {e}");
+            }
         }
     }
 
@@ -324,6 +375,12 @@ impl SessionStore {
         to: Option<usize>,
         text: &str,
     ) -> Result<(), HarnessError> {
+        // cache 未命中先回源磁盘（照 update_meta 的兜底模式）。
+        if !self.cache.lock().await.contains_key(id) {
+            self.load(id)
+                .await
+                .ok_or_else(|| HarnessError::NotFound(format!("session {id}")))?;
+        }
         let mut cache = self.cache.lock().await;
         let s = cache
             .get_mut(id)
@@ -361,12 +418,20 @@ impl SessionStore {
         s.meta.updated_at = crate::event::now_ms();
         let snapshot = s.clone();
         drop(cache);
-        self.persist(&snapshot).await;
+        if let Err(e) = self.persist(&snapshot).await {
+            tracing::error!("session {id}: persist failed: {e}");
+        }
         Ok(())
     }
 
     /// Drop the message at `idx`.
     pub async fn delete_message(&self, id: &str, idx: usize) -> Result<(), HarnessError> {
+        // cache 未命中先回源磁盘（照 update_meta 的兜底模式）。
+        if !self.cache.lock().await.contains_key(id) {
+            self.load(id)
+                .await
+                .ok_or_else(|| HarnessError::NotFound(format!("session {id}")))?;
+        }
         let mut cache = self.cache.lock().await;
         let s = cache
             .get_mut(id)
@@ -387,6 +452,12 @@ impl SessionStore {
         from: usize,
         to: Option<usize>,
     ) -> Result<(), HarnessError> {
+        // cache 未命中先回源磁盘（照 update_meta 的兜底模式）。
+        if !self.cache.lock().await.contains_key(id) {
+            self.load(id)
+                .await
+                .ok_or_else(|| HarnessError::NotFound(format!("session {id}")))?;
+        }
         let mut cache = self.cache.lock().await;
         let s = cache
             .get_mut(id)
@@ -397,7 +468,9 @@ impl SessionStore {
             s.meta.updated_at = crate::event::now_ms();
             let snapshot = s.clone();
             drop(cache);
-            self.persist(&snapshot).await;
+            if let Err(e) = self.persist(&snapshot).await {
+                tracing::error!("session {id}: persist failed: {e}");
+            }
         }
         Ok(())
     }
@@ -415,6 +488,12 @@ impl SessionStore {
         keep_from: usize,
         summary: &str,
     ) -> Result<usize, HarnessError> {
+        // cache 未命中先回源磁盘（照 update_meta 的兜底模式）。
+        if !self.cache.lock().await.contains_key(id) {
+            self.load(id)
+                .await
+                .ok_or_else(|| HarnessError::NotFound(format!("session {id}")))?;
+        }
         let mut cache = self.cache.lock().await;
         let s = cache
             .get_mut(id)
@@ -436,7 +515,9 @@ impl SessionStore {
         s.meta.updated_at = crate::event::now_ms();
         let snapshot = s.clone();
         drop(cache);
-        self.persist(&snapshot).await;
+        if let Err(e) = self.persist(&snapshot).await {
+            tracing::error!("session {id}: persist failed: {e}");
+        }
         Ok(keep_from)
     }
 
@@ -446,6 +527,12 @@ impl SessionStore {
 
     /// Persist a goal state (`None` clears the goal).
     pub async fn set_goal(&self, id: &str, goal: Option<GoalState>) -> Result<(), HarnessError> {
+        // cache 未命中先回源磁盘（照 update_meta 的兜底模式）。
+        if !self.cache.lock().await.contains_key(id) {
+            self.load(id)
+                .await
+                .ok_or_else(|| HarnessError::NotFound(format!("session {id}")))?;
+        }
         let mut cache = self.cache.lock().await;
         let s = cache
             .get_mut(id)
@@ -454,17 +541,27 @@ impl SessionStore {
         s.meta.updated_at = crate::event::now_ms();
         let snapshot = s.clone();
         drop(cache);
-        self.persist(&snapshot).await;
+        if let Err(e) = self.persist(&snapshot).await {
+            tracing::error!("session {id}: persist failed: {e}");
+        }
         Ok(())
     }
 
     /// Rebuild neutral messages from storage.
+    ///
+    /// 解析失败的消息不再静默丢弃：记 warn 后跳过。注意调用方（如手工
+    /// compact）据此计算的切分下标可能与 store 的原始消息下标错位。
     pub async fn neutral_messages(&self, id: &str) -> Vec<crate::provider::Msg> {
-        self.messages(id)
-            .await
-            .into_iter()
-            .filter_map(|m| serde_json::from_value::<crate::provider::Msg>(m.parts).ok())
-            .collect()
+        let mut out = Vec::new();
+        for m in self.messages(id).await {
+            match serde_json::from_value::<crate::provider::Msg>(m.parts) {
+                Ok(msg) => out.push(msg),
+                Err(e) => {
+                    tracing::warn!("session {id}: dropping unparseable message (role {}): {e}", m.role);
+                }
+            }
+        }
+        out
     }
 }
 

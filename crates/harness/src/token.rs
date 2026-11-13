@@ -8,9 +8,12 @@ pub fn estimate(text: &str) -> usize {
     let mut cjk = 0usize;
     let mut other = 0usize;
     for ch in text.chars() {
-        if (ch as u32) >= 0x2E80 && (ch as u32) <= 0x9FFF
-            || (ch as u32) >= 0xF900 && (ch as u32) <= 0xFAFF
-            || (ch as u32) >= 0xFF00 && (ch as u32) <= 0xFFEF
+        let c = ch as u32;
+        if c >= 0x2E80 && c <= 0x9FFF
+            || c >= 0xAC00 && c <= 0xD7AF // 韩文音节 Hangul syllables
+            || c >= 0xF900 && c <= 0xFAFF
+            || c >= 0xFF00 && c <= 0xFFEF
+            || c >= 0x20000 && c <= 0x2A6DF // CJK 扩展 B
         {
             cjk += 1;
         } else {

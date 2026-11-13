@@ -44,17 +44,62 @@ struct TokenQuery {
     token: Option<String>,
 }
 
+/// 常量时间比较:xor 折叠整个输入(长度差也折进结果),不逐字节提前返回,
+/// 避免时序侧信道一点一点试出 token。
+fn ct_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    let mut diff = (a.len() ^ b.len()) as u32;
+    for i in 0..a.len().max(b.len()) {
+        let x = a.get(i).copied().unwrap_or(0) ^ b.get(i).copied().unwrap_or(0);
+        diff |= x as u32;
+    }
+    diff == 0
+}
+
 fn check_auth(headers: &HeaderMap, token: Option<&str>, state: &AppState) -> bool {
     let from_header = headers
         .get("x-parable-token")
         .and_then(|v| v.to_str().ok())
-        .map(|s| s == state.token)
+        .map(|s| ct_eq(s, &state.token))
         .unwrap_or(false);
-    let from_query = token.map(|t| t == state.token).unwrap_or(false);
+    let from_query = token.map(|t| ct_eq(t, &state.token)).unwrap_or(false);
     from_header || from_query
 }
 
-// ------------------------------------------------------------------ origin guard
+// ------------------------------------------------------------------ local guards
+
+/// DNS rebinding 防护:Host 必须是 `127.0.0.1:<port>` 或 `localhost:<port>`。
+/// 恶意网页把 evil.com 解析到 127.0.0.1 时,Host 头会是 evil.com —— 直接 403。
+fn host_allowed(host: &str, port: u16) -> bool {
+    if port == 0 {
+        return false;
+    }
+    let h = host.trim().to_ascii_lowercase();
+    h == format!("127.0.0.1:{port}") || h == format!("localhost:{port}")
+}
+
+/// Host 校验中间件,覆盖全部路由(含 `/`、/index.html 与 fallback 注入 token
+/// 的静态页——页面里有明文 token,不能落到任意 Host 的请求面前)。
+async fn host_guard(
+    State(state): State<SharedState>,
+    req: axum::extract::Request,
+    next: Next,
+) -> Response {
+    let allowed = req
+        .headers()
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(|h| host_allowed(h, state.port.load(std::sync::atomic::Ordering::Relaxed)))
+        .unwrap_or(false);
+    if !allowed {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "host not allowed"})),
+        )
+            .into_response();
+    }
+    next.run(req).await
+}
 
 /// Origins the desktop shell and a local browser tab may present. Everything
 /// else (a hostile page driving the user's browser against 127.0.0.1) is
@@ -68,12 +113,16 @@ fn origin_allowed(origin: &str, port: u16) -> bool {
     if TAURI.contains(&origin) {
         return true;
     }
-    port != 0 && origin == format!("http://127.0.0.1:{port}")
+    if port == 0 {
+        return false;
+    }
+    origin == format!("http://127.0.0.1:{port}") || origin == format!("http://localhost:{port}")
 }
 
-/// Reject cross-origin `/api` requests whose `Origin` is not whitelisted.
-/// Requests without an `Origin` header (curl, same-origin GET, EventSource in
-/// Chromium) pass through.
+/// Reject cross-origin requests whose `Origin` is not whitelisted. Requests
+/// without an `Origin` header (curl, same-origin GET, EventSource in Chromium)
+/// pass through. Covers every route, not just `/api`: the static shell injects
+/// the session token into the page, so a hostile origin must never see it.
 async fn origin_guard(
     State(state): State<SharedState>,
     req: axum::extract::Request,
@@ -112,6 +161,9 @@ fn server_error(e: impl std::fmt::Display) -> Response {
 
 // ------------------------------------------------------------------ router
 
+/// 上传上限:20MB 原始字节。
+const MAX_UPLOAD_BYTES: usize = 20 * 1024 * 1024;
+
 pub fn build_router(state: SharedState) -> Router {
     let api = Router::new()
         .route("/events", get(sse_events))
@@ -145,26 +197,35 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/agents/{id}/interrupt", post(interrupt_agent))
         .route("/plugins", get(list_plugins))
         .route("/plugins/{id}/toggle", post(toggle_plugin))
+        // 断线重连后恢复权限面板;聊天附件上传
+        .route("/pending", get(pending_permissions))
+        .route("/attachments", post(upload_attachment))
         .route("/health", get(health))
-        .layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            origin_guard,
-        ))
         .with_state(state.clone());
 
+    // Host / Origin 中间件覆盖全部路由(含 `/` 与 fallback 的静态页):token
+    // 注入的 index.html 不该落到任意 Host/Origin 的请求面前。上传接口放宽
+    // axum 默认 2MB body 限制到 20MB,超限在 handler 里回 413。
     Router::new()
         .nest("/api", api)
         .route("/", get(index))
         .route("/index.html", get(index))
         .fallback(get(index))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            origin_guard,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            host_guard,
+        ))
+        .layer(axum::extract::DefaultBodyLimit::max(MAX_UPLOAD_BYTES))
         .with_state(state)
 }
 
 // ------------------------------------------------------------------ index
 
 async fn index(State(state): State<SharedState>) -> Response {
-    let q = TokenQuery { token: None };
-    let _ = q;
     let html = match load_index() {
         Ok(h) => h,
         Err(e) => return server_error(format!("cannot load web/index.html: {e}")),
@@ -283,6 +344,12 @@ async fn chat(
     } else if req.text.trim().is_empty() && req.attachments.is_empty() {
         return bad_request("text or attachments is required");
     }
+    // permission_mode 白名单:只接受 ask|ws|full,空串=沿用配置默认。
+    if !req.permission_mode.is_empty()
+        && !crate::config::PERMISSION_MODES.contains(&req.permission_mode.as_str())
+    {
+        return bad_request("permission_mode must be ask|ws|full");
+    }
 
     let sid = if req.session_id.is_empty() {
         let cfg = state.config.read().await;
@@ -311,11 +378,8 @@ async fn chat(
     let opts = TurnOptions {
         model_sel: req.model.clone(),
         permission_mode: mode,
-        thinking_level: if req.thinking_level == 0 {
-            state.config.read().await.thinking_level
-        } else {
-            req.thinking_level
-        },
+        // 前端永远发送 0-3:0=显式关闭,不再把 0 当"未指定"回退配置值
+        thinking_level: req.thinking_level.min(3),
         plan_mode: req.plan_mode,
     };
 
@@ -405,6 +469,97 @@ async fn answer(
     Json(json!({"answered": ok})).into_response()
 }
 
+// ------------------------------------------------- attachments & pending
+
+/// GET /api/pending:当前挂起的权限请求。前端断线重连后用它恢复面板,
+/// 字段形状与 permission.request 事件一致(`id` 即事件里的 `callId`)。
+async fn pending_permissions(State(state): State<SharedState>, headers: HeaderMap) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    let list = state.broker.pending_list().await;
+    Json(json!({"permissions": list})).into_response()
+}
+
+/// POST /api/attachments?name=<urlencoded filename>:body 为原始字节
+/// (octet-stream),与其他 POST 一致用 X-Parable-Token 鉴权。落盘到
+/// `~/.parable/uploads/`,返回的 `path` 直接可被 ChatReq.attachments
+/// (`Attachment{path,name,size}`)引用。
+async fn upload_attachment(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+    body: axum::body::Bytes,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    let Some(name) = q
+        .get("name")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    else {
+        return bad_request("name query parameter is required");
+    };
+    if body.len() > MAX_UPLOAD_BYTES {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(json!({
+                "error": format!("attachment too large: {} bytes (limit 20 MB)", body.len())
+            })),
+        )
+            .into_response();
+    }
+    let dir = crate::config::Config::home_dir().join("uploads");
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        return server_error(e);
+    }
+    // 时间戳前缀防同名覆盖;原名只取文件名部分并清洗非法字符,防路径穿越
+    let fname = format!("{}-{}", crate::event::now_ms(), sanitize_filename(&name));
+    let path = dir.join(&fname);
+    if let Err(e) = std::fs::write(&path, &body) {
+        return server_error(e);
+    }
+    let kind = if is_image_name(&name) { "image" } else { "file" };
+    Json(json!({
+        "path": path.to_string_lossy(),
+        "kind": kind,
+        "name": name,
+        "size": body.len(),
+    }))
+    .into_response()
+}
+
+/// 只取最后一段文件名(剥掉任何目录成分),替换文件系统非法字符,去掉结尾
+/// 的点/空白(Windows 语义),并控制长度。
+fn sanitize_filename(name: &str) -> String {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or("").trim();
+    let mut out = String::new();
+    for c in base.chars().take(120) {
+        match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\0' => out.push('_'),
+            c if (c as u32) < 32 => out.push('_'),
+            c => out.push(c),
+        }
+    }
+    let out = out.trim().trim_end_matches('.');
+    if out.is_empty() {
+        "upload".into()
+    } else {
+        out.into()
+    }
+}
+
+/// 图片判断:先看扩展名 jpg/jpeg/png/gif/webp/bmp(魔数校验可选,交给读取侧)。
+fn is_image_name(name: &str) -> bool {
+    let ext = std::path::Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp")
+}
+
 // ------------------------------------------------------------------ config
 
 async fn get_config(State(state): State<SharedState>, headers: HeaderMap) -> Response {
@@ -442,6 +597,8 @@ async fn patch_config(
         return unauthorized();
     }
     let mut cfg = state.config.write().await;
+    // 先处理删除标记({id, deleted:true}),再做字段合并。
+    crate::config::apply_patch_deletions(&mut cfg, &v);
     merge_config(&mut cfg, &v);
     if let Err(e) = cfg.save() {
         return server_error(e);
@@ -478,6 +635,7 @@ fn merge_config(cfg: &mut Config, v: &Value) {
                         cfg.permission_mode = s;
                     }
                 }
+                // 0-3 直传:0=显式关闭,不回退默认值
                 "thinkingLevel" | "thinking_level" => {
                     cfg.thinking_level = val.as_u64().unwrap_or(2).min(3) as u32
                 }
@@ -1201,9 +1359,12 @@ async fn run_task_now(
     };
     match state.schedule.resolve_session(&mut task).await {
         Ok(sid) => {
+            // 用用户自己的全局权限模式;选了 full 那是用户自己的选择,
+            // 定时任务不再偷偷提权到 full。
+            let mode = state.config.read().await.permission_mode.clone();
             let opts = crate::agent::TurnOptions {
                 model_sel: String::new(),
-                permission_mode: "full".into(),
+                permission_mode: mode,
                 thinking_level: 0,
                 plan_mode: false,
             };
@@ -1290,25 +1451,52 @@ pub async fn serve(
     let questions = Arc::new(QuestionBroker::new());
     let store: SharedStore = Arc::new(SessionStore::new());
     let sched_store = Arc::new(crate::schedule::ScheduleStore::new());
-    let schedule: crate::schedule::SharedSchedule =
-        Arc::new(crate::schedule::ScheduleService::new(sched_store, hub.clone()));
-    let subagents: crate::subagent::SharedSubagents =
-        Arc::new(crate::subagent::SubagentService::new(hub.clone()));
 
-    let agent = AgentRuntime::new(
+    // schedule 不依赖 runtime,先建;workspace 根取全局配置(定时任务建会话用),
+    // 空配置时与 agent 同款退回 current_dir。
+    let ws_root = {
+        let ws = config.read().await.workspace.clone();
+        if ws.is_empty() {
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+        } else {
+            std::path::PathBuf::from(ws)
+        }
+    };
+    let schedule: crate::schedule::SharedSchedule = Arc::new(
+        crate::schedule::ScheduleService::new(sched_store, hub.clone())
+            .with_sessions(store.clone())
+            .with_workspace(ws_root),
+    );
+
+    // AgentRuntime 先建基础体;subagents 的 with_runtime 需要 Arc<AgentRuntime>,
+    // 而 runtime 挂 subagents 又需要 subagents——回环只能用克隆句柄解:
+    // AgentRuntime 是 Clone 且内部全是 Arc 共享字段。句柄上挂 schedule(子代理
+    // turn 可用定时任务);subagents 无法回环注入,子代理里再 spawn_agent 会
+    // 得到明确的"subagents are not mounted"错误,而不是静默失效。
+    let agent_base = AgentRuntime::new(
         config.clone(),
         hub.clone(),
         broker.clone(),
         questions.clone(),
         store.clone(),
-    )
-    .with_services(Some(schedule.clone()), Some(subagents.clone()));
+    );
+    let child_runtime: Arc<AgentRuntime> = Arc::new(
+        agent_base
+            .clone()
+            .with_services(Some(schedule.clone()), None),
+    );
+    let subagents: crate::subagent::SharedSubagents = Arc::new(
+        crate::subagent::SubagentService::new(hub.clone()).with_runtime(child_runtime),
+    );
+
+    let agent = agent_base.with_services(Some(schedule.clone()), Some(subagents.clone()));
 
     // Background scheduler: every 20s, fire tasks whose occurrence has passed.
     // Delivery is an ordinary follow-up turn into the target session.
     {
         let schedule = schedule.clone();
         let agent = agent.clone();
+        let config = config.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(20)).await;
@@ -1317,9 +1505,12 @@ pub async fn serve(
                 for (mut task, _fired) in due {
                     match schedule.resolve_session(&mut task).await {
                         Ok(sid) => {
+                            // 与手动"立即运行"一致:用全局配置的权限模式,
+                            // 调度投递不偷偷提权到 full。
+                            let mode = config.read().await.permission_mode.clone();
                             let opts = crate::agent::TurnOptions {
                                 model_sel: String::new(),
-                                permission_mode: "full".into(),
+                                permission_mode: mode,
                                 thinking_level: 0,
                                 plan_mode: false,
                             };
@@ -1390,9 +1581,61 @@ mod tests {
         assert!(origin_allowed("https://tauri.localhost", 0));
         assert!(origin_allowed("http://tauri.localhost", 0));
         assert!(origin_allowed("http://127.0.0.1:65113", 65113));
+        assert!(origin_allowed("http://localhost:65113", 65113));
         assert!(!origin_allowed("http://127.0.0.1:9999", 65113));
         assert!(!origin_allowed("http://evil.com", 65113));
         // No port resolved yet: only the tauri schemes pass.
         assert!(!origin_allowed("http://127.0.0.1:65113", 0));
+    }
+
+    #[test]
+    fn host_header_whitelist() {
+        assert!(host_allowed("127.0.0.1:65113", 65113));
+        assert!(host_allowed("localhost:65113", 65113));
+        assert!(host_allowed("LOCALHOST:65113", 65113));
+        assert!(!host_allowed("evil.com", 65113));
+        // rebind 变体:子域/端口篡改都不行
+        assert!(!host_allowed("127.0.0.1.evil.com:65113", 65113));
+        assert!(!host_allowed("127.0.0.1:1", 65113));
+        assert!(!host_allowed("", 65113));
+        // 端口未解析前一律拒绝
+        assert!(!host_allowed("127.0.0.1:65113", 0));
+    }
+
+    #[test]
+    fn constant_time_eq() {
+        assert!(ct_eq("abc", "abc"));
+        assert!(ct_eq("", ""));
+        assert!(!ct_eq("abc", "abd"));
+        assert!(!ct_eq("abc", "abcd"));
+        assert!(!ct_eq("", "a"));
+    }
+
+    #[test]
+    fn upload_name_sanitize() {
+        // 路径穿越成分被剥掉
+        assert_eq!(sanitize_filename("a/b/c.png"), "c.png");
+        assert_eq!(sanitize_filename("..\\..\\x.txt"), "x.txt");
+        assert_eq!(sanitize_filename("../../../etc/passwd"), "passwd");
+        // 非法字符被替换
+        assert_eq!(sanitize_filename("a:b*c?.txt"), "a_b_c_.txt");
+        // 空与只有分隔符
+        assert_eq!(sanitize_filename(""), "upload");
+        assert_eq!(sanitize_filename("///"), "upload");
+        // Windows 结尾的点被去掉
+        assert_eq!(sanitize_filename("evil.exe."), "evil.exe");
+        // 长度受控
+        let long = "x".repeat(300);
+        assert_eq!(sanitize_filename(&long).chars().count(), 120);
+    }
+
+    #[test]
+    fn image_kind_by_extension() {
+        assert!(is_image_name("shot.png"));
+        assert!(is_image_name("photo.JPEG"));
+        assert!(is_image_name("a/b/c.webp"));
+        assert!(!is_image_name("notes.txt"));
+        assert!(!is_image_name("noext"));
+        assert!(!is_image_name("png")); // 无扩展名,只有名字
     }
 }

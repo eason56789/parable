@@ -379,8 +379,8 @@ pub async fn run_plugin_tool(
     ctx: &crate::tools::ToolCtx,
 ) -> Result<crate::tools::ToolOutcome, HarnessError> {
     use crate::tools::DisplayKind;
-    ctx.authorize(&t.name, &t.description, crate::permission::Risk::Shell)
-        .await?;
+    // 先渲染出真正要执行的命令,再进权限链:面板能看到原样命令(而不再只是
+    // description),Always 规则也按渲染后的命令精确匹配。
     let mut cmd = t.command.clone();
     if let Some(obj) = args.as_object() {
         for (k, v) in obj {
@@ -391,6 +391,15 @@ pub async fn run_plugin_tool(
             cmd = cmd.replace(&format!("{{{{args.{k}}}}}"), &shell_quote(&s));
         }
     }
+    // Windows 限制:cmd.exe 在双引号内仍会展开 %VAR%,参数携带的 %VAR% 是一个
+    // 环境变量注入/泄露面。宁可拒绝也不悄悄展开(POSIX 半没有这个问题)。
+    if cfg!(target_os = "windows") && cmd.contains('%') {
+        return Err(HarnessError::Tool(
+            "plugin command contains `%`: Windows 会展开 %VAR%,存在注入/泄露风险,已拒绝执行(请改写命令避免 %)".into(),
+        ));
+    }
+    ctx.authorize_shell(&t.name, &t.description, crate::permission::Risk::Shell, &cmd)
+        .await?;
     let out = if cfg!(target_os = "windows") {
         tokio::process::Command::new("cmd")
             .args(["/C", &cmd])

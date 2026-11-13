@@ -36,13 +36,41 @@ pub fn resolve_within(workspace: &Path, raw: &str) -> Result<PathBuf, HarnessErr
         )));
     }
 
-    // If the path exists, canonicalize and re-check to defeat symlinks.
-    if let Ok(real) = candidate.canonicalize() {
-        if let Ok(ws_real) = workspace.canonicalize() {
-            if !real.starts_with(&ws_real) {
-                return Err(HarnessError::Tool(format!(
-                    "path {raw} is a symlink escaping the workspace"
-                )));
+    // 从完整路径向上找最长已存在前缀,canonicalize 后校验仍在工作区内。
+    // 只检查最终路径会漏掉中间目录里的 symlink/junction——最终分量还不存在
+    // 时 canonicalize 会失败,逃逸就藏在这个盲区里。逐级上探(用
+    // symlink_metadata,不跟随链接)能拦住任何已存在中间分量的链接逃逸,
+    // 包括目标不可达的悬空链接。
+    let ws_real = workspace.canonicalize().ok();
+    if ws_real.is_some() {
+        let mut probe = normalized.clone();
+        loop {
+            match std::fs::symlink_metadata(&probe) {
+                Ok(_) => {
+                    match probe.canonicalize() {
+                        Ok(real) => {
+                            if let Some(ws_r) = &ws_real {
+                                if !real.starts_with(ws_r) {
+                                    return Err(HarnessError::Tool(format!(
+                                        "path {raw} escapes the workspace through a symlink or junction"
+                                    )));
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            // 已存在分量是链接且目标不可达:无法证明它在工作区内,拒绝
+                            return Err(HarnessError::Tool(format!(
+                                "path {raw} contains an unresolvable symlink escaping the workspace"
+                            )));
+                        }
+                    }
+                    break; // 最长已存在前缀检查完毕
+                }
+                Err(_) => {
+                    if !probe.pop() {
+                        break;
+                    }
+                }
             }
         }
     }
@@ -111,8 +139,27 @@ pub fn read_file(path: &Path, offset: u64, limit: u64) -> Result<ToolOutcome, Ha
             meta.len()
         )));
     }
-    let text = std::fs::read_to_string(path).map_err(|e| {
-        HarnessError::Tool(format!("cannot read {} as UTF-8 text: {e}", path.display()))
+    // 先读字节嗅探二进制,再解码:直接 read_to_string 会把两种失败混在
+    // 一起,模型分不清该换工具还是该转码。
+    let bytes = std::fs::read(path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            HarnessError::NotFound(path.display().to_string())
+        } else {
+            HarnessError::Io(e)
+        }
+    })?;
+    if looks_binary(&bytes) {
+        return Err(HarnessError::Tool(format!(
+            "{} looks like a binary file ({} bytes); use `bash` (file/hexdump/strings) instead of read_file",
+            path.display(),
+            bytes.len()
+        )));
+    }
+    let text = String::from_utf8(bytes).map_err(|_| {
+        HarnessError::Tool(format!(
+            "cannot decode {} as UTF-8; try `bash` with `iconv -f <encoding> -t utf-8 {{file}} | head`",
+            path.display()
+        ))
     })?;
 
     let all: Vec<&str> = text.lines().collect();
@@ -123,7 +170,18 @@ pub fn read_file(path: &Path, offset: u64, limit: u64) -> Result<ToolOutcome, Ha
         .map(|i| {
             let mut s = all[i].to_string();
             if s.len() > MAX_LINE_BYTES {
-                s.truncate(MAX_LINE_BYTES);
+                // String::truncate 只能在字符边界上切,直接给字节数会 panic;
+                // 回退到最近的边界,极端情况按 lossy 处理。
+                let mut cut = MAX_LINE_BYTES;
+                while cut > 0 && !s.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                if cut == 0 {
+                    s = String::from_utf8_lossy(&s.as_bytes()[..MAX_LINE_BYTES.min(s.len())])
+                        .into_owned();
+                } else {
+                    s.truncate(cut);
+                }
                 s.push('…');
             }
             ((i + 1) as u64, s)
@@ -160,10 +218,38 @@ pub fn read_file(path: &Path, offset: u64, limit: u64) -> Result<ToolOutcome, Ha
     })
     .map(|mut o| {
         if shown == 0 {
-            o.for_model = format!("{} is empty", path.display());
+            // 区分"文件确实为空"与"请求区间为空":后者给出行数与合法
+            // offset 范围,避免模型把翻过头当成空文件。
+            o.for_model = if total == 0 {
+                format!("{} is empty", path.display())
+            } else {
+                format!(
+                    "{} has {total} lines; the requested range is empty — use offset in 1..={total}",
+                    path.display()
+                )
+            };
         }
         o
     })
+}
+
+/// 简单二进制嗅探:头部样本里出现 NUL 或控制字节(排除常见空白)占比过高
+/// 即判为二进制,避免把 .png/.dll 当文本硬读。
+fn looks_binary(bytes: &[u8]) -> bool {
+    const SAMPLE: usize = 8192;
+    let sample = &bytes[..bytes.len().min(SAMPLE)];
+    if sample.contains(&0u8) {
+        return true;
+    }
+    if sample.is_empty() {
+        return false;
+    }
+    let ctrl = sample
+        .iter()
+        .filter(|&&b| b < 9 || (14..=31).contains(&b) || b == 127)
+        .count();
+    // 允许 \t \n \v \f \r(9-13);控制字节超过 10% 基本不是文本
+    ctrl * 10 > sample.len()
 }
 
 pub fn write_file(path: &Path, content: &str) -> Result<ToolOutcome, HarnessError> {
@@ -202,6 +288,13 @@ pub fn edit_file(
     new: &str,
     replace_all: bool,
 ) -> Result<ToolOutcome, HarnessError> {
+    // 防御:空 old_string 在 matches("") 里处处命中,等于全文替换。
+    // mod.rs 已在入口拦截,这里兜底。
+    if old.is_empty() {
+        return Err(HarnessError::Tool(
+            "`old_string` must not be empty; use write_file to replace a whole file".into(),
+        ));
+    }
     let text = std::fs::read_to_string(path).map_err(|_| {
         HarnessError::NotFound(format!("{} (cannot read it to edit)", path.display()))
     })?;
@@ -245,6 +338,7 @@ pub fn edit_file(
 }
 
 pub fn list_dir(path: &Path) -> Result<ToolOutcome, HarnessError> {
+    const MAX_ENTRIES: usize = 500;
     let mut entries: Vec<(String, u64, bool)> = Vec::new();
     for e in std::fs::read_dir(path)? {
         let e = e?;
@@ -259,9 +353,12 @@ pub fn list_dir(path: &Path) -> Result<ToolOutcome, HarnessError> {
     }
     entries.sort_by(|a, b| (a.2 != b.2, &a.0).cmp(&(b.2 != b.2, &b.0)));
 
-    let mut model = format!("Directory {} ({} entries):\n", path.display(), entries.len());
+    // 无上限目录(node_modules 之类)一次性倾倒会撑爆上下文,只展示前
+    // MAX_ENTRIES 条,超出部分提示换工具。
+    let total = entries.len();
+    let mut model = format!("Directory {} ({} entries):\n", path.display(), total);
     let mut lines = Vec::new();
-    for (name, size, is_dir) in &entries {
+    for (name, size, is_dir) in entries.iter().take(MAX_ENTRIES) {
         let line = if *is_dir {
             format!("{name}/")
         } else {
@@ -269,6 +366,12 @@ pub fn list_dir(path: &Path) -> Result<ToolOutcome, HarnessError> {
         };
         model.push_str(&format!("  {line}\n"));
         lines.push((lines.len() as u64 + 1, line));
+    }
+    if total > MAX_ENTRIES {
+        model.push_str(&format!(
+            "… and {} more (use glob or narrow the path)\n",
+            total - MAX_ENTRIES
+        ));
     }
 
     Ok(ToolOutcome {
@@ -287,17 +390,27 @@ pub fn diff_lines(old: &str, new: &str) -> (usize, usize, Vec<DiffLine>) {
     let mut added = 0usize;
     let mut removed = 0usize;
     let mut out = Vec::new();
-    for (idx, change) in diff.iter_all_changes().enumerate() {
-        let (sign, old_no, new_no) = match change.tag() {
+    // 两侧行号各自独立游标:Delete 只推进旧文件,Insert 只推进新文件,
+    // Equal 两侧都推进。此前用全局序号当行号,改动后全错位。
+    let mut old_no = 0u64;
+    let mut new_no = 0u64;
+    for change in diff.iter_all_changes() {
+        let (sign, o, n) = match change.tag() {
             ChangeTag::Delete => {
                 removed += 1;
-                ('-', Some(idx as u64 + 1), None)
+                old_no += 1;
+                ('-', Some(old_no), None)
             }
             ChangeTag::Insert => {
                 added += 1;
-                ('+', None, Some(idx as u64 + 1))
+                new_no += 1;
+                ('+', None, Some(new_no))
             }
-            ChangeTag::Equal => (' ', Some(idx as u64 + 1), Some(idx as u64 + 1)),
+            ChangeTag::Equal => {
+                old_no += 1;
+                new_no += 1;
+                (' ', Some(old_no), Some(new_no))
+            }
         };
         let mut text = change.value().to_string();
         if text.ends_with('\n') {
@@ -305,8 +418,8 @@ pub fn diff_lines(old: &str, new: &str) -> (usize, usize, Vec<DiffLine>) {
         }
         out.push(DiffLine {
             sign,
-            old_no,
-            new_no,
+            old_no: o,
+            new_no: n,
             text,
         });
     }
@@ -364,6 +477,12 @@ pub fn preview_replace(
     new: &str,
     replace_all: bool,
 ) -> Result<String, HarnessError> {
+    // 与 edit_file 相同的空串防御
+    if old.is_empty() {
+        return Err(HarnessError::Tool(
+            "`old_string` must not be empty; use write_file to replace a whole file".into(),
+        ));
+    }
     let text = std::fs::read_to_string(path).map_err(|_| {
         HarnessError::NotFound(format!("{} (cannot read it to preview the edit)", path.display()))
     })?;
@@ -399,6 +518,31 @@ mod tests {
         assert!(resolve_within(&ws, "../outside.txt").is_err());
         assert!(resolve_within(&ws, "ok.txt").is_ok());
         assert!(resolve_within(&ws, "a/../b.txt").is_ok());
+    }
+
+    #[test]
+    fn blocks_symlink_escape() {
+        let ws = std::env::temp_dir().join("parable-test-symlink-ws");
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(&ws).unwrap();
+        let outside = std::env::temp_dir().join("parable-test-symlink-outside");
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(&outside).unwrap();
+        // 正常子目录仍然放行
+        std::fs::create_dir_all(ws.join("real")).unwrap();
+        assert!(resolve_within(&ws, "real/ok.txt").is_ok());
+        // Windows 上构造 symlink/junction 需要特权或外部命令,断言只在
+        // Unix 下运行(方向一致:工作区内 symlink 指向外部目录必须被拦)。
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&outside, ws.join("link")).unwrap();
+            // 最终分量不存在,逃逸藏在中间 symlink 里
+            assert!(resolve_within(&ws, "link/escape.txt").is_err());
+            // 链接本身也要拦
+            assert!(resolve_within(&ws, "link").is_err());
+        }
+        let _ = std::fs::remove_dir_all(&ws);
+        let _ = std::fs::remove_dir_all(&outside);
     }
 
     #[test]
@@ -438,5 +582,33 @@ mod tests {
         let (a, r, _) = diff_lines("a\nb\nc\n", "a\nB\nc\nd\n");
         assert_eq!(a, 2);
         assert_eq!(r, 1);
+    }
+
+    #[test]
+    fn diff_line_numbers_track_both_sides() {
+        let (_, _, lines) = diff_lines("a\nb\nc\n", "a\nB\nc\nd\n");
+        // 期望语义:上下文 a 在旧1新1、c 在旧3新3;-b 在旧2;+B 在新2、+d 在新4。
+        // 组内 Delete/Insert 的相对顺序是 similar 的实现细节,断言只看行号语义。
+        let ctx: Vec<(u64, u64)> = lines
+            .iter()
+            .filter(|l| l.sign == ' ')
+            .filter_map(|l| Some((l.old_no?, l.new_no?)))
+            .collect();
+        assert_eq!(ctx, vec![(1, 1), (3, 3)]);
+        // 删除行只带旧行号,新增行只带新行号
+        let del: Vec<u64> = lines.iter().filter(|l| l.sign == '-').filter_map(|l| l.old_no).collect();
+        assert_eq!(del, vec![2]);
+        let ins: Vec<u64> = lines.iter().filter(|l| l.sign == '+').filter_map(|l| l.new_no).collect();
+        assert_eq!(ins, vec![2, 4]);
+    }
+
+    #[test]
+    fn detects_binary_samples() {
+        assert!(looks_binary(b"PNG\x00\x00\x01\x00"));
+        assert!(!looks_binary(b"plain text with\nnewlines\tand tabs"));
+        // 高比例控制字节也拦
+        let many_ctrl: Vec<u8> = (0u8..=255).filter(|b| *b < 9 || (14u8..=31).contains(b)).collect();
+        assert!(looks_binary(&many_ctrl));
+        assert!(!looks_binary(b""));
     }
 }

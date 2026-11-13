@@ -159,6 +159,10 @@ pub struct SubagentService {
     pub catalog: Arc<ChildCatalog>,
     hub: EventHub,
     running: Arc<Mutex<HashMap<String, tokio_util::sync::CancellationToken>>>,
+    /// 注入的共享 AgentRuntime（`with_runtime`，server.rs 装配时调用）：
+    /// 用于子 turn 完成判定（`is_running`）、超时/取消时终止子 turn
+    /// （`interrupt`），以及继承父 turn 的 `TurnOptions`（权限模式等）。
+    runtime: Option<Arc<crate::agent::AgentRuntime>>,
 }
 
 impl SubagentService {
@@ -167,7 +171,14 @@ impl SubagentService {
             catalog: Arc::new(ChildCatalog::new()),
             hub,
             running: Arc::new(Mutex::new(HashMap::new())),
+            runtime: None,
         }
+    }
+
+    /// 注入共享 AgentRuntime（builder；`new()` 签名保持不变）。
+    pub fn with_runtime(mut self, rt: Arc<crate::agent::AgentRuntime>) -> Self {
+        self.runtime = Some(rt);
+        self
     }
 
     /// Start a child and return its catalog id immediately.
@@ -183,6 +194,12 @@ impl SubagentService {
         }
         if req.label.trim().is_empty() {
             return Err(HarnessError::Other("label must not be empty".into()));
+        }
+        // Delivery::Caller 目前结果无处投递——在校验阶段直接拒绝，绝不静默丢失。
+        if req.delivery == Some(Delivery::Caller) {
+            return Err(HarnessError::Other(
+                "Caller 结果回传未支持（结果无处投递），请改用 Delivery::Parent".into(),
+            ));
         }
         let name = match &req.name {
             Some(n) => {
@@ -229,11 +246,18 @@ impl SubagentService {
         if req.seed_history {
             let msgs = store.neutral_messages(parent_session).await;
             for m in msgs.iter() {
+                // role 跟消息类型对齐（此前全部塞 "user"，assistant 上下文失真）：
+                // assistant → "assistant"，user/tool_result → "user"。parts 内的
+                // User/Assistant 标签由 Msg 序列化自带，保持正确。
+                let role = match m {
+                    crate::provider::Msg::Assistant(_) => "assistant",
+                    crate::provider::Msg::User(_) => "user",
+                };
                 store
                     .append_message(
                         &child_session,
                         crate::session::StoredMessage {
-                            role: "user".into(),
+                            role: role.into(),
                             parts: serde_json::to_value(m).unwrap_or(Value::Null),
                             displays: Vec::new(),
                             created_at: crate::event::now_ms(),
@@ -243,6 +267,23 @@ impl SubagentService {
                     .ok();
             }
         }
+
+        // 子 turn 选项：优先继承父 turn 的 TurnOptions（permission_mode、
+        // thinking_level、plan_mode 一并继承，不再硬编码 "full"）；模型选择
+        // 用 req.model（为空则继承父的）。未注入 runtime 时退回 starter 的默认。
+        let child_opts: Option<crate::agent::TurnOptions> = match self.runtime.as_ref() {
+            Some(rt) => {
+                let mut o = rt
+                    .current_turn_options(parent_session)
+                    .await
+                    .unwrap_or_else(crate::agent::TurnOptions::default);
+                if !req.model.is_empty() {
+                    o.model_sel = req.model.clone();
+                }
+                Some(o)
+            }
+            None => None,
+        };
 
         let cancel = tokio_util::sync::CancellationToken::new();
         self.running.lock().await.insert(child_id.clone(), cancel.clone());
@@ -258,34 +299,83 @@ impl SubagentService {
         let child_sid = child_session.clone();
         let delivery = req.delivery.unwrap_or(Delivery::Parent);
         let running = self.running.clone();
+        let runtime = self.runtime.clone();
 
         tokio::spawn(async move {
             // A child turn is a normal turn on its own session.
-            let res = starter
-                .start_child(&child_sid, &task, &model)
-                .await;
+            // 一律经由 trait 对象（dyn TurnStarter）启动，保持 future 类型
+            // 擦除：直接 await AgentRuntime::start_turn 会让它的 opaque
+            // future 经 tokio::spawn 的 Send 检查递归套回自身（E0391）。
+            let res = if let Some(opts) = child_opts.clone() {
+                starter.start_child_opts(&child_sid, &task, opts).await
+            } else {
+                starter.start_child(&child_sid, &task, &model).await
+            };
 
-            // Wait for the child's turn to settle by polling its session for a
-            // final assistant message. (Turns are async; there is no join handle
-            // exposed, so we observe the session instead of pretending to join.)
+            // 等子 turn 收尾。注入 runtime 后以 `is_running` 为准——流式输出
+            // 中途的 assistant 消息也可能带非空 Text，不能只看最后一条消息。
+            const POLL_MS: u64 = 500;
+            const MAX_POLLS: u64 = 600; // 600 × 500ms = 300s 超时
             let mut final_text = String::new();
-            for _ in 0..600 {
+            let mut tool_calls_seen: u64 = 0;
+            let mut timed_out = false;
+            let mut polls = 0u64;
+            loop {
                 if cancel.is_cancelled() {
+                    // 父侧取消：同时终止子 turn，避免留下孤儿轮继续跑。
+                    if let Some(rt) = runtime.as_ref() {
+                        rt.interrupt(&child_sid).await;
+                    }
                     break;
                 }
+                if polls >= MAX_POLLS {
+                    timed_out = true;
+                    break;
+                }
+                polls += 1;
                 let msgs = store_neutral(&child_sid).await;
-                if let Some(last) = msgs.last() {
-                    if let Some(text) = last_text(last) {
-                        if !text.trim().is_empty() {
-                            final_text = text;
+                // 统计子会话消息里的 ToolUse parts 数，更新目录计数。
+                let tc = count_tool_uses(&msgs);
+                if tc != tool_calls_seen {
+                    tool_calls_seen = tc;
+                    cat.update(&cid, |c| c.tool_calls = tc).await;
+                }
+                match runtime.as_ref() {
+                    Some(rt) => {
+                        if !rt.is_running(&child_sid).await {
+                            // 子 turn 已结束：取最后一条 assistant 消息中的非空 Text。
+                            final_text = last_assistant_text(&msgs).unwrap_or_default();
                             break;
                         }
                     }
+                    None => {
+                        // 未注入 runtime 时退回旧行为：最后一条消息出现非空文本即收尾。
+                        if let Some(last) = msgs.last() {
+                            if let Some(text) = last_text(last) {
+                                if !text.trim().is_empty() {
+                                    final_text = text;
+                                    break;
+                                }
+                            }
+                        }
+                    }
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(POLL_MS)).await;
             }
 
-            let (status, err) = if cancel.is_cancelled() {
+            let (status, err) = if timed_out {
+                // 超时：先 interrupt 子 turn 并等它清槽，再标 Failed——不留孤儿运行槽。
+                if let Some(rt) = runtime.as_ref() {
+                    rt.interrupt(&child_sid).await;
+                    for _ in 0..20 {
+                        if !rt.is_running(&child_sid).await {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                }
+                (ChildStatus::Failed, Some("child agent timed out after 300s".to_string()))
+            } else if cancel.is_cancelled() {
                 (ChildStatus::Cancelled, Some("cancelled by parent".to_string()))
             } else if let Err(e) = res {
                 (ChildStatus::Failed, Some(e.to_string()))
@@ -344,6 +434,12 @@ impl SubagentService {
         let c = self.running.lock().await.get(child_id).cloned();
         if let Some(c) = c {
             c.cancel();
+            // 同步取消子会话的 turn：只停轮询不停子 turn 会留下孤儿轮继续跑。
+            if let Some(ch) = self.catalog.get(child_id).await {
+                if let Some(rt) = &self.runtime {
+                    rt.interrupt(&ch.session_id).await;
+                }
+            }
             self.catalog
                 .update(child_id, |ch| {
                     if ch.status == ChildStatus::Running {
@@ -388,6 +484,25 @@ fn last_text(m: &crate::provider::Msg) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// 统计消息序列里 ToolUse parts 的总数（子代理的 tool_calls 计数口径）。
+fn count_tool_uses(msgs: &[crate::provider::Msg]) -> u64 {
+    use crate::provider::AsstPart;
+    msgs.iter()
+        .filter_map(|m| match m {
+            crate::provider::Msg::Assistant(parts) => Some(parts),
+            _ => None,
+        })
+        .flat_map(|parts| parts.iter())
+        .filter(|p| matches!(p, AsstPart::ToolUse { .. }))
+        .count() as u64
+}
+
+/// 取最后一条含非空 Text 的 assistant 消息——不是"最后一条消息"：
+/// 子 turn 结束后尾随的 tool_result 用户消息不该挡住结果提取。
+fn last_assistant_text(msgs: &[crate::provider::Msg]) -> Option<String> {
+    msgs.iter().rev().find_map(last_text)
 }
 
 pub type SharedSubagents = Arc<SubagentService>;

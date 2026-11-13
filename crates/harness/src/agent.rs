@@ -22,7 +22,10 @@ pub const MAX_STEPS: usize = 100;
 // ---------------------------------------------------------------- questions
 
 pub struct QuestionBroker {
-    pending: Mutex<HashMap<String, oneshot::Sender<String>>>,
+    /// call_id -> (sender, token)：token 用于过期等待者清理时识别"自己的"
+    /// 那一项，避免误删后来者的等待项。
+    pending: Mutex<HashMap<String, (oneshot::Sender<String>, u64)>>,
+    next_token: std::sync::atomic::AtomicU64,
 }
 
 impl Default for QuestionBroker {
@@ -36,24 +39,51 @@ impl QuestionBroker {
         // 占位，真正的初始化在下方 Self { ... } 里
         Self {
             pending: Mutex::new(HashMap::new()),
+            next_token: std::sync::atomic::AtomicU64::new(1),
         }
     }
 
     /// Wait for the user to answer a question asked under `call_id`.
+    ///
+    /// 同一 call_id 重复 ask 会被去重拒绝（立即返回 None），避免新 sender
+    /// 覆盖旧 sender 后旧等待者永远悬挂。
     pub async fn ask(&self, call_id: &str) -> Option<String> {
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(call_id.to_string(), tx);
+        let token = self
+            .next_token
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        {
+            let mut p = self.pending.lock().await;
+            if p.contains_key(call_id) {
+                // 去重拒绝：该 call_id 已有等待者在排队。
+                return None;
+            }
+            p.insert(call_id.to_string(), (tx, token));
+        }
         let res = tokio::time::timeout(std::time::Duration::from_secs(600), rx).await;
-        self.pending.lock().await.remove(call_id);
+        // 只清理自己那一项：若已被 interrupt 清空后又被新 ask 占用，不能误删。
+        {
+            let mut p = self.pending.lock().await;
+            if matches!(p.get(call_id), Some((_, t)) if *t == token) {
+                p.remove(call_id);
+            }
+        }
         res.ok().and_then(|r| r.ok())
     }
 
     pub async fn answer(&self, call_id: &str, answer: &str) -> bool {
-        let tx = self.pending.lock().await.remove(call_id);
-        match tx {
-            Some(tx) => tx.send(answer.to_string()).is_ok(),
+        let entry = self.pending.lock().await.remove(call_id);
+        match entry {
+            Some((tx, _)) => tx.send(answer.to_string()).is_ok(),
             None => false,
         }
+    }
+
+    /// 清理全部 pending questions 并唤醒等待者（drop sender → 等待方立即
+    /// 收到 None，ask_user 以"(the user did not answer)"收尾）。
+    /// 会话 interrupt 时由 AgentRuntime 调用，防止取消后工具仍挂在等答案上。
+    pub async fn cancel_all(&self) {
+        self.pending.lock().await.clear();
     }
 }
 
@@ -69,6 +99,12 @@ pub struct SessStats {
     pub ctx_tools: u64,
     pub ctx_messages: u64,
     pub tps: f64,
+    /// 本会话累计的模型流耗时（ms）。
+    pub model_ms: u64,
+    /// 本会话累计的工具执行耗时（ms）。
+    pub tool_ms: u64,
+    /// 首 token 延迟（ms，取本会话第一次观测值）。
+    pub ttft_ms: u64,
 }
 
 // ---------------------------------------------------------------- runtime
@@ -76,6 +112,9 @@ pub struct SessStats {
 pub struct TurnControl {
     pub turn_id: String,
     pub cancel: CancellationToken,
+    /// 本 turn 的选项快照：SubagentService 经由 `current_turn_options` 读取，
+    /// 让子代理继承父 turn 的 permission_mode / thinking_level 等。
+    pub opts: TurnOptions,
 }
 
 #[derive(Clone)]
@@ -141,18 +180,36 @@ impl crate::tools::TurnStarter for AgentRuntime {
         prompt: &str,
         model: &str,
     ) -> Result<String, HarnessError> {
+        // 子代理权限模式不再硬编码 "full"。正常路径由 SubagentService 通过
+        // 注入的 runtime 读取父 turn 的 TurnOptions（见 start_child_opts）；
+        // 这条 trait 兜底路径从 harness 配置继承，绝不放大权限。
+        let (perm, lvl) = {
+            let cfg = self.config.read().await;
+            (cfg.permission_mode.clone(), cfg.thinking_level)
+        };
         self.start_turn(
             session_id,
             prompt,
             Vec::new(),
             TurnOptions {
                 model_sel: model.to_string(),
-                permission_mode: "full".into(),
-                thinking_level: 0,
+                permission_mode: perm,
+                thinking_level: lvl,
                 plan_mode: false,
             },
         )
         .await
+    }
+
+    // 子代理继承父轮的 TurnOptions（权限模式/思考档位/计划模式）。
+    // 必须经 trait 对象调用保持类型擦除（见 tools::TurnStarter 注释）。
+    async fn start_child_opts(
+        &self,
+        session_id: &str,
+        prompt: &str,
+        opts: TurnOptions,
+    ) -> Result<String, HarnessError> {
+        self.start_turn(session_id, prompt, Vec::new(), opts).await
     }
 }
 
@@ -207,6 +264,9 @@ impl AgentRuntime {
     }
 
     pub async fn interrupt(&self, session_id: &str) -> bool {
+        // 先唤醒可能挂在 ask_user 上的等待者（drop sender → 等待方立即收到
+        // None 并收尾），否则取消后该 turn 仍卡在等答案上出不来。
+        self.questions.cancel_all().await;
         match self.running.lock().await.get(session_id) {
             Some(c) => {
                 c.cancel.cancel();
@@ -218,6 +278,17 @@ impl AgentRuntime {
 
     pub async fn is_running(&self, session_id: &str) -> bool {
         self.running.lock().await.contains_key(session_id)
+    }
+
+    /// 父会话当前正在运行的 turn 的选项快照（无运行 turn 时返回 None）。
+    /// SubagentService 用它把父 turn 的 permission_mode / thinking_level 等
+    /// 继承给子 turn。
+    pub async fn current_turn_options(&self, session_id: &str) -> Option<TurnOptions> {
+        self.running
+            .lock()
+            .await
+            .get(session_id)
+            .map(|c| c.opts.clone())
     }
 
     /// Archive a session, mirroring dsh's `workspace/session-active` rule: a
@@ -308,6 +379,7 @@ impl AgentRuntime {
                 TurnControl {
                     turn_id: turn_id.clone(),
                     cancel: cancel.clone(),
+                    opts: opts.clone(),
                 },
             );
         }
@@ -317,7 +389,31 @@ impl AgentRuntime {
         let text = user_text.to_string();
         let tid = turn_id.clone();
         tokio::spawn(async move {
-            let res = me.run_turn(&sid, &tid, &text, attachments, opts.clone(), cancel.clone()).await;
+            // catch_unwind 包住 run_turn：panic 时 running 槽位也必须被清理，
+            // 并在此统一补发 turn.end（run_turn 自身保证所有非 panic 出口
+            // 都会经 finalize_turn 发布 turn.end）。
+            let panicked;
+            let res = match futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
+                me.run_turn(&sid, &tid, &text, attachments, opts.clone(), cancel.clone()),
+            ))
+            .await
+            {
+                Ok(r) => {
+                    panicked = false;
+                    r
+                }
+                Err(p) => {
+                    panicked = true;
+                    let msg = if let Some(s) = p.downcast_ref::<&'static str>() {
+                        (*s).to_string()
+                    } else if let Some(s) = p.downcast_ref::<String>() {
+                        s.clone()
+                    } else {
+                        "unknown panic".to_string()
+                    };
+                    Err(HarnessError::Other(format!("turn panicked: {msg}")))
+                }
+            };
             let cancelled = cancel.is_cancelled();
             if let Err(e) = &res {
                 me.hub.publish(
@@ -325,15 +421,22 @@ impl AgentRuntime {
                     "error",
                     json!({"turnId": tid, "message": e.to_string(), "fatal": true}),
                 );
+                if panicked {
+                    // panic 路径 finalize_turn 没跑到，这里补一个 turn.end。
+                    me.hub.publish(
+                        &sid,
+                        "turn.end",
+                        json!({"turnId": tid, "ms": 0, "stopReason": "error"}),
+                    );
+                }
             }
             me.running.lock().await.remove(&sid);
-            // /goal auto-continuation runs only after a cleanly finished turn,
-            // and once the running slot is free (it starts the next turn itself).
+            // /goal auto-continuation: 正常结束与出错路径都进入判定
+            //（cancelled 在 goal_after_turn 内部单独处理为 paused）。run_turn
+            // 一旦失败也进入，goal 状态机才不会被一次模型故障卡死。
             // Dispatched through a plain fn so the start_turn <-> goal_after_turn
             // future types don't tie themselves in a recursive knot.
-            if res.is_ok() {
-                spawn_goal_run(me, sid, opts, cancelled);
-            }
+            spawn_goal_run(me, sid, opts, cancelled);
         });
         Ok(turn_id)
     }
@@ -382,7 +485,11 @@ impl AgentRuntime {
         if history.len() <= KEEP + 2 {
             return Ok(json!({"folded": 0, "remaining": history.len()}));
         }
-        let split = history.len() - KEEP;
+        // 切分点对齐：不能把 assistant(tool_use) 与其后续 tool_result 切开。
+        let split = align_compact_split(&history, history.len() - KEEP);
+        if split == 0 {
+            return Ok(json!({"folded": 0, "remaining": history.len()}));
+        }
         let digest = format!(
             "BEGIN TRANSCRIPT\n{}\nEND TRANSCRIPT",
             render_for_summary(&history[..split])
@@ -470,6 +577,7 @@ impl AgentRuntime {
         let rounds = g.rounds;
         let max = g.max_rounds;
         let objective = g.objective.clone();
+        let g_snapshot = g.clone();
         let _ = self.store.set_goal(session_id, Some(g)).await;
         self.hub.publish(
             session_id,
@@ -485,9 +593,20 @@ impl AgentRuntime {
              so explicitly in your reply.",
             serde_json::to_string(&objective).unwrap_or_default()
         );
-        let _ = self
+        if let Err(e) = self
             .start_turn(session_id, &prompt, Vec::new(), opts.clone())
+            .await
+        {
+            // 续跑启动失败：发布 goal 事件说明停摆原因，状态机置为 paused，
+            // 不然 goal 会永远停在 active 而没有任何轮次在跑。
+            self.goal_set_status(
+                session_id,
+                &g_snapshot,
+                "paused",
+                &format!("续跑启动失败：{e}"),
+            )
             .await;
+        }
     }
 
     async fn goal_set_status(
@@ -578,7 +697,12 @@ impl AgentRuntime {
         workspace: &PathBuf,
         opts: &TurnOptions,
     ) -> String {
-        let mut system = build_system_prompt(workspace, opts).await;
+        // 双真相修复：从内存配置（Arc<RwLock<Config>>）读取，不再每次
+        // Config::load() 读盘——读盘版本既慢又会和运行中的配置漂移。
+        let mut system = {
+            let cfg = self.config.read().await;
+            build_system_prompt(&cfg, workspace, opts)
+        };
         // /goal: the objective is user-provided data (untrusted wrapper, per
         // opencode/dsh/zcode) riding in the system prompt while it is active.
         if let Some(g) = self
@@ -663,7 +787,18 @@ When it is achieved, say so clearly in your reply.",
         };
 
         // ---- provider
-        let (provider, model_id) = self.resolve_provider(&model_sel).await?;
+        let (provider, model_id) = match self.resolve_provider(&model_sel).await {
+            Ok(x) => x,
+            Err(e) => {
+                // 提前失败也要统一记账 + 发布 turn.end（stopReason: error）。
+                self.finalize_turn(
+                    session_id, turn_id, t_start, &Usage::default(), 0, "error",
+                    ctx_limit, 0, 0, 0, 0,
+                )
+                .await;
+                return Err(e);
+            }
+        };
 
         // ---- message history
         let mut history: Vec<Msg> = self.store.neutral_messages(session_id).await;
@@ -691,7 +826,9 @@ When it is achieved, say so clearly in your reply.",
             history.push(Msg::User(user_parts));
         }
 
-        let registry = Registry::new(workspace.clone()).with_search(&search_pref, &search_key);
+        // 每轮一个 Registry（带 search 配置），specs() 与工具执行共用同一实例，
+        // 修复搜索配置到不了执行现场的问题。
+        let registry = Arc::new(Registry::new(workspace.clone()).with_search(&search_pref, &search_key));
         let system = self.compose_system(session_id, &workspace, &opts).await;
 
         let mut steps = 0usize;
@@ -699,31 +836,55 @@ When it is achieved, say so clearly in your reply.",
         let mut out_tokens_this_turn = 0u64;
         let mut out_started: Option<std::time::Instant> = None;
         let mut stop_reason = "end_turn".to_string();
+        // 本轮计时口径（随 status 事件发布）：
+        let mut model_ms = 0u64; // 模型流耗时累计
+        let mut tool_ms = 0u64; // 工具执行耗时累计
+        let mut ttft_ms = 0u64; // 首 token 延迟（取第一次观测值）
 
-        loop {
+        // 'turn 块统一出口：所有 break 都返回 (stop_reason | Err)，块外的
+        // finalize_turn 负责记账 + turn.end，保证任何路径都不会漏发。
+        let result: Result<String, HarnessError> = 'turn: {
+            loop {
             if cancel.is_cancelled() {
-                self.hub.publish(
-                    session_id,
-                    "turn.end",
-                    json!({"turnId": turn_id, "ms": t_start.elapsed().as_millis() as u64, "stopReason": "cancelled"}),
-                );
-                return Ok(());
+                break 'turn Ok("cancelled".to_string());
             }
             if steps >= MAX_STEPS {
+                let notice = "\n\n> Stopped: reached the 100-step limit for one turn.";
                 self.hub.publish(
                     session_id,
                     "text.delta",
-                    json!({"turnId": turn_id, "text": "\n\n> Stopped: reached the 100-step limit for one turn."}),
+                    json!({"turnId": turn_id, "text": notice}),
                 );
-                break;
+                // 到顶提示作为 assistant 消息落库（此前只发 text.delta 不持久化）。
+                let notice_parts = vec![AsstPart::Text(notice.to_string())];
+                history.push(Msg::Assistant(notice_parts.clone()));
+                self.store
+                    .append_message(session_id, StoredMessage {
+                        role: "assistant".into(),
+                        parts: serde_json::to_value(&Msg::Assistant(notice_parts))
+                            .unwrap_or(Value::Null),
+                        displays: Vec::new(),
+                        created_at: crate::event::now_ms(),
+                    })
+                    .await
+                    .ok();
+                break 'turn Ok("max_steps".to_string());
             }
             steps += 1;
 
             // Context guard: if the conversation is about to overflow, summarise
             // the older part before sending anything to the model.
-            match compact_history(&*provider, &mut history, &self.hub, session_id, ctx_limit).await {
-                Ok(n) => {
+            let tools: Vec<ToolSpec> = registry.specs();
+            let fixed_tokens = estimate_fixed(&system, &tools);
+            match compact_history(&*provider, &mut history, &self.hub, session_id, ctx_limit, fixed_tokens).await {
+                Ok((n, summary)) => {
                     if n > 0 {
+                        // 自动压缩同步落库，保持内存与 store 一致（压缩事件照发）。
+                        if let Some(body) = &summary {
+                            if let Err(e) = self.store.compact_store(session_id, n, body).await {
+                                tracing::error!("session {session_id}: compaction persist failed: {e}");
+                            }
+                        }
                         self.hub.publish(
                             session_id,
                             "compaction",
@@ -737,13 +898,15 @@ When it is achieved, say so clearly in your reply.",
                 }
             }
 
-            let tools: Vec<ToolSpec> = registry.specs();
             let req = ChatRequest {
                 model: model_id.clone(),
                 system: system.clone(),
                 messages: history.clone(),
                 tools: tools.clone(),
                 max_tokens: 8192,
+                // thinking_level 语义：0=显式关闭，1=low，2=medium，3=high。
+                // 这里必须原样透传（0 不得被当作"未指定"替换成配置值），
+                // provider 侧按 0 关闭思考。
                 thinking_level: opts.thinking_level,
             };
             let (ctx_sys, ctx_tools, ctx_msgs) = provider::estimate_request(&req);
@@ -754,9 +917,10 @@ When it is achieved, say so clearly in your reply.",
                 s.ctx_tools = ctx_tools as u64;
                 s.ctx_messages = ctx_msgs as u64;
             }
-            self.publish_status(session_id, &turn_usage, ctx_sys, ctx_tools, ctx_msgs, ctx_limit, &mut out_started, out_tokens_this_turn)
+            self.publish_status(session_id, &turn_usage, ctx_sys, ctx_tools, ctx_msgs, ctx_limit, &mut out_started, out_tokens_this_turn, model_ms, tool_ms, ttft_ms)
                 .await;
 
+            let model_t0 = std::time::Instant::now();
             let mut stream = match provider.stream_chat(req).await {
                 Ok(s) => s,
                 Err(e) => {
@@ -765,24 +929,26 @@ When it is achieved, say so clearly in your reply.",
                         "error",
                         json!({"turnId": turn_id, "message": e.to_string(), "fatal": false}),
                     );
-                    return Err(e);
+                    break 'turn Err(e);
                 }
             };
 
             let mut text_buf = String::new();
             let mut think_buf = String::new();
-            let think_sig = String::new();
+            let mut think_sig = String::new();
             let mut calls: Vec<(String, String, Value)> = Vec::new();
             let mut pending_args: HashMap<String, String> = HashMap::new();
             let mut stream_usage = Usage::default();
             let mut stream_err: Option<HarnessError> = None;
+            let mut cancelled = false;
 
             loop {
                 tokio::select! {
                     _ = cancel.cancelled() => {
-                        self.hub.publish(session_id, "turn.end",
-                            json!({"turnId": turn_id, "ms": t_start.elapsed().as_millis() as u64, "stopReason": "cancelled"}));
-                        return Ok(());
+                        // 取消不再直接 return：像 Err 路径一样先折叠已流出的
+                        // 内容并落库（见下），再以 "cancelled" 收尾。
+                        cancelled = true;
+                        break;
                     }
                     item = stream.next() => {
                         match item {
@@ -796,15 +962,26 @@ When it is achieved, say so clearly in your reply.",
                             }
                             Some(Ok(chunk)) => match chunk {
                                 StreamChunk::Text(t) => {
+                                    if ttft_ms == 0 {
+                                        ttft_ms = model_t0.elapsed().as_millis() as u64;
+                                    }
                                     out_tokens_this_turn += crate::token::estimate(&t) as u64;
                                     self.hub.publish(session_id, "text.delta",
                                         json!({"turnId": turn_id, "text": t}));
                                     text_buf.push_str(&t);
                                 }
                                 StreamChunk::Reasoning(r) => {
+                                    if ttft_ms == 0 {
+                                        ttft_ms = model_t0.elapsed().as_millis() as u64;
+                                    }
                                     self.hub.publish(session_id, "reasoning.delta",
                                         json!({"turnId": turn_id, "text": r}));
                                     think_buf.push_str(&r);
+                                }
+                                // 思考流结束：采集 provider 的签名，用于回填
+                                // AsstPart::Thinking.signature（重放时必需）。
+                                StreamChunk::ReasoningDone { signature } => {
+                                    think_sig = signature;
                                 }
                                 StreamChunk::ToolCallStart { id, name } => {
                                     self.hub.publish(session_id, "tool.call",
@@ -827,6 +1004,7 @@ When it is achieved, say so clearly in your reply.",
                     }
                 }
             }
+            model_ms += model_t0.elapsed().as_millis() as u64;
 
             turn_usage.add(&stream_usage);
             out_tokens_this_turn = out_tokens_this_turn.max(stream_usage.output_tokens);
@@ -855,110 +1033,87 @@ When it is achieved, say so clearly in your reply.",
                     .ok();
             }
 
+            // 取消：已积累的 text/think 已在上面折叠进 history 并落库，
+            // 这里统一收尾（记账 + turn.end 在块外的 finalize_turn）。
+            if cancelled {
+                break 'turn Ok("cancelled".to_string());
+            }
+
             // A broken stream keeps its partial answer (stored above) but still
             // fails the turn — silently swallowing it would lose the reason.
             if let Some(e) = stream_err {
                 self.hub.publish(session_id, "error",
                     json!({"turnId": turn_id, "message": e.to_string(), "fatal": false}));
-                return Err(e);
+                break 'turn Err(e);
             }
 
             // No tool calls -> the turn is over.
             if calls.is_empty() {
                 self.hub.publish(session_id, "text.done", json!({"turnId": turn_id, "text": text_buf}));
-                break;
+                break 'turn Ok(stop_reason);
             }
 
-            // Execute tool calls. Read-only tools may run concurrently; writes are serialized.
+            // Execute tool calls **按模型给出的原始顺序**：只有“相邻连续”的
+            // 只读工具作为一批并行执行，其余严格串行。（此前“全部 readonly
+            // 先并行、mutating 后串行”的重排会打乱模型的调用顺序意图。）
             let mut results: Vec<UserPart> = Vec::new();
-            let mut readonly: Vec<(String, String, Value)> = Vec::new();
-            let mut mutating: Vec<(String, String, Value)> = Vec::new();
-            for c in calls.drain(..) {
-                if matches!(c.1.as_str(), "read_file" | "glob" | "grep" | "list_dir" | "web_fetch") {
-                    readonly.push(c);
-                } else {
-                    mutating.push(c);
-                }
-            }
-
             let mut outcomes: Vec<(String, String, bool, Value, Option<(String, String)>)> =
                 Vec::new(); // (id, text, ok, display, image)
 
-            // read-only in parallel
-            if !readonly.is_empty() {
-                let mut handles = Vec::new();
-                for (id, name, args) in readonly {
-                    let reg = Registry::new(workspace.clone());
-                    let ctx = self.tool_ctx(&workspace, &opts, session_id, &id, &search_key, &search_pref);
-                    handles.push(tokio::spawn(async move {
-                        let r = reg.execute(&name, &args, &ctx).await;
-                        (id, name, r)
-                    }));
-                }
-                for h in handles {
-                    if let Ok((id, name, r)) = h.await {
-                        match r {
-                            Ok(out) => {
-                                let display = out.display.to_payload();
-                                self.emit_tool_result(session_id, turn_id, &id, &name, &out).await;
-                                let image = self.computer.take_image().await;
-                                // computer 桥的截图优先，其次工具结果自带的图片（read_file 读图）
-                                let img = image
-                                    .as_ref()
-                                    .map(|p| (p.media_type.clone(), p.data.clone()))
-                                    .or_else(|| match &out.display {
-                                        DisplayKind::Image { media_type, data } => {
-                                            Some((media_type.clone(), data.clone()))
-                                        }
-                                        _ => None,
-                                    });
-                                outcomes.push((id, out.for_model.clone(), out.ok, display, img));
+            let mut i = 0usize;
+            while i < calls.len() {
+                if is_readonly_tool(&calls[i].1) {
+                    // 收集相邻连续的只读批，一批内并行。
+                    let start = i;
+                    while i < calls.len() && is_readonly_tool(&calls[i].1) {
+                        i += 1;
+                    }
+                    let batch: Vec<(String, String, Value)> = calls[start..i].to_vec();
+                    // (id, name, handle)：JoinError 时句柄内部数据已丢，
+                    // 用外侧留存的 id/name 补发 tool_result。
+                    let mut handles: Vec<(
+                        String,
+                        String,
+                        tokio::task::JoinHandle<(String, String, Result<crate::tools::ToolOutcome, HarnessError>, u64)>,
+                    )> = Vec::new();
+                    for (id, name, args) in batch {
+                        let reg = Arc::clone(&registry);
+                        let ctx = self.tool_ctx(&workspace, &opts, session_id, &id, &search_key, &search_pref);
+                        let t0 = std::time::Instant::now();
+                        handles.push((id.clone(), name.clone(), tokio::spawn(async move {
+                            let r = reg.execute(&name, &args, &ctx).await;
+                            let dt = t0.elapsed().as_millis() as u64;
+                            (id, name, r, dt)
+                        })));
+                    }
+                    for (id, name, h) in handles {
+                        match h.await {
+                            Ok((_id, _name, r, dt)) => {
+                                tool_ms += dt;
+                                self.record_outcome(session_id, turn_id, &id, &name, r, &mut outcomes)
+                                    .await;
                             }
                             Err(e) => {
-                                self.emit_tool_error(session_id, turn_id, &id, &name, &e).await;
-                                outcomes.push((
-                                    id,
-                                    e.for_model(),
-                                    false,
-                                    json!({"kind":"plain","text": e.to_string()}),
-                                    None,
-                                ));
+                                // JoinError（panic/取消）：补发 is_error 的
+                                // tool_result，保证每个 tool_use 必有对应结果。
+                                let msg = format!("tool panicked: {e}");
+                                self.emit_tool_error(session_id, turn_id, &id, &name,
+                                    &HarnessError::Other(msg.clone())).await;
+                                outcomes.push((id, msg.clone(), false,
+                                    json!({"kind":"plain","text": msg}), None));
                             }
                         }
                     }
-                }
-            }
-
-            // mutating, strictly serial
-            for (id, name, args) in mutating {
-                let reg = Registry::new(workspace.clone());
-                let ctx = self.tool_ctx(&workspace, &opts, session_id, &id, &search_key, &search_pref);
-                match reg.execute(&name, &args, &ctx).await {
-                    Ok(out) => {
-                        let display = out.display.to_payload();
-                        self.emit_tool_result(session_id, turn_id, &id, &name, &out).await;
-                        let image = self.computer.take_image().await;
-                        let img = image
-                            .as_ref()
-                            .map(|p| (p.media_type.clone(), p.data.clone()))
-                            .or_else(|| match &out.display {
-                                DisplayKind::Image { media_type, data } => {
-                                    Some((media_type.clone(), data.clone()))
-                                }
-                                _ => None,
-                            });
-                        outcomes.push((id, out.for_model.clone(), out.ok, display, img));
-                    }
-                    Err(e) => {
-                        self.emit_tool_error(session_id, turn_id, &id, &name, &e).await;
-                        outcomes.push((
-                            id,
-                            e.for_model(),
-                            false,
-                            json!({"kind":"plain","text": e.to_string()}),
-                            None,
-                        ));
-                    }
+                } else {
+                    // 非只读：严格串行，就地执行。
+                    let (id, name, args) = calls[i].clone();
+                    i += 1;
+                    let reg = Arc::clone(&registry);
+                    let ctx = self.tool_ctx(&workspace, &opts, session_id, &id, &search_key, &search_pref);
+                    let t0 = std::time::Instant::now();
+                    let r = reg.execute(&name, &args, &ctx).await;
+                    tool_ms += t0.elapsed().as_millis() as u64;
+                    self.record_outcome(session_id, turn_id, &id, &name, r, &mut outcomes).await;
                 }
             }
 
@@ -988,23 +1143,108 @@ When it is achieved, say so clearly in your reply.",
                     .await
                     .ok();
             }
-        }
+            }
+        }; // 'turn
 
+        // 统一收尾：所有出口（正常/取消/出错）都走这里记账并发布 turn.end。
+        let final_stop = match &result {
+            Ok(s) => s.clone(),
+            Err(_) => "error".to_string(),
+        };
+        self.finalize_turn(
+            session_id,
+            turn_id,
+            t_start,
+            &turn_usage,
+            steps as u64,
+            &final_stop,
+            ctx_limit,
+            out_tokens_this_turn,
+            model_ms,
+            tool_ms,
+            ttft_ms,
+        )
+        .await;
+        result.map(|_| ())
+    }
+
+    /// 工具单次执行结果的统一落点：发事件、取截图、追加到 outcomes。
+    async fn record_outcome(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        id: &str,
+        name: &str,
+        r: Result<crate::tools::ToolOutcome, HarnessError>,
+        outcomes: &mut Vec<(String, String, bool, Value, Option<(String, String)>)>,
+    ) {
+        match r {
+            Ok(out) => {
+                let display = out.display.to_payload();
+                self.emit_tool_result(session_id, turn_id, id, name, &out).await;
+                let image = self.computer.take_image().await;
+                // computer 桥的截图优先，其次工具结果自带的图片（read_file 读图）
+                let img = image
+                    .as_ref()
+                    .map(|p| (p.media_type.clone(), p.data.clone()))
+                    .or_else(|| match &out.display {
+                        DisplayKind::Image { media_type, data } => {
+                            Some((media_type.clone(), data.clone()))
+                        }
+                        _ => None,
+                    });
+                outcomes.push((id.to_string(), out.for_model, out.ok, display, img));
+            }
+            Err(e) => {
+                self.emit_tool_error(session_id, turn_id, id, name, &e).await;
+                outcomes.push((
+                    id.to_string(),
+                    e.for_model(),
+                    false,
+                    json!({"kind":"plain","text": e.to_string()}),
+                    None,
+                ));
+            }
+        }
+    }
+
+    /// turn 收尾：add_usage（所有出口路径都记账）、更新会话统计、发布
+    /// turn.end（含 modelMs/toolMs/ttftMs）与最终 status。
+    #[allow(clippy::too_many_arguments)]
+    async fn finalize_turn(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        t_start: std::time::Instant,
+        turn_usage: &Usage,
+        steps: u64,
+        stop_reason: &str,
+        ctx_limit: u64,
+        out_tokens: u64,
+        model_ms: u64,
+        tool_ms: u64,
+        ttft_ms: u64,
+    ) {
         let wall = t_start.elapsed().as_millis() as u64;
         self.store
-            .add_usage(session_id, &turn_usage, 1, steps as u64, wall)
+            .add_usage(session_id, turn_usage, 1, steps, wall)
             .await;
         {
             let mut st = self.stats.lock().await;
             let s = st.entry(session_id.to_string()).or_default();
             s.turns += 1;
-            s.steps += steps as u64;
-            s.tokens.add(&turn_usage);
+            s.steps += steps;
+            s.tokens.add(turn_usage);
             s.wall_ms += wall;
+            s.model_ms += model_ms;
+            s.tool_ms += tool_ms;
+            if s.ttft_ms == 0 {
+                s.ttft_ms = ttft_ms;
+            }
             // Only trust an instant throughput number when the turn lasted long
             // enough to measure; sub-second mock/local runs would read absurdly high.
-            if out_tokens_this_turn > 0 && wall >= 500 {
-                let instant_tps = out_tokens_this_turn as f64 * 1000.0 / wall as f64;
+            if out_tokens > 0 && wall >= 500 {
+                let instant_tps = out_tokens as f64 * 1000.0 / wall as f64;
                 let instant_tps = instant_tps.min(2000.0);
                 s.tps = if s.tps == 0.0 { instant_tps } else { s.tps * 0.6 + instant_tps * 0.4 };
             }
@@ -1017,10 +1257,12 @@ When it is achieved, say so clearly in your reply.",
                 "ms": wall,
                 "usage": turn_usage,
                 "stopReason": stop_reason,
+                "modelMs": model_ms,
+                "toolMs": tool_ms,
+                "ttftMs": ttft_ms,
             }),
         );
         self.publish_status_final(session_id, ctx_limit).await;
-        Ok(())
     }
 
     async fn emit_tool_result(
@@ -1082,6 +1324,9 @@ When it is achieved, say so clearly in your reply.",
         ctx_limit: u64,
         out_started: &mut Option<std::time::Instant>,
         out_tokens: u64,
+        model_ms: u64,
+        tool_ms: u64,
+        ttft_ms: u64,
     ) {
         if out_started.is_none() {
             *out_started = Some(std::time::Instant::now());
@@ -1104,6 +1349,10 @@ When it is achieved, say so clearly in your reply.",
                 "turns": st.turns,
                 "steps": st.steps,
                 "tps": tps.round(),
+                // 本轮耗时口径（camelCase，前端直接读）：
+                "modelMs": model_ms,
+                "toolMs": tool_ms,
+                "ttftMs": ttft_ms,
                 "tokens": {
                     "total": usage.total(),
                     "cacheHit": (usage.cache_hit_rate() * 100.0).round(),
@@ -1131,6 +1380,9 @@ When it is achieved, say so clearly in your reply.",
                 "turns": st.turns,
                 "steps": st.steps,
                 "tps": st.tps.round(),
+                "modelMs": st.model_ms,
+                "toolMs": st.tool_ms,
+                "ttftMs": st.ttft_ms,
                 "tokens": {
                     "total": st.tokens.total(),
                     "cacheHit": (st.tokens.cache_hit_rate() * 100.0).round(),
@@ -1153,30 +1405,40 @@ When it is achieved, say so clearly in your reply.",
 /// Summarise older history when the conversation approaches the context limit.
 ///
 /// Keeps the most recent `KEEP` messages verbatim and replaces everything before
-/// them with one structured summary message. Returns how many messages were
-/// folded away (0 = nothing to do).
+/// them with one structured summary message. Returns `(folded, summary_body)` —
+/// `folded` is how many messages were folded away (0 = nothing to do); the
+/// caller persists `summary_body` into the store to keep disk in sync.
+///
+/// `fixed_tokens` 是 system + tools 的固定 token 估计：阈值按
+/// system + tools + history 合计 vs ctx_limit 判定（此前 system/tools 计 0，
+/// 上下水线比真实请求小得多，压缩触发过晚）。
 pub async fn compact_history(
     provider: &dyn provider::Provider,
     history: &mut Vec<Msg>,
     hub: &EventHub,
     session_id: &str,
     ctx_limit: u64,
-) -> Result<usize, HarnessError> {
+    fixed_tokens: usize,
+) -> Result<(usize, Option<String>), HarnessError> {
     const KEEP: usize = 6;
     const THRESHOLD_PCT: u64 = 85;
 
-    let sys_tokens = 0usize; // system is sent separately and is not part of `history`
     let msg_tokens: usize = history.iter().map(|m| m.estimate()).sum();
-    let used = sys_tokens + msg_tokens;
+    let used = fixed_tokens + msg_tokens;
     let limit = ctx_limit.max(8_000) as usize;
     if used * 100 / limit < THRESHOLD_PCT as usize {
-        return Ok(0);
+        return Ok((0, None));
     }
     if history.len() <= KEEP + 2 {
-        return Ok(0);
+        return Ok((0, None));
     }
 
-    let split = history.len() - KEEP;
+    // 切分点对齐：assistant(tool_use) 与其后续 tool_result 用户消息必须
+    // 同侧，否则折叠后 provider 看到 dangling tool_result 直接拒绝重放。
+    let split = align_compact_split(history, history.len() - KEEP);
+    if split == 0 {
+        return Ok((0, None));
+    }
     let tail: Vec<Msg> = history.split_off(split);
     let head: Vec<Msg> = std::mem::take(history);
 
@@ -1187,13 +1449,14 @@ pub async fn compact_history(
         // Put the history back unchanged rather than losing it.
         *history = head;
         history.extend(tail);
-        return Ok(0);
+        return Ok((0, None));
     }
 
     let folded = head.len();
-    history.push(Msg::User(vec![UserPart::Text(format!(
+    let body = format!(
         "[context compacted — the {folded} messages below were summarised to fit the window]\n{summary}"
-    ))]));
+    );
+    history.push(Msg::User(vec![UserPart::Text(body.clone())]));
     history.extend(tail);
 
     hub.publish(
@@ -1201,7 +1464,53 @@ pub async fn compact_history(
         "status",
         json!({"note": "compacted"}),
     );
-    Ok(folded)
+    Ok((folded, Some(body)))
+}
+
+/// 切分点对齐：把拟切分下标向回挪，直到 `history[split]` 不是 tool_result
+/// 用户消息——即边界总是落在"一个 assistant(tool_use) 消息及其紧跟的全部
+/// tool_result 用户消息"完整组之后（组整体要么全折进摘要，要么全保留）。
+fn align_compact_split(msgs: &[Msg], mut split: usize) -> usize {
+    let is_tool_result = |m: &Msg| {
+        matches!(m, Msg::User(parts) if parts.iter().any(|p| matches!(p, UserPart::ToolResult { .. })))
+    };
+    if msgs.is_empty() {
+        return 0;
+    }
+    // split 可能等于 msgs.len()(全部折入、尾部为空):此时探测最后一条,
+    // 若它也是孤儿 tool_result,同样一路回退(调用方按"无处可切"处理)。
+    while split > 0 {
+        let probe = split.min(msgs.len() - 1);
+        if !is_tool_result(&msgs[probe]) {
+            break;
+        }
+        split -= 1;
+    }
+    split
+}
+
+/// 只读工具判定：相邻连续的只读调用才并行批处理。含文件/目录读取、网页
+/// 抓取，以及 computer 的两个只读观察类工具（截图 / a11y 树）。
+fn is_readonly_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "read_file" | "glob" | "grep" | "list_dir" | "web_fetch" | "computer_screenshot" | "computer_axtree"
+    )
+}
+
+/// system + tools 的固定 token 估计（compaction 阈值口径，与
+/// `provider::estimate_request` 的 per-spec 公式一致）。
+fn estimate_fixed(system: &str, tools: &[ToolSpec]) -> usize {
+    let sys = crate::token::estimate(system);
+    let t: usize = tools
+        .iter()
+        .map(|s| {
+            crate::token::estimate(&s.description)
+                + crate::token::estimate(&s.input_schema.to_string())
+                + 12
+        })
+        .sum();
+    sys + t
 }
 
 /// Structured-summary template shared by auto and manual compaction
@@ -1338,8 +1647,9 @@ async fn inline_attachments(atts: &[Attachment]) -> String {
     out
 }
 
-async fn build_system_prompt(workspace: &PathBuf, opts: &TurnOptions) -> String {
-    let cfg = Config::load();
+/// 构造内置 system prompt。配置由调用方传入（内存 `Arc<RwLock<Config>>`
+/// 的读快照），不再自己 `Config::load()` 读盘。
+fn build_system_prompt(cfg: &Config, workspace: &PathBuf, opts: &TurnOptions) -> String {
     // Raw override (`systemPromptRaw`): the value here IS the exact `system`
     // string sent to the provider — it replaces the entire built-in prompt
     // rather than appending to it. Two placeholders are substituted; plan-mode
@@ -1499,7 +1809,7 @@ mod tests {
         };
         let hub = EventHub::new();
         let mut h = fill(3);
-        let n = compact_history(&p, &mut h, &hub, "s", 1_000_000)
+        let (n, _) = compact_history(&p, &mut h, &hub, "s", 1_000_000, 0)
             .await
             .unwrap();
         assert_eq!(n, 0, "short history must not be compacted");
@@ -1517,9 +1827,12 @@ mod tests {
         // 85% line even against the 8k floor that guards tiny ctx_limits.
         let mut h = fill(120);
         let before = h.len();
-        let n = compact_history(&p, &mut h, &hub, "s", 200).await.unwrap();
+        let (n, body) = compact_history(&p, &mut h, &hub, "s", 200, 0)
+            .await
+            .unwrap();
         assert!(n > 0, "expected compaction to fire, got 0 of {before}");
         assert!(n < before);
+        assert!(body.is_some(), "summary body must be returned for persistence");
         // Exactly 1 summary message + the 6 kept verbatim.
         assert_eq!(h.len(), 7, "1 summary + 6 kept, got {}", h.len());
         // The summary replaced the folded region.
@@ -1541,9 +1854,38 @@ mod tests {
         let hub = EventHub::new();
         let mut h = fill(120);
         let before = h.len();
-        let n = compact_history(&p, &mut h, &hub, "s", 200).await.unwrap();
+        let (n, _) = compact_history(&p, &mut h, &hub, "s", 200, 0)
+            .await
+            .unwrap();
         assert_eq!(n, 0);
         assert_eq!(h.len(), before, "history must be restored untouched");
+    }
+
+    #[test]
+    fn compact_split_never_separates_tool_group() {
+        // assistant(tool_use) 后跟 tool_result 用户消息：切分点落在它们之间时
+        // 必须向回对齐到整组之前。
+        let msgs = vec![
+            Msg::user("fix the build"),
+            Msg::Assistant(vec![AsstPart::ToolUse {
+                id: "1".into(),
+                name: "bash".into(),
+                args: serde_json::json!({}),
+            }]),
+            Msg::User(vec![UserPart::ToolResult {
+                id: "1".into(),
+                content: "ok".into(),
+                is_error: false,
+            }]),
+            Msg::user("next"),
+        ];
+        // 拟切到 tool_result 前（下标 2）→ 对齐到 assistant 前（下标 1）。
+        assert_eq!(align_compact_split(&msgs, 2), 1);
+        // 落在完整组之后保持不变。
+        assert_eq!(align_compact_split(&msgs, 3), 3);
+        // 全是 tool_result 顶到 0 时返回 0（调用方按"无处可切"处理）。
+        let only_results = vec![msgs[2].clone()];
+        assert_eq!(align_compact_split(&only_results, 1), 0);
     }
 
     #[allow(dead_code)]

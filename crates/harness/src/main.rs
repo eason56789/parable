@@ -34,6 +34,10 @@ struct Args {
     /// Run a single prompt headless and print the result (no UI).
     #[arg(short = 'p', long)]
     prompt: Option<String>,
+
+    /// Headless (-p) overall timeout in seconds, guarding against hangs.
+    #[arg(long, default_value_t = 1800)]
+    headless_timeout_secs: u64,
 }
 
 #[tokio::main]
@@ -71,7 +75,7 @@ async fn main() -> anyhow::Result<()> {
     println!("Parable harness listening on {url}");
 
     if let Some(prompt) = args.prompt {
-        run_headless(&state, &prompt).await?;
+        run_headless(&state, &prompt, args.headless_timeout_secs).await?;
         return Ok(());
     }
 
@@ -84,6 +88,7 @@ async fn main() -> anyhow::Result<()> {
 async fn run_headless(
     state: &server::SharedState,
     prompt: &str,
+    timeout_secs: u64,
 ) -> anyhow::Result<()> {
     use harness::agent::TurnOptions;
     let sid = {
@@ -91,6 +96,9 @@ async fn run_headless(
         let ws = cfg.workspace.clone();
         state.store.create(&ws, "headless").await.meta.id
     };
+    // 先订阅、后 start_turn：反过来会在 turn 启动瞬间丢掉最早的事件
+    // （text.delta 竞态，输出缺开头）。
+    let mut rx = state.hub.subscribe();
     let turn_id = state
         .agent
         .start_turn(&sid, prompt, vec![], TurnOptions::default())
@@ -98,10 +106,21 @@ async fn run_headless(
     tracing::info!("headless turn {turn_id} on session {sid} started");
 
     // Drain the event hub until the turn ends, echoing text to stdout.
-    let mut rx = state.hub.subscribe();
+    // 整体带超时（默认 30 分钟，--headless-timeout-secs 可调），防挂死。
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     loop {
-        match rx.recv().await {
-            Ok(ev) => {
+        match tokio::time::timeout_at(deadline, rx.recv()).await {
+            Err(_) => {
+                eprintln!("\n[timeout] headless run exceeded {timeout_secs}s; giving up");
+                break;
+            }
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(n))) => {
+                // 消费端一时跟不上：跳过缺失继续，不能直接退出。
+                eprintln!("\n[warn] event bus lagged, skipped {n} events");
+                continue;
+            }
+            Ok(Err(_)) => break, // channel closed
+            Ok(Ok(ev)) => {
                 if ev.session_id != sid {
                     continue;
                 }
@@ -132,7 +151,6 @@ async fn run_headless(
                     _ => {}
                 }
             }
-            Err(_) => break,
         }
     }
     Ok(())

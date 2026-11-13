@@ -68,16 +68,27 @@ impl ProviderConfig {
     }
 }
 
+/// 按字符边界安全掩码：非 ASCII key 也不能 panic（修复字节下标截断越界）。
 pub fn mask_key(key: &str) -> String {
     if key.is_empty() {
         return String::new();
     }
-    let n = key.len();
+    let n = key.chars().count();
     if n <= 8 {
         "•".repeat(n)
     } else {
-        format!("{}…{}", &key[..4], &key[n - 4..])
+        let head: String = key.chars().take(4).collect();
+        let tail: String = key.chars().skip(n - 4).collect();
+        format!("{head}…{tail}")
     }
+}
+
+/// 当前 Unix 时间戳（秒），用于损坏文件备份命名。
+fn unix_ts() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -275,11 +286,30 @@ impl Config {
     }
 
     pub fn load() -> Self {
-        match std::fs::read_to_string(Self::config_path()) {
-            Ok(s) => toml::from_str(&s).unwrap_or_else(|e| {
-                tracing::warn!("config parse failed ({e}); using defaults");
-                Config::default()
-            }),
+        let path = Self::config_path();
+        match std::fs::read_to_string(&path) {
+            Ok(s) => match toml::from_str(&s) {
+                Ok(c) => c,
+                Err(e) => {
+                    // 解析失败先把原文件备份走，再回退默认值——
+                    // 避免后续 save() 用默认配置覆盖丢失原始数据。
+                    let name = path
+                        .file_name()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "config.toml".to_string());
+                    let backup = path.with_file_name(format!("{name}.corrupt-{}", unix_ts()));
+                    match std::fs::rename(&path, &backup) {
+                        Ok(()) => tracing::error!(
+                            "config parse failed ({e}); original backed up to {}",
+                            backup.display()
+                        ),
+                        Err(be) => tracing::error!(
+                            "config parse failed ({e}); backup rename failed: {be} (original left in place)"
+                        ),
+                    }
+                    Config::default()
+                }
+            },
             Err(_) => Config::default(),
         }
     }
@@ -291,7 +321,9 @@ impl Config {
         }
         let s = toml::to_string_pretty(self)
             .map_err(|e| HarnessError::Config(e.to_string()))?;
-        std::fs::write(&p, s)?;
+        // 原子写盘（临时文件 + rename），避免写一半崩溃留下损坏的 config.toml。
+        crate::atomic_write(&p, s.as_bytes())?;
+        restrict_config_acl(&p);
         Ok(())
     }
 
@@ -330,4 +362,83 @@ impl Config {
 
 pub fn read_credentials_for(path: &Path) -> Option<String> {
     std::fs::read_to_string(path).ok().map(|s| s.trim().to_string())
+}
+
+// ------------------------------------------------------------------ 文件 ACL
+
+/// 收紧 config 文件的访问权限（内含 API key / search key）。
+/// Unix：0o600；Windows：尽力 `icacls /inheritance:r /grant:r` 仅保留当前用户。
+/// 失败只告警，不阻塞保存。
+fn restrict_config_acl(p: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o600);
+        if let Err(e) = std::fs::set_permissions(p, perms) {
+            tracing::warn!("could not chmod 600 {}: {e}", p.display());
+        }
+    }
+    #[cfg(windows)]
+    {
+        let user = std::env::var("USERNAME").unwrap_or_default();
+        if user.is_empty() {
+            tracing::warn!("could not restrict ACL on {}: USERNAME not set", p.display());
+            return;
+        }
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let out = std::process::Command::new("icacls")
+            .arg(p)
+            .arg("/inheritance:r")
+            .arg("/grant:r")
+            .arg(format!("{user}:F"))
+            .creation_flags(CREATE_NO_WINDOW)
+            .output();
+        match out {
+            Ok(o) if o.status.success() => {}
+            Ok(o) => tracing::warn!(
+                "icacls on {} failed ({}): {}",
+                p.display(),
+                o.status,
+                String::from_utf8_lossy(&o.stderr).trim()
+            ),
+            Err(e) => tracing::warn!("could not run icacls on {}: {e}", p.display()),
+        }
+    }
+}
+
+// ------------------------------------------------------------------ PATCH 删除
+
+/// PATCH 合并的删除支持：provider 级 `"deleted": true` 删除整个 provider，
+/// models 数组内 model 级 `"deleted": true` 删除该模型。
+///
+/// server.rs 的 `merge_config` 在做字段合并**之前**调用本函数即可
+/// （其余 merge 逻辑不用感知删除语义）。
+pub fn apply_patch_deletions(cfg: &mut Config, v: &serde_json::Value) {
+    let Some(arr) = v.get("providers").and_then(|x| x.as_array()) else {
+        return;
+    };
+    for p in arr {
+        let Some(pid) = p.get("id").and_then(|x| x.as_str()) else {
+            continue;
+        };
+        if p.get("deleted").and_then(|x| x.as_bool()) == Some(true) {
+            cfg.providers.retain(|x| x.id != pid);
+            continue;
+        }
+        let Some(models) = p.get("models").and_then(|x| x.as_array()) else {
+            continue;
+        };
+        let to_delete: Vec<String> = models
+            .iter()
+            .filter(|m| m.get("deleted").and_then(|x| x.as_bool()) == Some(true))
+            .filter_map(|m| m.get("id").and_then(|x| x.as_str()).map(String::from))
+            .collect();
+        if to_delete.is_empty() {
+            continue;
+        }
+        if let Some(pp) = cfg.providers.iter_mut().find(|x| x.id == pid) {
+            pp.models.retain(|m| !to_delete.contains(&m.id));
+        }
+    }
 }

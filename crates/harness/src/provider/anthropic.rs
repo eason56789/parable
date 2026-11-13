@@ -330,25 +330,27 @@ where
 {
     async_stream::stream! {
         futures::pin_mut!(byte_stream);
-        let mut buf = String::new();
+        // 字节缓冲:SSE 帧边界只在字节层找,完整帧才整体解码——避免跨 chunk
+        // 被切断的多字节 UTF-8 字符被 from_utf8_lossy 打碎或误判成帧尾。
+        let mut buf: Vec<u8> = Vec::with_capacity(8 * 1024);
         let mut usage = Usage::default();
         let mut blocks: HashMap<i64, BlockAcc> = HashMap::new();
-        let mut done = false;
+        let mut stop_reason: Option<String> = None;
 
         'outer: while let Some(item) = byte_stream.next().await {
             let chunk = match item {
                 Ok(c) => c,
                 Err(e) => {
                     yield Err(HarnessError::Http(e));
-                    break;
+                    return; // 出错后直接结束,不再补发 Done 掩盖错误
                 }
             };
-            buf.push_str(&String::from_utf8_lossy(&chunk));
+            buf.extend_from_slice(&chunk);
 
             // A frame is separated by a blank line.
-            while let Some(pos) = find_frame_boundary(&buf) {
-                let raw = buf[..pos.end].to_string();
-                buf.drain(..pos.end);
+            while let Some(end) = find_frame_boundary(&buf) {
+                let raw = String::from_utf8_lossy(&buf[..end]).into_owned();
+                buf.drain(..end);
                 for frame in parse_frames(&raw) {
                     let data = frame.data.trim();
                     if data.is_empty() {
@@ -385,7 +387,16 @@ where
                                     });
                                     yield Ok(StreamChunk::ToolCallStart { id, name });
                                 }
-                                Some("thinking") => {}
+                                Some("thinking") => {
+                                    // thinking 块也要登记:后续 signature_delta
+                                    // 才有落点,stop 时才知道要发 ReasoningDone。
+                                    blocks.insert(index, BlockAcc {
+                                        id: String::new(),
+                                        name: String::new(),
+                                        args: String::new(),
+                                        kind: "thinking".into(),
+                                    });
+                                }
                                 _ => {}
                             }
                         }
@@ -410,7 +421,9 @@ where
                                 Some("signature_delta") => {
                                     if let Some(sig) = d["signature"].as_str() {
                                         if let Some(b) = blocks.get_mut(&index) {
-                                            b.args.push_str(sig); // reuse field for signature
+                                            // 签名写进该 thinking 块(args 字段对
+                                            // thinking 块复用作签名暂存)
+                                            b.args.push_str(sig);
                                             b.kind = "thinking".into();
                                         }
                                     }
@@ -429,16 +442,27 @@ where
                             let index = v["index"].as_i64().unwrap_or(0);
                             if let Some(b) = blocks.remove(&index) {
                                 if b.kind == "tool" {
-                                    let args: Value = serde_json::from_str(&b.args)
-                                        .unwrap_or_else(|_| json!({}));
+                                    // 参数 JSON 解析失败不再静默成空对象:带回
+                                    // 原因与原始串,让模型能看到真实问题。
+                                    let args: Value = serde_json::from_str(&b.args).unwrap_or_else(|_| {
+                                        json!({
+                                            "__args_error": "arguments were not valid JSON",
+                                            "raw": truncate(&b.args, 200),
+                                        })
+                                    });
                                     yield Ok(StreamChunk::ToolCallDone {
                                         id: b.id,
                                         name: b.name,
                                         args,
                                     });
                                 } else {
-                                    // thinking block finished: signature already folded in
-                                    yield Ok(StreamChunk::Reasoning(String::new()));
+                                    // thinking 块结束:把采集到的签名交给上层
+                                    // 回填 AsstPart::Thinking.signature
+                                    if !b.args.is_empty() {
+                                        yield Ok(StreamChunk::ReasoningDone {
+                                            signature: b.args.clone(),
+                                        });
+                                    }
                                 }
                             }
                         }
@@ -448,12 +472,12 @@ where
                                     usage.output_tokens = o;
                                 }
                             }
+                            // stop_reason 透传给上层(end_turn / max_tokens / tool_use …)
                             if let Some(sr) = v.pointer("/delta/stop_reason").and_then(|x| x.as_str()) {
-                                let _ = sr;
+                                stop_reason = Some(sr.to_string());
                             }
                         }
                         "message_stop" => {
-                            done = true;
                             break 'outer;
                         }
                         "error" => {
@@ -463,7 +487,8 @@ where
                                 .unwrap_or("stream error")
                                 .to_string();
                             yield Err(HarnessError::Provider(msg));
-                            break 'outer;
+                            // 出错后直接结束,不再补发 Done 掩盖错误
+                            return;
                         }
                         _ => {}
                     }
@@ -471,44 +496,34 @@ where
             }
         }
 
-        if !done {
-            yield Ok(StreamChunk::Done {
-                usage,
-                stop_reason: Some("end_turn".into()),
-            });
-        } else {
-            yield Ok(StreamChunk::Done {
-                usage,
-                stop_reason: Some("end_turn".into()),
-            });
-        }
+        // 正常收尾(只发一次 Done):透传 message_delta 的 stop_reason,
+        // 缺省按 end_turn 处理。
+        yield Ok(StreamChunk::Done {
+            usage,
+            stop_reason: Some(stop_reason.unwrap_or_else(|| "end_turn".into())),
+        });
     }
 }
 
-/// Locate the end of the next SSE frame: a blank line (`\n\n` or `\r\n\r\n`).
-fn find_frame_boundary(s: &str) -> Option<Boundary> {
-    let b = s.as_bytes();
+/// 在字节缓冲里定位下一个 SSE 帧的结束位置(空行分隔:`\n\n` / `\r\n\r\n`,
+/// 兼容混用行尾的 `\n\r\n`)。返回帧的总字节数(含分隔符);None 表示还没有
+/// 完整帧。只在字节层扫描,跨 chunk 被切断的 UTF-8 多字节字符不会造成丢帧。
+fn find_frame_boundary(b: &[u8]) -> Option<usize> {
     for i in 0..b.len() {
         if b[i] == b'\n' {
             if i + 1 < b.len() && b[i + 1] == b'\n' {
-                return Some(Boundary { end: i + 2 });
+                return Some(i + 2);
             }
             if i + 3 < b.len() && b[i + 1] == b'\r' && b[i + 2] == b'\n' && b[i + 3] == b'\n' {
-                return Some(Boundary { end: i + 4 });
+                return Some(i + 4);
             }
-            if i + 1 < b.len() && b[i + 1] == b'\r' {
-                // `\n\r\n`
-                if i + 2 < b.len() && b[i + 2] == b'\n' {
-                    return Some(Boundary { end: i + 3 });
-                }
+            // `\n\r\n`
+            if i + 1 < b.len() && b[i + 1] == b'\r' && i + 2 < b.len() && b[i + 2] == b'\n' {
+                return Some(i + 3);
             }
         }
     }
     None
-}
-
-struct Boundary {
-    end: usize,
 }
 
 #[cfg(test)]
@@ -526,8 +541,27 @@ mod tests {
     #[test]
     fn frame_boundary_crlf() {
         let s = "event: a\ndata: b\r\n\r\nrest";
-        let b = find_frame_boundary(s).unwrap();
-        assert_eq!(&s[..b.end], "event: a\ndata: b\r\n\r\n");
+        let end = find_frame_boundary(s.as_bytes()).unwrap();
+        assert_eq!(&s[..end], "event: a\ndata: b\r\n\r\n");
+    }
+
+    #[test]
+    fn frame_boundary_survives_split_utf8() {
+        // “ 的 UTF-8 是 E4 B8 80,切在中间时不能误判出帧边界
+        let s = "data: {\"a\":\"中";
+        let bytes = s.as_bytes();
+        let cut = bytes.len() - 1; // 最后一个字节是多字节字符的尾巴
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&bytes[..cut]);
+        assert!(find_frame_boundary(&buf).is_none());
+        buf.extend_from_slice(&bytes[cut..]);
+        assert_eq!(find_frame_boundary(&buf), None, "没有空行就没有帧");
+        let framed = format!("{s}\n\n");
+        let mut buf2 = framed.as_bytes().to_vec();
+        // 补上不完整字节也不影响已缓冲的完整帧定位
+        buf2.push(0xE4);
+        let end = find_frame_boundary(&buf2).unwrap();
+        assert_eq!(framed.as_bytes(), &buf2[..end]);
     }
 
     #[test]

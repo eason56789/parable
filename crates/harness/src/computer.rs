@@ -98,10 +98,12 @@ struct AxNode {
 
 impl ComputerBridge {
     pub fn new() -> Self {
+        // 调试端口随机取一个空闲端口,不再固定 9222:固定端口等于给本机其他
+        // 进程一个可抢占/伪装的稳定入口。PARABLE_CDP_PORT 仍可显式指定。
         let port = std::env::var("PARABLE_CDP_PORT")
             .ok()
             .and_then(|p| p.parse().ok())
-            .unwrap_or(9222);
+            .unwrap_or_else(pick_free_port);
         Self {
             port,
             child: Mutex::new(None),
@@ -138,12 +140,9 @@ impl ComputerBridge {
             }
         }
         let client = reqwest::Client::new();
-        let probe = client
-            .get(format!("http://127.0.0.1:{}/json", self.port))
-            .timeout(std::time::Duration::from_secs(2))
-            .send()
-            .await;
-        if probe.is_err() {
+        // 只认 Chromium 系(/json/version 的 Browser 字段):防止本机其他进程
+        // 恰好占用该端口后被当成受控浏览器接管 CDP。
+        if !self.chromium_listening(&client).await {
             self.launch_browser().await?;
         }
         // Pick the first page target.
@@ -165,6 +164,23 @@ impl ComputerBridge {
         let cdp = Cdp::connect(&ws_url).await?;
         *self.cdp.lock().await = Some(cdp);
         Ok(())
+    }
+
+    /// 端口上是否有一个我们认识的 Chromium 浏览器在监听:GET /json/version,
+    /// 校验 `Browser` 字段包含 Chrome/Chromium/Edge/Headless。
+    async fn chromium_listening(&self, client: &reqwest::Client) -> bool {
+        let Ok(resp) = client
+            .get(format!("http://127.0.0.1:{}/json/version", self.port))
+            .timeout(std::time::Duration::from_secs(2))
+            .send()
+            .await
+        else {
+            return false;
+        };
+        let Ok(v) = resp.json::<Value>().await else {
+            return false;
+        };
+        browser_is_chromium(&v)
     }
 
     async fn launch_browser(&self) -> Result<(), HarnessError> {
@@ -199,18 +215,22 @@ impl ComputerBridge {
             .spawn()
             .map_err(|e| HarnessError::Tool(format!("启动浏览器失败: {e}")))?;
         *self.child.lock().await = Some(child);
-        // 轮询调试端口就绪
+        // 轮询调试端口就绪:必须等到 /json/version 报出一个 Chromium 系 Browser
+        // 才算数,避免被同端口的其他进程糊弄过去。
         let client = reqwest::Client::new();
         for _ in 0..40 {
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-            if client
+            if let Ok(resp) = client
                 .get(format!("http://127.0.0.1:{}/json/version", self.port))
                 .timeout(std::time::Duration::from_millis(800))
                 .send()
                 .await
-                .is_ok()
             {
-                return Ok(());
+                if let Ok(v) = resp.json::<Value>().await {
+                    if browser_is_chromium(&v) {
+                        return Ok(());
+                    }
+                }
             }
         }
         Err(HarnessError::Tool("浏览器调试端口未就绪".into()))
@@ -398,6 +418,26 @@ fn mouse_button_mask(button: &str) -> i64 {
         "right" => 2,
         _ => 1,
     }
+}
+
+/// bind 127.0.0.1:0 拿一个空闲端口后立即释放,供浏览器稍后自己绑定
+/// (存在极小的 TOCTOU 窗口,可接受;失败返回 0,后续启动会明确报错)。
+fn pick_free_port() -> u16 {
+    std::net::TcpListener::bind(("127.0.0.1", 0))
+        .and_then(|l| l.local_addr())
+        .map(|a| a.port())
+        .unwrap_or(0)
+}
+
+/// 校验 /json/version 的 `Browser` 字段,只认 Chromium 系(Chrome/Chromium/
+/// Edge(含 UA 形式 `Edg/`)/Headless)。防止本机其他进程恰好占住端口后被当成
+/// 受控浏览器。
+fn browser_is_chromium(v: &Value) -> bool {
+    const KNOWN: [&str; 5] = ["Chrome", "Chromium", "Edge", "Edg/", "Headless"];
+    v.get("Browser")
+        .and_then(|b| b.as_str())
+        .map(|s| KNOWN.iter().any(|k| s.contains(k)))
+        .unwrap_or(false)
 }
 
 // ------------------------------------------------------------------ tools
@@ -645,5 +685,15 @@ mod tests {
         // parse/序列化逻辑由 ax_tree 内联完成；这里验证交互角色清单包含核心控件
         let interactive = ["button", "link", "textbox", "combobox"];
         assert!(interactive.contains(&"button"));
+    }
+
+    #[test]
+    fn browser_field_gate() {
+        // /json/version 的 Browser 字段必须像 Chromium 系才接受
+        assert!(browser_is_chromium(&json!({"Browser": "Chrome/120.0.0.0"})));
+        assert!(browser_is_chromium(&json!({"Browser": "Edg/121.0"})));
+        assert!(browser_is_chromium(&json!({"Browser": "HeadlessChrome/121.0"})));
+        assert!(!browser_is_chromium(&json!({"Browser": "SomeProxy/1.0"})));
+        assert!(!browser_is_chromium(&json!({})));
     }
 }

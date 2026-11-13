@@ -132,6 +132,20 @@ pub trait TurnStarter: Send + Sync {
         prompt: &str,
         model: &str,
     ) -> Result<String, HarnessError>;
+
+    /// 带 TurnOptions 启动子轮（子代理继承父轮权限/思考档位用）。
+    /// 同样必须经由 trait 对象调用：保持 future 类型擦除，避免
+    /// `start_turn` 的 opaque future 经 tokio::spawn 的 Send 检查
+    /// 递归套回自身（E0391 cycle）。
+    async fn start_child_opts(
+        &self,
+        session_id: &str,
+        prompt: &str,
+        opts: crate::agent::TurnOptions,
+    ) -> Result<String, HarnessError> {
+        // 默认兜底：退化为无 opts 的路径（读全局配置）。
+        self.start_child(session_id, prompt, &opts.model_sel).await
+    }
 }
 
 pub struct ToolCtx {
@@ -158,22 +172,64 @@ pub struct ToolCtx {
 }
 
 impl ToolCtx {
-    pub async fn authorize(&self, tool: &str, path: &str, risk: Risk) -> Result<(), HarnessError> {
-        if self.plan_mode && !matches!(tool, "read_file" | "glob" | "grep" | "list_dir" | "todo_write" | "ask_user") {
+    /// 所有权限入口的统一闸门:plan 模式白名单 → ~/.parable 硬拒 → 规则/模式
+    /// 判定(auto_allow)→ 挂起等用户决策。保证每条路径都不漏检查与审计。
+    async fn gate(
+        &self,
+        tool: &str,
+        path: &str,
+        risk: Risk,
+        command: Option<&str>,
+        reason: &str,
+        preview: Option<&str>,
+    ) -> Result<(), HarnessError> {
+        if self.plan_mode
+            && !matches!(
+                tool,
+                "read_file" | "glob" | "grep" | "list_dir" | "todo_write" | "ask_user"
+            )
+        {
             return Err(HarnessError::PermissionDenied(
                 "plan mode is on: only read-only tools and planning are allowed".into(),
             ));
         }
+        // 只读工具一律不碰 ~/.parable 内部(config/permissions/sessions/logs/
+        // uploads):直接报错,不弹确认面板。
+        if matches!(tool, "read_file" | "glob" | "grep" | "list_dir")
+            && crate::permission::is_parable_internal(Path::new(path))
+        {
+            return Err(HarnessError::PermissionDenied(
+                "refusing to touch ~/.parable internals".into(),
+            ));
+        }
         if self
             .broker
-            .auto_allow(&self.permission_mode, tool, path, &self.workspace)
+            .auto_allow(
+                &self.permission_mode,
+                tool,
+                path,
+                command,
+                risk,
+                &self.workspace,
+            )
             .await
         {
+            // 规则/模式放行同样留痕,decision 标 "auto"。
+            self.broker.audit_auto(&self.call_id, tool, path, risk).await;
+            self.broker.note_decision(&self.call_id, "auto").await;
             return Ok(());
         }
         let d = self
             .broker
-            .request(&self.call_id, tool, path, risk, "", None)
+            .request(
+                &self.call_id,
+                tool,
+                path,
+                risk,
+                reason,
+                preview.map(|s| s.to_string()),
+                command,
+            )
             .await?;
         if d.allowed() {
             Ok(())
@@ -184,6 +240,10 @@ impl ToolCtx {
         }
     }
 
+    pub async fn authorize(&self, tool: &str, path: &str, risk: Risk) -> Result<(), HarnessError> {
+        self.gate(tool, path, risk, None, "", None).await
+    }
+
     /// Like [`authorize`] but carries a diff preview into the permission panel.
     pub async fn authorize_with_preview(
         &self,
@@ -192,31 +252,39 @@ impl ToolCtx {
         risk: Risk,
         preview: &str,
     ) -> Result<(), HarnessError> {
-        if self
-            .broker
-            .auto_allow(&self.permission_mode, tool, path, &self.workspace)
-            .await
-        {
-            return Ok(());
-        }
-        let d = self
-            .broker
-            .request(
-                &self.call_id,
-                tool,
-                path,
-                risk,
-                "",
-                Some(preview.to_string()),
-            )
-            .await?;
-        if d.allowed() {
-            Ok(())
-        } else {
-            Err(HarnessError::PermissionDenied(format!(
-                "user declined {tool} on {path}"
-            )))
-        }
+        self.gate(tool, path, risk, None, "", Some(preview)).await
+    }
+
+    /// shell 类工具(bash / 插件命令):渲染后的命令原文进入权限链——面板的
+    /// reason 里能看到真正要执行的命令,Always 规则也按命令精确匹配。
+    pub async fn authorize_shell(
+        &self,
+        tool: &str,
+        path: &str,
+        risk: Risk,
+        command: &str,
+    ) -> Result<(), HarnessError> {
+        self.gate(
+            tool,
+            path,
+            risk,
+            Some(command),
+            &format!("command: {command}"),
+            None,
+        )
+        .await
+    }
+
+    /// 自定义 reason / 预览内容的权限请求(如插件 manifest 全文)。
+    pub async fn authorize_with_reason(
+        &self,
+        tool: &str,
+        path: &str,
+        risk: Risk,
+        reason: &str,
+        preview: Option<&str>,
+    ) -> Result<(), HarnessError> {
+        self.gate(tool, path, risk, None, reason, preview).await
     }
 }
 
@@ -670,7 +738,7 @@ impl Registry {
 
     pub async fn execute(&self, name: &str, args: &Value, ctx: &ToolCtx) -> Result<ToolOutcome, HarnessError> {
         let t0 = std::time::Instant::now();
-        let out = match name {
+        let res: Result<ToolOutcome, HarnessError> = match name {
             "read_file" => self.read_file(args, ctx).await,
             "write_file" => self.write_file(args, ctx).await,
             "edit_file" => self.edit_file(args, ctx).await,
@@ -703,9 +771,14 @@ impl Registry {
                 Some(pt) => crate::plugin::run_plugin_tool(pt, args, ctx).await,
                 None => Err(HarnessError::Tool(format!("unknown tool: {other}"))),
             },
-        }?;
-        let _ = t0;
-        Ok(out)
+        };
+        // 执行审计:无论成败都记一条(tool、判定来源 auto/requested、耗时)。
+        let source = ctx.broker.decision_of(&ctx.call_id).await;
+        let ok = res.as_ref().map(|o| o.ok).unwrap_or(false);
+        ctx.broker
+            .audit_execution(&ctx.call_id, name, source, ok, t0.elapsed().as_millis())
+            .await;
+        res
     }
 
     // ---------------------------------------------------------------- fs helpers
@@ -730,7 +803,12 @@ impl Registry {
             return read_image(&path, mime);
         }
         let offset = a["offset"].as_u64().unwrap_or(1).max(1);
-        let limit = a["limit"].as_u64().unwrap_or(2000).min(20000);
+        // limit=0 会被当成"从头读全部"之外的三不像,归一成默认值
+        let limit = a["limit"]
+            .as_u64()
+            .filter(|l| *l > 0)
+            .map(|l| l.min(20000))
+            .unwrap_or(2000);
         fs_impl::read_file(&path, offset, limit)
     }
 
@@ -744,10 +822,13 @@ impl Registry {
             .ok()
             .map(|old| crate::tools::fs::preview_diff(&old, content, 200))
             .unwrap_or_default();
+        // 覆盖已有文件是不可逆的破坏性操作:ws/ask 模式下必须确认(auto_allow
+        // 对 Destructive 一律送确认),只有新建文件才是普通 Write。
+        let risk = if path.exists() { Risk::Destructive } else { Risk::Write };
         ctx.authorize_with_preview(
             "write_file",
             &path.to_string_lossy(),
-            if path.exists() { Risk::Write } else { Risk::Write },
+            risk,
             &preview,
         )
         .await?;
@@ -763,6 +844,12 @@ impl Registry {
             HarnessError::Tool("`new_string` is required and must be a string".into())
         })?;
         let replace_all = a["replace_all"].as_bool().unwrap_or(false);
+        if old.is_empty() {
+            // 空串在 `text.matches("")` 里处处命中,等于全文替换——参数错误直接拦
+            return Err(HarnessError::Tool(
+                "`old_string` must not be empty; use write_file to replace a whole file".into(),
+            ));
+        }
         let preview = fs_impl::preview_replace(&path, old, new, replace_all)?;
         ctx.authorize_with_preview("edit_file", &path.to_string_lossy(), Risk::Write, &preview)
             .await?;
@@ -823,23 +910,32 @@ impl Registry {
             _ => self.workspace.clone(),
         };
         let timeout = a["timeout_ms"].as_u64().unwrap_or(120_000);
-        ctx.authorize("bash", &cwd.to_string_lossy(), Risk::Shell).await?;
+        // 命令原文进权限链:面板上能看到真正要执行的命令,Always 规则按命令精确匹配
+        ctx.authorize_shell("bash", &cwd.to_string_lossy(), Risk::Shell, command)
+            .await?;
         shell::bash(command, &cwd, timeout, ctx).await
     }
 
     async fn todo_write(&self, a: &Value, _ctx: &ToolCtx) -> Result<ToolOutcome, HarnessError> {
-        let items: Vec<TodoItem> = a["todos"]
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .map(|t| TodoItem {
-                        id: t["id"].as_str().unwrap_or("").to_string(),
-                        content: t["content"].as_str().unwrap_or("").to_string(),
-                        status: t["status"].as_str().unwrap_or("pending").to_string(),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        // 参数校验:todos 必须是数组(空数组=清空计划,允许);status 必须是
+        // 三态之一,非法直接报工具错误,别让脏状态进前端。
+        let arr = a["todos"].as_array().ok_or_else(|| {
+            HarnessError::Tool("`todos` must be an array of {id, content, status}".into())
+        })?;
+        let mut items: Vec<TodoItem> = Vec::with_capacity(arr.len());
+        for t in arr {
+            let status = t["status"].as_str().unwrap_or("pending");
+            if !matches!(status, "pending" | "in_progress" | "completed") {
+                return Err(HarnessError::Tool(format!(
+                    "invalid todo status `{status}`: must be pending | in_progress | completed"
+                )));
+            }
+            items.push(TodoItem {
+                id: t["id"].as_str().unwrap_or("").to_string(),
+                content: t["content"].as_str().unwrap_or("").to_string(),
+                status: status.to_string(),
+            });
+        }
         let n = items.len();
         Ok(ToolOutcome {
             ok: true,
@@ -910,6 +1006,9 @@ impl Registry {
                     "new" => crate::schedule::Target::NewEachTime,
                     _ => crate::schedule::Target::Reuse,
                 };
+                let label = a["name"].as_str().unwrap_or("task");
+                // 定时任务会长期反复向会话投递 prompt:写入级权限,plan 模式下被拒
+                ctx.authorize("schedule_create", label, Risk::Write).await?;
                 let t = svc
                     .create(
                         a["name"].as_str().unwrap_or("task").to_string(),
@@ -989,6 +1088,8 @@ impl Registry {
                 let id = a["id"].as_str().unwrap_or("");
                 let action = a["action"].as_str().unwrap_or("");
                 if action == "delete" {
+                    // 删除是持久任务的一次性毁灭,按破坏性对待
+                    ctx.authorize("schedule_edit", id, Risk::Destructive).await?;
                     svc.store().delete(id).await?;
                     return Ok(ToolOutcome::text(
                         true,
@@ -996,6 +1097,7 @@ impl Registry {
                         format!("Deleted scheduled task {id}."),
                     ));
                 }
+                ctx.authorize("schedule_edit", id, Risk::Write).await?;
                 let t = svc
                     .store()
                     .update(id, |t| {
@@ -1057,6 +1159,10 @@ impl Registry {
                 let runtime = ctx.runtime.clone().ok_or_else(|| {
                     HarnessError::Tool("agent runtime not available".into())
                 })?;
+                let label = a["label"].as_str().unwrap_or("task");
+                // 拉起子 agent 等于委托一批不可预知的操作:按 shell 级送确认
+                // (plan 模式下也会被 authorize 拒掉)。
+                ctx.authorize("spawn_agent", label, Risk::Shell).await?;
                 let req = crate::subagent::SpawnRequest {
                     label: a["label"].as_str().unwrap_or("task").to_string(),
                     name: a["name"].as_str().map(String::from),
@@ -1182,7 +1288,8 @@ pub async fn plugin_admin(
             Ok(ToolOutcome::text(true, format!("{} plugins", list.len()), out))
         }
         "plugin_create" | "plugin_edit" => {
-            ctx.authorize(name, "write plugin manifest", Risk::Write).await?;
+            // 授权放在 manifest 组装完成之后:面板能展示完整 manifest JSON,
+            // 用户看清要装/改的命令与 prompt 段再放行。参数非法时直接报错,不弹面板。
             let id = args
                 .get("id")
                 .and_then(|v| v.as_str())
@@ -1310,6 +1417,22 @@ pub async fn plugin_admin(
                 .filter(|t| builtin.iter().any(|b| *b == t.name))
                 .map(|t| t.name.as_str())
                 .collect();
+            // 完整 manifest JSON 进权限面板(diffPreview/reason 双通道展示)
+            let manifest_json = serde_json::to_string_pretty(&m)
+                .unwrap_or_else(|_| "(manifest 序列化失败)".into());
+            ctx.authorize_with_reason(
+                name,
+                &id,
+                Risk::Write,
+                &format!(
+                    "{} plugin manifest `{id}` (commands: {}, tools: {})",
+                    if name == "plugin_create" { "create" } else { "edit" },
+                    m.commands.len(),
+                    tools.len()
+                ),
+                Some(&manifest_json),
+            )
+            .await?;
             store.save_manifest(&id, &m)?;
             let mut note = format!(
                 "插件 `{}` ({} 个命令, {} 个工具) 已{}。下一次 turn 生效。",
@@ -1335,7 +1458,6 @@ pub async fn plugin_admin(
             ))
         }
         "plugin_toggle" => {
-            ctx.authorize(name, "toggle plugin", Risk::Write).await?;
             let id = args
                 .get("id")
                 .and_then(|v| v.as_str())
@@ -1345,6 +1467,7 @@ pub async fn plugin_admin(
             if id.is_empty() {
                 return Err(HarnessError::Tool("`id` is required".into()));
             }
+            ctx.authorize(name, &id, Risk::Write).await?;
             if !store.scan().iter().any(|p| p.id == id) {
                 return Err(HarnessError::NotFound(format!(
                     "plugin {id} 不存在——用 plugin_list 查看已装插件"
@@ -1362,7 +1485,6 @@ pub async fn plugin_admin(
             ))
         }
         "plugin_delete" => {
-            ctx.authorize(name, "delete plugin", Risk::Destructive).await?;
             let id = args
                 .get("id")
                 .and_then(|v| v.as_str())
@@ -1372,6 +1494,7 @@ pub async fn plugin_admin(
             if id.is_empty() {
                 return Err(HarnessError::Tool("`id` is required".into()));
             }
+            ctx.authorize(name, &id, Risk::Destructive).await?;
             store.delete(&id)?;
             Ok(ToolOutcome::text(
                 true,

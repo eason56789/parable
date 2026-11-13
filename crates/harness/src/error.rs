@@ -26,9 +26,6 @@ pub enum HarnessError {
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
 
-    #[error("cancelled")]
-    Cancelled,
-
     #[error("{0}")]
     Other(String),
 }
