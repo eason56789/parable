@@ -176,6 +176,7 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/providers/test", post(test_provider))
         .route("/models", get(get_models))
         .route("/sessions", get(list_sessions))
+        .route("/search/messages", get(search_messages))
         .route("/session/new", post(new_session))
         .route("/sessions/{id}", patch(patch_session).delete(delete_session))
         .route("/sessions/{id}/messages", get(session_messages).delete(truncate_messages))
@@ -834,6 +835,23 @@ async fn list_sessions(
     let query = q.get("q").cloned().unwrap_or_default();
     let list = state.store.list(&query).await;
     Json(json!({"sessions": list})).into_response()
+}
+
+/// GET /api/search/messages?q=… —— 全文搜索所有会话里的消息正文。
+async fn search_messages(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    let query = q.get("q").cloned().unwrap_or_default();
+    if query.trim().is_empty() {
+        return Json(json!({"hits": []})).into_response();
+    }
+    let hits = state.store.search_messages(&query, 40).await;
+    Json(json!({"hits": hits})).into_response()
 }
 
 #[derive(Debug, Deserialize)]

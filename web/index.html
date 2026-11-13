@@ -158,10 +158,15 @@ body.chat #chat{opacity:1;pointer-events:auto}
 #goalbar button{background:none;border:0;cursor:pointer;color:var(--fg2);font:12px var(--sans);padding:2px 7px;border-radius:6px;flex:none}
 #goalbar button:hover{background:var(--hov);color:var(--fg)}
 @keyframes spin{to{transform:rotate(360deg)}}
-/* 生成中旋转指示（欢迎语 spark 与 assistant 气泡共用 .sp） */
-.sp{width:22px;height:22px;color:var(--accent);flex:none}
-.sp.spin{animation:spin calc(2.6s * var(--animd)) linear infinite}
-.arow .asp{display:grid;place-items:center}
+/* 生成中计时条（替代原 Claude 风格小球）：回答下方一行「工作中 x 秒」 */
+.wk{display:flex;align-items:center;gap:7px;font:12px var(--sans);color:var(--fg2);margin-top:2px;
+    opacity:0;transform:translateY(3px);
+    transition:opacity calc(.4s * var(--animd)),transform calc(.4s * var(--animd))}
+.wk.on{opacity:1;transform:none}
+.wk .wd{width:5px;height:5px;border-radius:50%;background:var(--accent);flex:none;
+    animation:wdp calc(1.6s * var(--animd)) ease-in-out infinite}
+@keyframes wdp{0%,100%{opacity:.35;transform:scale(.75)}50%{opacity:1;transform:scale(1)}}
+.wk.done .wd{animation:none;opacity:.55;transform:none}
 .acts{display:flex;gap:2px;opacity:0;transform:translateY(4px);pointer-events:none;transition:opacity calc(.5s * var(--animd)),transform calc(.5s * var(--animd))}
 .acts.show{opacity:1;transform:none;pointer-events:auto}.acts .ib{width:28px;height:28px}.acts .ib svg{width:16px;height:16px}
 .dn svg{transform:rotate(180deg)}
@@ -217,19 +222,36 @@ body.chat #sbar{margin-top:10px;opacity:1;transform:none;pointer-events:auto}
 
 #modal{position:fixed;inset:0;z-index:50;display:grid;place-items:center;background:rgba(0,0,0,0);pointer-events:none;transition:background-color calc(.5s * var(--animd)),backdrop-filter calc(.5s * var(--animd))}
 #modal.open{background:rgba(0,0,0,.42);backdrop-filter:blur(4px);pointer-events:auto}
-#card{width:min(820px,94vw);height:min(600px,86vh);background:var(--bg);border-radius:18px;display:flex;overflow:hidden;opacity:0;transform:translateY(16px) scale(.96);box-shadow:0 24px 80px rgba(0,0,0,.3);transition:opacity calc(.45s * var(--animd)),transform calc(.6s * var(--animd)) cubic-bezier(.16,.84,.3,1),background-color calc(.6s * var(--animd)),width calc(.55s * var(--animd)) cubic-bezier(.32,.72,0,1)}
-#card.wide{width:min(1080px,94vw)}
+/* 设置：全屏沉浸式 —— 左侧竖排导航，右侧内容区 */
+#card{position:fixed;inset:0;width:100vw;height:100vh;height:100dvh;background:var(--bg);border-radius:0;display:flex;overflow:hidden;opacity:0;transform:translateY(12px) scale(.985);box-shadow:none;transition:opacity calc(.45s * var(--animd)),transform calc(.6s * var(--animd)) cubic-bezier(.16,.84,.3,1),background-color calc(.6s * var(--animd))}
+#card.wide{width:100vw}
 #modal.open #card{opacity:1;transform:none}
-#snav{width:200px;flex:none;background:var(--side);padding:20px 12px;display:flex;flex-direction:column;gap:2px;transition:background-color calc(.6s * var(--animd))}
+#snav{width:230px;flex:none;background:var(--side);padding:18px 12px 12px;display:flex;flex-direction:column;gap:1px;overflow-y:auto;transition:background-color calc(.6s * var(--animd))}
 #snav h3{margin:0 10px 14px;font:600 18px var(--serif)}
-#snav button{text-align:left;background:none;border:0;padding:8px 10px;border-radius:8px;color:var(--fg2);cursor:pointer;transition:background-color calc(.25s * var(--animd)),color calc(.25s * var(--animd))}
+#snav button{text-align:left;background:none;border:0;padding:8px 10px;border-radius:8px;color:var(--fg2);cursor:pointer;white-space:nowrap;transition:background-color calc(.25s * var(--animd)),color calc(.25s * var(--animd))}
 #snav button.on{background:var(--hov);color:var(--fg)}
-#sback{display:flex;align-items:center;gap:8px;margin:0 4px 14px}
+#sback{display:flex;align-items:center;gap:8px;margin:0 2px 10px;flex:none}
 #sback h3{margin:0}
-#sback button{display:grid;place-items:center;width:30px;height:30px;padding:0!important;border-radius:8px}
+#sback button{display:grid;place-items:center;width:32px;height:32px;padding:0!important;border-radius:9px;border:.5px solid var(--line);background:var(--bg);flex:none}
 #sback button:hover{background:var(--hov);color:var(--fg)}
 #sback svg{width:16px;height:16px}
-#sp{flex:1;overflow-y:auto;padding:22px 30px}
+#sback .sbx{display:flex;flex-direction:column;gap:1px;min-width:0}
+#sback .sbx b{font:500 13px var(--sans);color:var(--fg);white-space:nowrap}
+#sback .sbx span{font:11px var(--sans);color:var(--fg2);white-space:nowrap}
+/* 左侧导航里的搜索框 */
+#sfind{width:100%;border:1px solid var(--line);background:var(--bg);border-radius:9px;color:var(--fg);font:12.5px var(--sans);padding:7px 10px 7px 28px;outline:0;margin:2px 0 12px;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none' stroke='%23888' stroke-width='1.6' stroke-linecap='round'%3E%3Ccircle cx='9' cy='9' r='5'/%3E%3Cpath d='M13 13l4 4'/%3E%3C/svg%3E");
+  background-repeat:no-repeat;background-position:8px center;background-size:14px;
+  transition:border-color calc(.25s * var(--animd)),background-color calc(.25s * var(--animd))}
+#sfind:focus{border-color:var(--fg2)}
+#sfind::placeholder{color:var(--fg2)}
+.sgrp{padding:12px 10px 4px;font-size:11px;color:var(--fg2);letter-spacing:.04em}
+#sp{flex:1;overflow-y:auto;padding:0}
+.sphd{padding:38px 44px 6px;max-width:1100px;margin:0 auto}
+.sphd h2{margin:0;font:600 26px var(--serif);color:var(--fg)}
+.sphd p{margin:6px 0 0;color:var(--fg2);font-size:13px}
+.spb{padding:18px 44px 60px;max-width:1100px;margin:0 auto}
+@media(max-width:760px){#snav{width:auto;flex-direction:row;padding:12px;overflow-x:auto}#snav h3{display:none}#sback .sbx{display:none}.sgrp{display:none}.sphd{padding:22px 20px 4px}.spb{padding:14px 20px 40px}}
 .pn{animation:rise calc(.5s * var(--animd)) cubic-bezier(.16,.84,.3,1) both}
 .sr{display:flex;justify-content:space-between;align-items:center;gap:20px;padding:14px 0;border-bottom:.5px solid var(--line);animation:rise calc(.55s * var(--animd)) cubic-bezier(.16,.84,.3,1) both;animation-delay:calc(var(--i)*calc(40ms * var(--animd)))}
 .sr.stk{flex-direction:column;align-items:stretch;gap:10px}
@@ -418,7 +440,8 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 #toast.show{opacity:1;transform:translate(-50%,0)}
 
 /* —— 模型设置 —— */
-.mp{display:flex;flex-direction:column;gap:16px;min-height:100%}
+.mp{display:flex;flex-direction:column;gap:16px;min-height:100%;max-width:1100px;margin:0 auto;padding:38px 44px 60px}
+@media(max-width:760px){.mp{padding:22px 20px 40px}}
 .mp-h{display:flex;align-items:flex-start;justify-content:space-between;gap:20px}
 .mp-h h2{margin:0;font:600 24px/1.2 var(--serif)}
 .mp-h p{margin:5px 0 0;color:var(--fg2);font-size:13px;line-height:1.5}
@@ -476,12 +499,24 @@ select.mp-in{appearance:none;background-image:linear-gradient(45deg,transparent 
 @media(prefers-reduced-motion:reduce){.msg,.pn,.sr,.rc,.c,.shim,.pop.open>*,.es.fx{animation:none}}
 
 /* ============ 命令面板 ============ */
-#cmdk{position:fixed;inset:0;z-index:95;display:none;justify-content:center;align-items:flex-start;padding:11vh 20px 20px;background:rgba(0,0,0,.34);-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px)}
-#cmdk.open{display:flex}
-.cmdb{width:min(600px,100%);background:var(--input);border:.5px solid var(--line);border-radius:14px;box-shadow:0 24px 64px rgba(0,0,0,.35);overflow:hidden;transform:translateY(-10px) scale(.98);transition:transform calc(.3s * var(--animd)) cubic-bezier(.16,.84,.3,1)}
-#cmdk.open .cmdb{transform:none}
+#cmdk{position:fixed;inset:0;z-index:95;display:none;justify-content:center;align-items:flex-start;padding:11vh 20px 20px;background:rgba(0,0,0,0);-webkit-backdrop-filter:blur(0);backdrop-filter:blur(0);opacity:0;pointer-events:none;transition:opacity calc(.32s * var(--animd)) ease,background-color calc(.32s * var(--animd)) ease,backdrop-filter calc(.32s * var(--animd)) ease}
+#cmdk.open{display:flex;opacity:1;pointer-events:auto;background:rgba(0,0,0,.34);-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px)}
+.cmdb{width:min(600px,100%);background:var(--input);border:.5px solid var(--line);border-radius:14px;box-shadow:0 24px 64px rgba(0,0,0,.35);overflow:hidden;opacity:0;transform:translateY(-10px) scale(.98);transition:opacity calc(.3s * var(--animd)) ease,transform calc(.34s * var(--animd)) cubic-bezier(.16,.84,.3,1)}
+#cmdk.open .cmdb{opacity:1;transform:none}
 .cmdin{width:100%;border:0;background:none;outline:0;color:var(--fg);font:16px var(--sans);padding:16px 18px;border-bottom:.5px solid var(--line)}
 .cmdl{max-height:min(420px,52vh);overflow-y:auto;padding:6px}
+/* 搜索结果逐条淡入（重渲染时先淡出再淡入） */
+.cmdl .cmdi,.cmdl .cmdg,.cmdl .cmdempty{animation:cmdi calc(.34s * var(--animd)) ease both}
+@keyframes cmdi{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+.cmdl.out .cmdi,.cmdl.out .cmdg,.cmdl.out .cmdempty{animation:cmdo calc(.2s * var(--animd)) ease both}
+@keyframes cmdo{from{opacity:1}to{opacity:0;transform:translateY(-3px)}}
+.cmi{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cmi mark{background:transparent;color:var(--accent);font-weight:600}
+.cms{display:block;font-size:11.5px;color:var(--fg2);opacity:.8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:1px}
+/* 搜索跳转命中的消息：高亮一下 */
+.msg.flash{animation:msgflash 1.6s ease}
+@keyframes msgflash{0%{background:color-mix(in srgb,var(--accent) 22%,transparent);border-radius:10px}
+  70%{background:color-mix(in srgb,var(--accent) 12%,transparent)}100%{background:transparent}}
 .cmdg{padding:8px 10px 4px;font-size:11.5px;color:var(--fg2);letter-spacing:.02em}
 .cmdi{display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:8px;cursor:pointer;font-size:13.5px}
 .cmdi:hover{background:var(--hov)}
@@ -554,7 +589,7 @@ body.dragging #main{outline:2px dashed var(--accent);outline-offset:-8px}
       <button id="jump" title="回到最新"><span data-ic="chev"></span></button>
       <div id="pg"><div></div></div>
       <div id="comp">
-        <div class="gr"><span id="gsp"></span><span id="gt"></span></div>
+        <div class="gr"><span id="gt"></span></div>
         <div id="goalbar"></div>
         <div class="box">
           <div id="sl"></div>
@@ -674,23 +709,14 @@ const IC = {
 const ic = n => '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">' + (IC[n] || IC.file) + '</svg>';
 const esc = s => String(s == null ? '' : s)
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-/* 欢迎语 / 生成中指示的火花图形（orig 设计稿同款） */
-const spark = c => {
-  let s = '';
-  [9,6.5,8,6,9.5,6,8.5,6.5,9,6,8,6.5].forEach((l, i) => {
-    const a = i * Math.PI / 6;
-    s += '<path d="M12 12L' + (12 + Math.sin(a) * l).toFixed(2) + ' ' + (12 - Math.cos(a) * l).toFixed(2) + '"/>';
-  });
-  return '<svg class="sp ' + (c || '') + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round">' + s + '</svg>';
-};
-
 /* ---------------------------------------------------------------- i18n */
 const L = {
   zh: {
-    new:'新对话', plugins:'插件', autom:'自动化', setnav:'设置', search:'搜索', chats:'聊天', projects:'项目', arts:'工件', rec:'最近', pinned:'已置顶',
+    new:'新对话', plugins:'插件', autom:'自动化', setnav:'设置', set:'设置', search:'搜索', chats:'聊天', projects:'项目', arts:'工件', rec:'最近', pinned:'已置顶',
     ago_now:'刚刚', ago_m:'{n}分', ago_h:'{n}小时', ago_d:'{n}天',
     ph:'今天我能帮你什么？', ph2:'回复 Parable…',
     thinking:'思考中…', thought:'思考了 {n} 秒', worked:'已工作 {t}',
+    working:'工作中', worked_done:'工作中 {t}', sec_unit:'秒',
     dur_s:'{n} 秒', dur_m:'{n} 分',
     copy:'复制', copied:'已复制', save:'保存', saved:'已保存', rd:'已读取', rdn:'{n} 行', ed:'已编辑',
     fetched:'已获取', searched:'已搜索',
@@ -702,7 +728,7 @@ const L = {
     permT:'权限模式', permH:'控制 Parable 能对你的文件执行哪些操作',
     lvlT:'思考强度', modelT:'模型',
     l0:'关闭', l1:'低', l2:'中', l3:'高',
-    s_g:'通用', s_s:'网络搜索', s_a:'外观', s_m:'模型设置', s_p:'权限与思考', s_n:'动画',
+    s_g:'通用', s_s:'网络搜索', s_a:'外观', s_m:'模型设置', s_p:'权限与思考', s_n:'动画', s_base:'基础设置',
     sprefT:'优先搜索引擎', sprefH:'auto：两种搜索都交给模型，配了 DeepSeek key 时优先它；deepseek：只推荐 DeepSeek 搜索；anysearch / multi：web_search 只查对应来源',
     sp_auto:'自动', sp_deepseek:'DeepSeek', sp_anysearch:'AnySearch', sp_multi:'多平台',
     name:'你的名字', nameh:'Parable 会用它来称呼你', prefs:'个人偏好', prefsh:'你希望 Parable 在回复时考虑哪些偏好？',
@@ -718,7 +744,7 @@ const L = {
     export:'导出对话', exported:'已导出为 Markdown', export_none:'当前还没有对话',
     cm_pin:'置顶', cm_unpin:'取消置顶', cm_rename:'重命名', cm_cpid:'复制对话 ID', cm_delete:'删除', cm_renamed:'已重命名',
     cm_archive:'归档', cm_unarchive:'取消归档', archd:'已归档', arch_done:'已归档', unarch_done:'已取消归档',
-    wrap:'自动换行', noresult:'没有匹配结果', kbd:'键盘快捷键', kbd_h:'这些快捷键在任何时候都能使用。',
+    wrap:'自动换行', noresult:'没有匹配结果', in_msgs:'消息内容', kbd:'键盘快捷键', kbd_h:'这些快捷键在任何时候都能使用。',
     actions:'操作', cmdk:'命令面板', att:'附件', ctx:'上下文', editmsg:'编辑这条消息', delmsg:'删除这条消息', regen:'重新生成', clear:'已清空当前对话', close:'关闭',
     mp_title:'模型设置', mp_desc:'管理自定义模型供应商，配置后可在聊天时选择使用。',
     mp_addp:'添加供应商', mp_sample:'示例供应商', mp_api:'API 格式', mp_getkey:'获取 API Key',
@@ -746,10 +772,11 @@ const L = {
     md:['兼顾速度与智能','适合复杂任务','最快、最省']
   },
   en: {
-    new:'New chat', plugins:'Plugins', autom:'Automation', setnav:'Settings', search:'Search', chats:'Chats', projects:'Projects', arts:'Artifacts', rec:'Recents', pinned:'Pinned',
+    new:'New chat', plugins:'Plugins', autom:'Automation', setnav:'Settings', set:'Settings', search:'Search', chats:'Chats', projects:'Projects', arts:'Artifacts', rec:'Recents', pinned:'Pinned',
     ago_now:'now', ago_m:'{n}m', ago_h:'{n}h', ago_d:'{n}d',
     ph:'How can I help you today?', ph2:'Reply to Parable…',
     thinking:'Thinking…', thought:'Thought for {n}s', worked:'Worked for {t}',
+    working:'Working', worked_done:'Worked for {t}', sec_unit:'s',
     dur_s:'{n}s', dur_m:'{n}m',
     copy:'Copy', copied:'Copied', save:'Save', saved:'Saved', rd:'Read', rdn:'{n} lines', ed:'Edited',
     fetched:'Fetched', searched:'Searched',
@@ -761,7 +788,7 @@ const L = {
     permT:'Permission mode', permH:'Control what Parable can do to your files',
     lvlT:'Thinking effort', modelT:'Model',
     l0:'Off', l1:'Low', l2:'Medium', l3:'High',
-    s_g:'General', s_s:'Web search', s_a:'Appearance', s_m:'Model settings', s_p:'Permissions', s_n:'Animation',
+    s_g:'General', s_s:'Web search', s_a:'Appearance', s_m:'Model settings', s_p:'Permissions', s_n:'Animation', s_base:'Basics',
     sprefT:'Preferred search engine', sprefH:'auto: both tools stay available, DeepSeek first once a key is set; deepseek: DeepSeek search only; anysearch / multi: web_search queries that source exclusively',
     sp_auto:'Auto', sp_deepseek:'DeepSeek', sp_anysearch:'AnySearch', sp_multi:'Multi-engine',
     name:'Your name', nameh:'Parable will use it to address you', prefs:'Personal preferences',
@@ -779,7 +806,7 @@ const L = {
     export:'Export conversation', exported:'Exported as Markdown', export_none:'No conversation yet',
     cm_pin:'Pin', cm_unpin:'Unpin', cm_rename:'Rename', cm_cpid:'Copy conversation ID', cm_delete:'Delete', cm_renamed:'Renamed',
     cm_archive:'Archive', cm_unarchive:'Unarchive', archd:'Archived', arch_done:'Archived', unarch_done:'Unarchived',
-    wrap:'Wrap lines', noresult:'No matching results', kbd:'Keyboard shortcuts',
+    wrap:'Wrap lines', noresult:'No matching results', in_msgs:'Messages', kbd:'Keyboard shortcuts',
     kbd_h:'These shortcuts work anywhere in the app.', actions:'Actions', cmdk:'Command palette',
     att:'Attachments', ctx:'Context', editmsg:'Edit this message', delmsg:'Delete this message', regen:'Regenerate',
     clear:'Conversation cleared', close:'Close',
@@ -839,8 +866,6 @@ const FONT = { serif:'var(--serif)', sans:'var(--sans)', mono:'var(--mono)' };
 const A = ms => Math.max(1, Math.round(ms / (S.anim || 1)));
 
 document.querySelectorAll('[data-ic]').forEach(e => e.innerHTML = ic(e.dataset.ic));
-// 欢迎语旁的火花图形（orig 设计稿同款）
-if ($('#gsp')) $('#gsp').innerHTML = spark();
 
 function greet() {
   const h = new Date().getHours();
@@ -1705,11 +1730,11 @@ function aMsg(idx, spin) {
   if (idx != null) d.dataset.mi = idx;
   // No fixed .th placeholder: reasoning blocks are created in place as they
   // stream, so they land next to the tool call they actually preceded.
-  // spin=true 时（正在生成的实时 turn）在操作条旁放旋转指示，收尾时移除。
+  // spin=true 时（正在生成的实时 turn）在回答下方放计时条，收尾时定格用时。
   d.innerHTML =
     '<div class="ab"></div>' +
+    (spin ? '<div class="wk on"><i class="wd"></i><span class="wtx">' + esc(t('working')) + '</span></div>' : '') +
     '<div class="arow">' +
-    (spin ? '<span class="asp">' + spark('spin') + '</span>' : '') +
     '<div class="acts">' +
     '<button class="ib" data-a="copy" title="' + t('copy') + '">' + ic('copy') + '</button>' +
     '<button class="ib' + (idx == null ? ' off' : '') + '" data-a="re" title="' + t('regen') + '">' + ic('retry') + '</button>' +
@@ -1720,9 +1745,41 @@ function aMsg(idx, spin) {
   return d;
 }
 
-/** Remove the in-flight spinner from a finished assistant bubble. */
-function stopSpin(a) {
-  if (a) a.querySelectorAll('.asp').forEach(x => x.remove());
+/* ---- 生成中计时条：显示「工作中 x 秒」，收尾定格为实际用时 ---- */
+let wkTimer = 0, wkStart = 0;
+
+/** 在气泡下方的计时条上显示已用秒数。 */
+function wkPaint(a) {
+  if (!a) return;
+  const el = a.querySelector('.wk');
+  if (!el || el.classList.contains('done')) return;
+  const sec = wkStart ? Math.max(1, Math.round((Date.now() - wkStart) / 1000)) : 1;
+  const tx = el.querySelector('.wtx');
+  if (tx) tx.textContent = t('working') + ' ' + sec + ' ' + t('sec_unit');
+}
+
+/** 开始计时（turn 开始时调用）。 */
+function wkStart_(a) {
+  if (!a) return;
+  wkStart = Date.now();
+  if (wkTimer) clearInterval(wkTimer);
+  wkPaint(a);
+  wkTimer = setInterval(() => wkPaint(a), 1000);
+}
+
+/** 停止计时并定格为最终用时；ms 缺省时用本地计时。 */
+function stopSpin(a, ms) {
+  if (!a) return;
+  if (wkTimer) { clearInterval(wkTimer); wkTimer = 0; }
+  const el = a.querySelector('.wk');
+  if (el) {
+    const total = ms != null ? ms : (wkStart ? Date.now() - wkStart : 0);
+    el.classList.remove('on');
+    el.classList.add('done');
+    const tx = el.querySelector('.wtx');
+    if (tx) tx.textContent = t('worked_done').replace('{t}', fmtDur(total));
+  }
+  wkStart = 0;
 }
 
 function setActs(a, on) {
@@ -2015,10 +2072,14 @@ function resetTurn() {
   // Without this the thinking timer accumulates across the whole session and
   // reports nonsense like "thought for 1042s".
   thinkStart = 0;
+  // Same for the work timer: a turn that never ended must not keep ticking.
+  if (wkTimer) { clearInterval(wkTimer); wkTimer = 0; }
+  wkStart = 0;
 }
 
 function startTurnUI() {
-  curA = aMsg(null, true);   // 生成中：气泡带旋转指示，turn.end/错误时移除
+  curA = aMsg(null, true);   // 生成中：气泡带计时条，turn.end/错误时定格用时
+  wkStart_(curA);
   curText = '';
   curStream = null;
   curThinkEl = null;
@@ -2311,7 +2372,7 @@ function dispatch(ev) {
       curThinkEl = null;
       thinkStart = 0;
       if (curA) {
-        stopSpin(curA);
+        stopSpin(curA, ev.ms);
         setActs(curA, true);
         foldFlow(curA, ev.ms);
         // 以存储为准校正最终答案：流式期间任何丢失（切换会话、SSE 断连、
@@ -3088,7 +3149,7 @@ async function loadSessions(quiet) {
 }
 
 let openTok = 0;   // openSession 竞态令牌：连点两个会话时旧请求直接作废
-async function openSession(id) {
+async function openSession(id, focusMsg) {
   const my = ++openTok;
   try {
     const res = await api('/sessions/' + id + '/messages');
@@ -3178,8 +3239,18 @@ async function openSession(id) {
     stick = true;
     chat.scrollTop = chat.scrollHeight;
     apply();
-    restamp();
     refreshGoalBadge();
+    // 从搜索结果跳进来：滚动到命中的那条消息并高亮一下。
+    // restamp 是异步的（下标回填要拉一次存储），所以等它跑完再定位。
+    await restamp();
+    if (focusMsg != null) {
+      const hit = feed.querySelector('[data-mi="' + focusMsg + '"]');
+      if (hit) {
+        hit.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        hit.classList.add('flash');
+        setTimeout(() => hit.classList.remove('flash'), 1600);
+      }
+    }
     // 切走期间该会话的 turn 还在跑（SHADOW 记账 / INFLIGHT 在途标记）：
     // 恢复流式 UI——否则 sig 还挂着 stop、curA 是空的，后续 delta 无处追加。
     // 影子里有在途文本的话一并补渲染回去。
@@ -3654,10 +3725,38 @@ function cmdActions() {
   ];
 }
 
+/* ---- 搜索：会话内消息（服务端全文检索） ---- */
+let cmdHits = [], cmdHitTimer = 0, cmdHitSeq = 0;
+
+/** 高亮命中片段（服务端用 \u0001 包住命中段）。 */
+function markExcerpt(s) {
+  const parts = String(s || '').split('\u0001');
+  return parts.map((p, i) => i % 2 ? '<mark>' + esc(p) + '</mark>' : esc(p)).join('');
+}
+
+/** 拉取消息搜索结果（防抖 + 竞态丢弃）。 */
+function cmdSearchMessages(q) {
+  const seq = ++cmdHitSeq;
+  if (cmdHitTimer) clearTimeout(cmdHitTimer);
+  if (!q) { cmdHits = []; renderCmd(); return; }
+  cmdHitTimer = setTimeout(async () => {
+    try {
+      const r = await api('/search/messages?q=' + encodeURIComponent(q));
+      if (seq !== cmdHitSeq) return;   // 已有更新的查询，丢弃这次结果
+      cmdHits = (r && r.hits) || [];
+    } catch (e) {
+      if (seq !== cmdHitSeq) return;
+      cmdHits = [];
+    }
+    renderCmd();
+  }, 180);
+}
+
 function renderCmd() {
-  const q = cmdIn.value.trim().toLowerCase();
-  const acts = cmdActions().filter(a => !q || a.t.toLowerCase().includes(q) || a.id.includes(q));
-  const cs = CONVS.filter(c => !c.arch && (!q || (c.t || '').toLowerCase().includes(q))).slice(0, 12);
+  const q = cmdIn.value.trim();
+  const ql = q.toLowerCase();
+  const acts = cmdActions().filter(a => !ql || a.t.toLowerCase().includes(ql) || a.id.includes(ql));
+  const cs = CONVS.filter(c => !c.arch && (!ql || (c.t || '').toLowerCase().includes(ql))).slice(0, 12);
   let html = '';
   cmdItems = [];
   if (acts.length) {
@@ -3676,6 +3775,17 @@ function renderCmd() {
       html += '<div class="cmdi" data-ci="' + (cmdItems.length - 1) + '">' +
         '<span class="ic2">' + ic('chat') + '</span><span class="tx2">' + esc(c.t) + '</span>' +
         '<span class="kb">' + fmtAgo(c.ts) + '</span></div>';
+    });
+  }
+  // 会话内消息命中
+  if (ql && cmdHits.length) {
+    html += '<div class="cmdg">' + t('in_msgs') + '</div>';
+    cmdHits.slice(0, 20).forEach(h => {
+      cmdItems.push({ run: () => openSession(h.session_id, h.index) });
+      html += '<div class="cmdi" data-ci="' + (cmdItems.length - 1) + '">' +
+        '<span class="ic2">' + ic(h.role === 'user' ? 'search' : 'chat') + '</span>' +
+        '<span class="tx2"><span class="cmi">' + markExcerpt(h.excerpt) + '</span>' +
+        '<span class="cms">' + esc(h.session_title || '') + '</span></span></div>';
     });
   }
   if (!cmdItems.length) html = '<div class="cmdempty">' + t('noresult') + '</div>';
@@ -3698,7 +3808,10 @@ function openCmd() {
 }
 function closeCmd() { cmdK.classList.remove('open'); cmdIn.blur(); }
 
-cmdIn.addEventListener('input', renderCmd);
+cmdIn.addEventListener('input', () => {
+  renderCmd();
+  cmdSearchMessages(cmdIn.value.trim());
+});
 cmdIn.addEventListener('keydown', e => {
   if (e.key === 'ArrowDown') { e.preventDefault(); if (cmdItems.length) { cmdIdx = (cmdIdx + 1) % cmdItems.length; cmdPaint(); } }
   else if (e.key === 'ArrowUp') { e.preventDefault(); if (cmdItems.length) { cmdIdx = (cmdIdx - 1 + cmdItems.length) % cmdItems.length; cmdPaint(); } }
@@ -3890,9 +4003,46 @@ const SC = {
 let tab = 'g', pvs = null;
 
 function nav() {
-  $('#snav').innerHTML = '<div id="sback"><button data-back title="' + t('close') + '">' + ic('back') + '</button><h3>' + t('set') + '</h3></div>' + TAB.map(k =>
-    '<button data-t="' + k + '" class="' + (k === tab ? 'on' : '') + '">' + t('s_' + k) + '</button>'
+  const z = S.lang === 'zh';
+  $('#snav').innerHTML =
+    '<div id="sback"><button data-back title="' + t('close') + '">' + ic('back') + '</button>' +
+    '<span class="sbx"><b>' + t('set') + '</b><span>' + (z ? '返回工作区' : 'Back to workspace') + '</span></span></div>' +
+    '<input id="sfind" placeholder="' + (z ? '搜索设置' : 'Search settings') + '" spellcheck="false" autocomplete="off">' +
+    '<div class="sgrp">' + t('s_base') + '</div>' +
+    TAB.map(k =>
+    '<button data-t="' + k + '" class="' + (k === tab ? 'on' : '') + '" data-label="' + t('s_' + k) + '">' +
+    t('s_' + k) + '</button>'
   ).join('');
+  const f = $('#sfind');
+  if (f) {
+    f.value = navQ;
+    f.oninput = () => { navQ = f.value; nav(); const n = $('#sfind'); if (n) { n.focus(); n.setSelectionRange(n.value.length, n.value.length); } };
+  }
+  navFilter();
+}
+
+/** 按导航搜索词过滤分类按钮。 */
+let navQ = '';
+function navFilter() {
+  const q = (navQ || '').trim().toLowerCase();
+  let shown = 0;
+  $('#snav').querySelectorAll('button[data-t]').forEach(b => {
+    const label = (b.dataset.label || '').toLowerCase();
+    const hit = !q || label.includes(q);
+    b.style.display = hit ? '' : 'none';
+    if (hit) shown++;
+  });
+  const grp = $('#snav .sgrp');
+  if (grp) grp.style.display = shown ? '' : 'none';
+  // 命中的分类自动切过去，免得还要再点一次
+  if (q && shown) {
+    const first = [...$('#snav').querySelectorAll('button[data-t]')].find(b => b.style.display !== 'none');
+    if (first && first.dataset.t !== tab) {
+      tab = first.dataset.t;
+      $('#snav').querySelectorAll('button[data-t]').forEach(b => b.classList.toggle('on', b === first));
+      panel();
+    }
+  }
 }
 
 $('#snav').onclick = async e => {
@@ -3915,6 +4065,18 @@ function panel() {
   let i = 0;
   $('#card').classList.toggle('wide', tab === 'm');
   if (tab === 'm') { renderModelPage(p); return; }
+  // 右侧：大标题 + 说明，然后是设置项
+  const z = S.lang === 'zh';
+  const HD = {
+    g: [t('s_g'), z ? '你的名字、语言、偏好与系统提示词。' : 'Your name, language, preferences and system prompt.'],
+    s: [t('s_s'), z ? '选择搜索来源并配置搜索密钥。' : 'Pick a search source and configure its key.'],
+    a: [t('s_a'), z ? '主题、字体、配色与布局。' : 'Theme, font, colors and layout.'],
+    p: [t('s_p'), z ? '控制 Parable 能对你的文件做什么，以及思考强度。' : 'Control what Parable may do to your files, and thinking effort.'],
+    n: [t('s_n'), z ? '动画速度、流式效果与视觉效果。' : 'Animation speed, streaming and visual effects.'],
+  }[tab] || [t('set'), ''];
+  p.innerHTML = '<div class="sphd"><h2>' + esc(HD[0]) + '</h2>' +
+    (HD[1] ? '<p>' + esc(HD[1]) + '</p>' : '') + '</div><div class="spb"></div>';
+  const body = p.querySelector('.spb');
   SC[tab].forEach(c => {
     const r = document.createElement('div');
     r.className = 'sr' + (['ta', 'th', 'pv', 'rl'].includes(c.t) ? ' stk' : '');
@@ -4028,7 +4190,7 @@ function panel() {
       }
     };
     f();
-    p.append(r);
+    body.append(r);
   });
 }
 

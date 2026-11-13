@@ -547,6 +547,43 @@ impl SessionStore {
         Ok(())
     }
 
+    /// Search every session's message text for `query`.
+    ///
+    /// Returns one hit per matching message: the session id/title plus a
+    /// short excerpt around the first match. Tool payloads are not searched —
+    /// only what the user typed and what the model said.
+    pub async fn search_messages(&self, query: &str, limit: usize) -> Vec<MessageHit> {
+        let q = query.trim().to_lowercase();
+        if q.is_empty() {
+            return Vec::new();
+        }
+        let mut hits: Vec<MessageHit> = Vec::new();
+        for s in self.list("").await {
+            if hits.len() >= limit {
+                break;
+            }
+            for (idx, m) in self.messages(&s.id).await.iter().enumerate() {
+                if hits.len() >= limit {
+                    break;
+                }
+                let Some(text) = message_text(&m.parts) else {
+                    continue;
+                };
+                let Some(ex) = excerpt(&text, &q) else {
+                    continue;
+                };
+                hits.push(MessageHit {
+                    session_id: s.id.clone(),
+                    session_title: s.title.clone(),
+                    role: m.role.clone(),
+                    index: idx,
+                    excerpt: ex,
+                });
+            }
+        }
+        hits
+    }
+
     /// Rebuild neutral messages from storage.
     ///
     /// 解析失败的消息不再静默丢弃：记 warn 后跳过。注意调用方（如手工
@@ -563,6 +600,70 @@ impl SessionStore {
         }
         out
     }
+}
+
+/// One message that matched a search.
+#[derive(Debug, Clone, Serialize)]
+pub struct MessageHit {
+    pub session_id: String,
+    pub session_title: String,
+    pub role: String,
+    /// Index of the message inside the session store.
+    pub index: usize,
+    pub excerpt: String,
+}
+
+/// Flatten a neutral message's text parts into one searchable string.
+fn message_text(parts: &Value) -> Option<String> {
+    let arr = parts.get("User").or_else(|| parts.get("Assistant"))?.as_array()?;
+    let mut out = String::new();
+    for p in arr {
+        if let Some(s) = p.get("Text").and_then(|x| x.as_str()) {
+            out.push_str(s);
+            out.push('\n');
+        }
+    }
+    let t = out.trim();
+    if t.is_empty() {
+        None
+    } else {
+        Some(t.to_string())
+    }
+}
+
+/// A window of `text` around the match, with the query wrapped in markers the
+/// frontend turns into highlights.
+///
+/// Matching is done on lowercased **characters** so the index is a character
+/// index — CJK text is never cut mid-character, and the byte length of the
+/// lowercased text is irrelevant.
+fn excerpt(text: &str, query_lower: &str) -> Option<String> {
+    const BEFORE: usize = 40;
+    const AFTER: usize = 90;
+    let chars: Vec<char> = text.chars().collect();
+    let lower: Vec<char> = text.to_lowercase().chars().collect();
+    let q: Vec<char> = query_lower.chars().collect();
+    if q.is_empty() || q.len() > lower.len() {
+        return None;
+    }
+    let hit_start = (0..=lower.len() - q.len())
+        .find(|&i| lower[i..i + q.len()] == q[..])?;
+    let hit_end = hit_start + q.len();
+    let start = hit_start.saturating_sub(BEFORE);
+    let end = (hit_end + AFTER).min(chars.len());
+    let mut out = String::new();
+    if start > 0 {
+        out.push('…');
+    }
+    out.extend(chars[start..hit_start].iter());
+    out.push('\u{1}');
+    out.extend(chars[hit_start..hit_end].iter());
+    out.push('\u{1}');
+    out.extend(chars[hit_end..end].iter());
+    if end < chars.len() {
+        out.push('…');
+    }
+    Some(out)
 }
 
 /// Keep every non-Text part of a message part array, in order.
@@ -594,5 +695,38 @@ mod tests {
         assert_eq!(kept.len(), 2);
         assert!(kept[0].get("Thinking").is_some());
         assert!(kept[1].get("ToolUse").is_some());
+    }
+
+    #[test]
+    fn message_text_flattens_parts() {
+        let v = serde_json::json!({"User": [{"Text": "你好"}, {"Text": "世界"}]});
+        assert_eq!(message_text(&v).as_deref(), Some("你好\n世界"));
+        let empty = serde_json::json!({"User": [{"Text": "   "}]});
+        assert!(message_text(&empty).is_none());
+        assert!(message_text(&serde_json::json!({})).is_none());
+    }
+
+    #[test]
+    fn excerpt_marks_the_match() {
+        let text = "这是第一句话，这是第二句话里面有 target 这个词，还有更多内容在这里继续延伸下去";
+        let out = excerpt(text, "target").expect("must find the query");
+        assert!(out.contains('\u{1}'), "match must be delimited");
+        let parts: Vec<&str> = out.split('\u{1}').collect();
+        assert_eq!(parts[1], "target");
+    }
+
+    #[test]
+    fn excerpt_handles_cjk_boundaries() {
+        // Matching on characters must not cut a CJK char in half.
+        let text = "搜索会话内的消息内容";
+        let out = excerpt(text, "会话").expect("must find the query");
+        let parts: Vec<&str> = out.split('\u{1}').collect();
+        assert_eq!(parts[1], "会话");
+    }
+
+    #[test]
+    fn excerpt_misses_when_absent() {
+        assert!(excerpt("完全无关的文本", "zzz").is_none());
+        assert!(excerpt("短", "太长了").is_none());
     }
 }
