@@ -46,6 +46,15 @@ struct TokenQuery {
     token: Option<String>,
 }
 
+/// Query parameters that scope a request to one session.
+#[derive(Debug, Deserialize)]
+struct SessionQuery {
+    #[serde(default)]
+    session: Option<String>,
+    #[serde(default)]
+    token: Option<String>,
+}
+
 /// 常量时间比较:xor 折叠整个输入(长度差也折进结果),不逐字节提前返回,
 /// 避免时序侧信道一点一点试出 token。
 fn ct_eq(a: &str, b: &str) -> bool {
@@ -199,11 +208,25 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/schedule/{id}/run", post(run_task_now))
         .route("/agents", get(list_agents))
         .route("/agents/{id}/interrupt", post(interrupt_agent))
+        // 智能体团队：共享任务板 + 成员名册
+        .route("/team", get(get_team))
+        .route("/team/mode", post(set_team_mode))
+        .route("/team/tasks", post(create_team_task))
+        .route("/team/tasks/{id}", patch(update_team_task))
         .route("/plugins", get(list_plugins))
         .route("/plugins/{id}/toggle", post(toggle_plugin))
         // 断线重连后恢复权限面板;聊天附件上传
         .route("/pending", get(pending_permissions))
         .route("/attachments", post(upload_attachment))
+        // 侧边栏(side pane):文件浏览 / git 审查 / 浏览器 / 终端
+        .route("/fs/tree", get(fs_tree))
+        .route("/fs/file", get(fs_file))
+        .route("/fs/search", get(fs_search))
+        .route("/git/status", get(git_status))
+        .route("/git/diff", get(git_diff))
+        .route("/browser/state", get(browser_state))
+        .route("/browser/navigate", post(browser_navigate))
+        .route("/term/exec", post(term_exec))
         .route("/health", get(health))
         .with_state(state.clone());
 
@@ -368,11 +391,6 @@ async fn chat(
     } else {
         req.session_id.clone()
     };
-
-    state
-        .broker
-        .set_session(&sid)
-        .await;
 
     let mode = if req.permission_mode.is_empty() {
         state.config.read().await.permission_mode.clone()
@@ -1402,12 +1420,35 @@ async fn run_task_now(
     }
 }
 
-async fn list_agents(State(state): State<SharedState>, headers: HeaderMap) -> Response {
-    if !check_auth(&headers, None, &state) {
+/// List the members of one agent tree.
+///
+/// `?session=<id>` scopes the listing to that session's tree. Without it the
+/// whole process-wide catalogue is returned — the old behaviour, which leaked
+/// other conversations' subagents into this one.
+async fn list_agents(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(q): Query<SessionQuery>,
+) -> Response {
+    if !check_auth(&headers, q.token.as_deref(), &state) {
         return unauthorized();
     }
-    let kids = state.subagents.list().await;
+    let kids = match q.session {
+        Some(sid) if !sid.is_empty() => {
+            let root = root_of(&state, &sid).await;
+            state.subagents.tree(&root).await
+        }
+        _ => state.subagents.list().await,
+    };
     Json(json!({"agents": kids})).into_response()
+}
+
+/// The root session of the tree `session_id` belongs to.
+async fn root_of(state: &SharedState, session_id: &str) -> String {
+    match state.subagents.catalog.find_by_session(session_id).await {
+        Some(child) => child.root_session,
+        None => session_id.to_string(),
+    }
 }
 
 async fn interrupt_agent(
@@ -1422,12 +1463,443 @@ async fn interrupt_agent(
     Json(json!({"interrupted": ok})).into_response()
 }
 
+// ------------------------------------------------------------------ agent teams
+
+/// The board and roster of one agent tree.
+async fn get_team(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(q): Query<SessionQuery>,
+) -> Response {
+    if !check_auth(&headers, q.token.as_deref(), &state) {
+        return unauthorized();
+    }
+    let sid = match q.session {
+        Some(s) if !s.is_empty() => s,
+        _ => return bad_request("`session` query parameter is required"),
+    };
+    let root = root_of(&state, &sid).await;
+    let board = state.store.get_team(&root).await;
+    let members = state.subagents.tree(&root).await;
+    Json(json!({
+        "root": root,
+        "enabled": board.as_ref().map(|b| b.enabled).unwrap_or(false),
+        "tasks": board.as_ref().map(crate::team::board_view).unwrap_or_default(),
+        "members": members,
+    }))
+    .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct TeamModeReq {
+    session_id: String,
+    enabled: bool,
+}
+
+/// Turn team mode on or off for the tree rooted at `session_id`.
+///
+/// Only the root may change it: a member's mode would be a second, divergent
+/// copy of the same decision.
+async fn set_team_mode(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(r): Json<TeamModeReq>,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    let root = root_of(&state, &r.session_id).await;
+    if root != r.session_id {
+        return bad_request("team mode can only be changed from the root session");
+    }
+    let mut board = state
+        .store
+        .get_team(&root)
+        .await
+        .unwrap_or_else(crate::team::TeamState::new);
+    board.enabled = r.enabled;
+    if let Err(e) = state.store.set_team(&root, Some(board)).await {
+        return server_error(e);
+    }
+    state.hub.publish(
+        &root,
+        "team.mode",
+        json!({"enabled": r.enabled}),
+    );
+    Json(json!({"enabled": r.enabled})).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct TeamTaskReq {
+    session_id: String,
+    subject: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    blocked_by: Vec<String>,
+    #[serde(default)]
+    write_scopes: Vec<String>,
+}
+
+/// Create one task on the shared board.
+async fn create_team_task(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(r): Json<TeamTaskReq>,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    let root = root_of(&state, &r.session_id).await;
+    let mut board = match state.store.get_team(&root).await {
+        Some(b) if b.enabled => b,
+        _ => return bad_request("agent teams are not enabled for this session"),
+    };
+    let caller = crate::team::Caller {
+        session_id: r.session_id.clone(),
+        name: state
+            .subagents
+            .catalog
+            .find_by_session(&r.session_id)
+            .await
+            .map(|c| c.name)
+            .unwrap_or_else(|| "lead".to_string()),
+        root_id: root.clone(),
+        is_lead: r.session_id == root,
+    };
+    let req = crate::team::CreateTask {
+        subject: r.subject,
+        description: r.description,
+        blocked_by: r.blocked_by,
+        write_scopes: r.write_scopes,
+    };
+    let view = match crate::team::create_task(&mut board, &caller, &req) {
+        Ok(v) => v,
+        Err(e) => return bad_request(&e.to_string()),
+    };
+    if let Err(e) = state.store.set_team(&root, Some(board)).await {
+        return server_error(e);
+    }
+    state.hub.publish(
+        &root,
+        "team.task",
+        json!({"taskId": view.id, "status": view.status.as_str(), "revision": view.revision}),
+    );
+    Json(json!({"task": view})).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct TeamTaskUpdateReq {
+    session_id: String,
+    expected_revision: u64,
+    action: String,
+    #[serde(default)]
+    subject: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    blocked_by: Option<Vec<String>>,
+    #[serde(default)]
+    write_scopes: Option<Vec<String>>,
+    #[serde(default)]
+    owner: Option<String>,
+}
+
+/// Apply one compare-and-set transition to a shared task.
+async fn update_team_task(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(task_id): Path<String>,
+    Json(r): Json<TeamTaskUpdateReq>,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    let action = match crate::team::TaskAction::parse(&r.action) {
+        Some(a) => a,
+        None => return bad_request("unknown action; expected claim | release | edit | set_dependencies | complete | reopen | reassign | delete"),
+    };
+    let root = root_of(&state, &r.session_id).await;
+    let mut board = match state.store.get_team(&root).await {
+        Some(b) if b.enabled => b,
+        _ => return bad_request("agent teams are not enabled for this session"),
+    };
+    // The owner is named; resolve it to a session id inside this tree.
+    let (owner_id, owner_name) = match r.owner.as_deref() {
+        Some(name) if !name.is_empty() => match state
+            .subagents
+            .tree(&root)
+            .await
+            .into_iter()
+            .find(|c| c.name == name || c.id == name)
+        {
+            Some(c) => (Some(c.session_id), Some(c.name)),
+            None => return bad_request(&format!("no agent named `{name}` in this team")),
+        },
+        _ => (None, None),
+    };
+    let caller = crate::team::Caller {
+        session_id: r.session_id.clone(),
+        name: state
+            .subagents
+            .catalog
+            .find_by_session(&r.session_id)
+            .await
+            .map(|c| c.name)
+            .unwrap_or_else(|| "lead".to_string()),
+        root_id: root.clone(),
+        is_lead: r.session_id == root,
+    };
+    let req = crate::team::UpdateTask {
+        task_id,
+        expected_revision: r.expected_revision,
+        action,
+        subject: r.subject,
+        description: r.description,
+        blocked_by: r.blocked_by,
+        write_scopes: r.write_scopes,
+        owner: owner_id,
+        owner_name,
+    };
+    let view = match crate::team::update_task(&mut board, &caller, &req) {
+        Ok(v) => v,
+        Err(e) => return bad_request(&e.to_string()),
+    };
+    if let Err(e) = state.store.set_team(&root, Some(board)).await {
+        return server_error(e);
+    }
+    state.hub.publish(
+        &root,
+        "team.task",
+        json!({"taskId": view.id, "status": view.status.as_str(), "revision": view.revision}),
+    );
+    Json(json!({"task": view})).into_response()
+}
+
 async fn health(State(state): State<SharedState>, headers: HeaderMap) -> Response {
     if !check_auth(&headers, None, &state) {
         return unauthorized();
     }
     Json(json!({"ok": true, "uptimeMs": crate::event::now_ms().saturating_sub(state.started_at)}))
         .into_response()
+}
+
+// ------------------------------------------------------------ side pane
+//
+// The side pane (the right-hand tabbed panel) needs a few read-only views
+// over the workspace plus two interactive ones. All of them sit behind the
+// same token/host/origin guards as the rest of the API.
+
+/// The workspace root the side pane browses.
+///
+/// Falls back to the process's current directory, matching how the agent
+/// runtime resolves an empty `workspace` setting.
+async fn workspace_root(state: &AppState) -> std::path::PathBuf {
+    let ws = state.config.read().await.workspace.clone();
+    if ws.is_empty() {
+        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+    } else {
+        std::path::PathBuf::from(ws)
+    }
+}
+
+/// Map a domain error onto an HTTP response.
+fn ws_error(e: &crate::HarnessError) -> Response {
+    match e {
+        crate::HarnessError::PermissionDenied(m) => {
+            (StatusCode::FORBIDDEN, Json(json!({"error": m}))).into_response()
+        }
+        crate::HarnessError::NotFound(m) => {
+            (StatusCode::NOT_FOUND, Json(json!({"error": m}))).into_response()
+        }
+        _ => bad_request(&e.to_string()),
+    }
+}
+
+/// GET /api/fs/tree — one directory level of the workspace.
+async fn fs_tree(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    let ws = workspace_root(&state).await;
+    let path = q.get("path").cloned().unwrap_or_default();
+    match crate::wsfs::tree(&ws, &path) {
+        Ok(entries) => Json(json!({"entries": entries})).into_response(),
+        Err(e) => ws_error(&e),
+    }
+}
+
+/// GET /api/fs/file — read a text file.
+async fn fs_file(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    let ws = workspace_root(&state).await;
+    let path = q.get("path").cloned().unwrap_or_default();
+    let offset = q.get("offset").and_then(|v| v.parse().ok()).unwrap_or(1);
+    let limit = q.get("limit").and_then(|v| v.parse().ok()).unwrap_or(500);
+    match crate::wsfs::read(&ws, &path, offset, limit) {
+        Ok(f) => Json(json!({"file": f})).into_response(),
+        Err(e) => ws_error(&e),
+    }
+}
+
+/// GET /api/fs/search — find files by name.
+async fn fs_search(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    let ws = workspace_root(&state).await;
+    let query = q.get("q").cloned().unwrap_or_default();
+    match crate::wsfs::search(&ws, &query) {
+        Ok(matches) => Json(json!({"matches": matches})).into_response(),
+        Err(e) => ws_error(&e),
+    }
+}
+
+/// GET /api/git/status — working-tree status of the workspace.
+async fn git_status(State(state): State<SharedState>, headers: HeaderMap) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    let ws = workspace_root(&state).await;
+    match crate::git::status(&ws) {
+        Ok(s) => Json(json!({"status": s})).into_response(),
+        Err(e) => ws_error(&e),
+    }
+}
+
+/// GET /api/git/diff — diff for one file.
+async fn git_diff(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    let ws = workspace_root(&state).await;
+    let path = q.get("path").cloned().unwrap_or_default();
+    match crate::git::diff(&ws, &path) {
+        Ok(d) => Json(json!({"diff": d})).into_response(),
+        Err(e) => ws_error(&e),
+    }
+}
+
+/// GET /api/browser/state — the controlled browser's current page.
+async fn browser_state(State(state): State<SharedState>, headers: HeaderMap) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    let bridge = state.agent.computer.clone();
+    let url = bridge.current_url().await;
+    // A screenshot failure (no browser yet) must not fail the whole request:
+    // the panel shows the URL and text even when the capture is unavailable.
+    let screenshot = bridge.screenshot_png().await.ok();
+    let text = bridge.page_text().await.unwrap_or_default();
+    Json(json!({
+        "url": url,
+        "screenshot": screenshot,
+        "text": text,
+    }))
+    .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct BrowserNavigateReq {
+    url: String,
+}
+
+/// POST /api/browser/navigate — point the controlled browser at a URL.
+async fn browser_navigate(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(r): Json<BrowserNavigateReq>,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    let bridge = state.agent.computer.clone();
+    match bridge.navigate_to(&r.url).await {
+        Ok(()) => Json(json!({"ok": true})).into_response(),
+        Err(e) => bad_request(&e.to_string()),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct TermExecReq {
+    command: String,
+    /// Optional client-chosen id for this invocation. The client needs the id
+    /// *before* the command finishes in order to filter the streamed
+    /// `tool.progress` events, so it may supply one; otherwise the server
+    /// generates it.
+    #[serde(default)]
+    call_id: String,
+}
+
+/// POST /api/term/exec — run one command in the workspace.
+///
+/// This deliberately does *not* go through the model's permission gateway:
+/// the command was typed by the user in the side pane, not proposed by a
+/// model, and asking for approval on your own keystrokes would be noise.
+/// The command still runs with the workspace as its root.
+async fn term_exec(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(r): Json<TermExecReq>,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    let command = r.command.trim().to_string();
+    if command.is_empty() {
+        return bad_request("command is required");
+    }
+    let ws = workspace_root(&state).await;
+    // The call id ties the streamed `tool.progress` events to this command.
+    let call_id = if r.call_id.trim().is_empty() {
+        format!("term_{}", &uuid::Uuid::new_v4().simple().to_string()[..10])
+    } else {
+        r.call_id.trim().to_string()
+    };
+    // The session id is empty so the progress events broadcast to every
+    // connected client; the client filters by `callId`.
+    let result = crate::tools::shell::bash(
+        &command,
+        &ws,
+        120_000,
+        &state.hub,
+        "",
+        &call_id,
+    )
+    .await;
+    match result {
+        Ok(out) => {
+            let stdout = match &out.display {
+                crate::tools::DisplayKind::Shell { stdout, .. } => stdout.clone(),
+                _ => out.for_model.clone(),
+            };
+            let exit = match &out.display {
+                crate::tools::DisplayKind::Shell { exit, .. } => *exit,
+                _ => 0,
+            };
+            Json(json!({"callId": call_id, "stdout": stdout, "exit": exit}))
+                .into_response()
+        }
+        Err(e) => Json(json!({"callId": call_id, "error": e.to_string()})).into_response(),
+    }
 }
 
 async fn status(State(state): State<SharedState>, headers: HeaderMap) -> Response {
@@ -1463,7 +1935,26 @@ async fn get_usage(
         _ => "all",
     };
     let sessions_root = Config::home_dir().join("sessions");
-    let snap = state.usage.snapshot(range, &sessions_root).await;
+    let mut snap = state.usage.snapshot(range, &sessions_root).await;
+    // The journal only knows session ids; the title lives in the session
+    // file. Enrich the "top sessions" list so the UI can show something
+    // meaningful instead of a raw id.
+    if let Some(list) = snap.get_mut("topSessions").and_then(|v| v.as_array_mut()) {
+        let summaries = state.store.list("").await;
+        let titles: std::collections::HashMap<&str, &str> = summaries
+            .iter()
+            .map(|s| (s.id.as_str(), s.title.as_str()))
+            .collect();
+        for item in list.iter_mut() {
+            let Some(id) = item.get("sessionId").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let title = titles.get(id).copied().unwrap_or("");
+            if let Some(o) = item.as_object_mut() {
+                o.insert("title".to_string(), json!(title));
+            }
+        }
+    }
     Json(snap).into_response()
 }
 
@@ -1515,11 +2006,15 @@ pub async fn serve(
             .with_workspace(ws_root),
     );
 
-    // AgentRuntime 先建基础体;subagents 的 with_runtime 需要 Arc<AgentRuntime>,
-    // 而 runtime 挂 subagents 又需要 subagents——回环只能用克隆句柄解:
-    // AgentRuntime 是 Clone 且内部全是 Arc 共享字段。句柄上挂 schedule(子代理
-    // turn 可用定时任务);subagents 无法回环注入,子代理里再 spawn_agent 会
-    // 得到明确的"subagents are not mounted"错误,而不是静默失效。
+    // AgentRuntime 与 subagents 互相需要：runtime 挂 subagents 才能挂载
+    // agent_* 工具，subagents 需要 runtime 才能起子轮。构造期成环，改用
+    // **后绑定**：先建 runtime（subagents 槽为空），再建 subagents 服务并把
+    // runtime 装进去，最后把服务装回 runtime 的槽。
+    //
+    // 关键点：subagents 槽是 `Arc<RwLock<..>>`，而 AgentRuntime 的 clone
+    // 共享同一个 Arc。所以根 runtime 与子 runtime 看到的是**同一个**服务——
+    // 子代理再 spawn 孙代理时拿到的是同一个服务，嵌套委托因此可用（此前
+    // 子代理拿到的是 None，只会得到 "subagents are not mounted"）。
     let agent_base = AgentRuntime::new(
         config.clone(),
         hub.clone(),
@@ -1528,16 +2023,21 @@ pub async fn serve(
         store.clone(),
     )
     .with_usage(usage.clone());
+    let subagents: crate::subagent::SharedSubagents =
+        Arc::new(crate::subagent::SubagentService::new(hub.clone()));
+    // 子代理的 runtime 与根 runtime 共享全部内部状态（config/hub/broker/
+    // store/运行槽），差别只在于它自己也是那棵树的成员。
     let child_runtime: Arc<AgentRuntime> = Arc::new(
         agent_base
             .clone()
-            .with_services(Some(schedule.clone()), None),
+            .with_services(Some(schedule.clone()), None)
+            .await,
     );
-    let subagents: crate::subagent::SharedSubagents = Arc::new(
-        crate::subagent::SubagentService::new(hub.clone()).with_runtime(child_runtime),
-    );
+    subagents.set_runtime(child_runtime).await;
 
-    let agent = agent_base.with_services(Some(schedule.clone()), Some(subagents.clone()));
+    let agent = agent_base
+        .with_services(Some(schedule.clone()), Some(subagents.clone()))
+        .await;
 
     // Background scheduler: every 20s, fire tasks whose occurrence has passed.
     // Delivery is an ordinary follow-up turn into the target session.

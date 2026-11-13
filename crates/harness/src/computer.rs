@@ -118,6 +118,73 @@ impl ComputerBridge {
         self.pending.lock().await.take()
     }
 
+    // ---------------------------------------------------------------
+    // Side-pane surface
+    //
+    // The tool functions below drive the browser for the *model*. The side
+    // pane needs to observe the same browser from the *UI*, so these
+    // wrappers expose read-only views plus navigation.
+    // ---------------------------------------------------------------
+
+    /// Current page URL, or an empty string when no page is attached.
+    pub async fn current_url(&self) -> String {
+        self.cmd("Target.getTargetInfo", json!({}))
+            .await
+            .ok()
+            .and_then(|r| {
+                r.get("targetInfo")
+                    .and_then(|t| t.get("url"))
+                    .and_then(|u| u.as_str())
+                    .map(|s| s.to_string())
+            })
+            .unwrap_or_default()
+    }
+
+    /// Screenshot of the current page, base64-encoded PNG.
+    pub async fn screenshot_png(&self) -> Result<String, HarnessError> {
+        self.screenshot_raw().await
+    }
+
+    /// Compact accessibility tree of the current page.
+    pub async fn ax_tree_text(&self) -> Result<String, HarnessError> {
+        self.ax_tree().await
+    }
+
+    /// Visible text of the current page.
+    pub async fn page_text(&self) -> Result<String, HarnessError> {
+        let r = self
+            .cmd(
+                "Runtime.evaluate",
+                json!({
+                    "expression": "document.body ? document.body.innerText : ''",
+                    "returnByValue": true,
+                }),
+            )
+            .await?;
+        Ok(r.get("result")
+            .and_then(|v| v.get("value"))
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string())
+    }
+
+    /// Navigate the controlled browser to `url`.
+    ///
+    /// Only `http://` and `https://` are allowed — `file://` would let a
+    /// page read local files, and `javascript:` would run code in the
+    /// browser's origin. The server never fetches the URL itself, so there
+    /// is no SSRF surface beyond what the user typed.
+    pub async fn navigate_to(&self, url: &str) -> Result<(), HarnessError> {
+        let url = url.trim();
+        if !(url.starts_with("http://") || url.starts_with("https://")) {
+            return Err(HarnessError::Tool(
+                "url must start with http:// or https://".into(),
+            ));
+        }
+        self.cmd("Page.navigate", json!({ "url": url })).await?;
+        Ok(())
+    }
+
     /// Non-consuming read for the display path.
     async fn peek_image(&self) -> Option<PendingImage> {
         self.pending.lock().await.clone()

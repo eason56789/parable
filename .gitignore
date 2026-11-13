@@ -22,3 +22,5 @@
 *.local
 # tauri codegen output
 /crates/app/gen/
+# parallel-agent scratch homes
+.parhome/

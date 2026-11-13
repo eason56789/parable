@@ -72,11 +72,20 @@ fn decode_line(raw: &[u8]) -> String {
         .to_string()
 }
 
+/// Run `command` in `cwd`, streaming its output.
+///
+/// The three stream parameters are what the shell needs to publish live
+/// output: the event hub to publish to, the session the output belongs to
+/// (empty = broadcast), and the call id the client filters progress by.
+/// Keeping them explicit lets callers outside the tool layer — the side
+/// pane's terminal panel — run a command without fabricating a `ToolCtx`.
 pub async fn bash(
     command: &str,
     cwd: &Path,
     timeout_ms: u64,
-    ctx: &ToolCtx,
+    hub: &crate::event::EventHub,
+    sid: &str,
+    cid: &str,
 ) -> Result<ToolOutcome, HarnessError> {
     let (prog, args) = shell_pair();
     let mut cmd = tokio::process::Command::new(&prog);
@@ -101,9 +110,9 @@ pub async fn bash(
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
-    let hub = ctx.hub.clone();
-    let sid = ctx.session_id.clone();
-    let cid = ctx.call_id.clone();
+    let hub = hub.clone();
+    let sid = sid.to_string();
+    let cid = cid.to_string();
 
     // 输出缓冲放在共享 Mutex 里:超时/卡死路径不等 EOF 也能把已收到的部分
     // 带走,不会因为管道被残留孙进程攥着而丢内容。

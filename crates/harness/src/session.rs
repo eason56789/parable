@@ -61,6 +61,10 @@ pub struct Session {
     /// session; the agent loop consults it after every turn.
     #[serde(default)]
     pub goal: Option<GoalState>,
+    /// Shared Agent Teams board for the tree rooted at this session.
+    /// Lives and dies with the session; children reach it through their root.
+    #[serde(default)]
+    pub team: Option<crate::team::TeamState>,
 }
 
 /// A persistent objective, per dsh/zcode: one goal per session, a small state
@@ -165,7 +169,38 @@ const META_TTL: std::time::Duration = std::time::Duration::from_millis(750);
 #[derive(Clone)]
 struct TextEntry {
     stamp: ((u64, u32), u64),
+    /// Cached text size in bytes — used for the LRU budget.
+    bytes: usize,
+    /// Last time this entry was served (LRU ordering).
+    touched: std::time::Instant,
     items: Vec<(usize, String, String)>,
+}
+
+/// Upper bound on the searchable-text cache, in bytes of raw message text.
+///
+/// The cache holds one copy of every session's message bodies; without a cap
+/// it grows with the archive (3.6 MB of session files → ~8 MB of RSS). 4 MB
+/// keeps the recent chats hot while bounding the footprint.
+const TEXT_CACHE_MAX_BYTES: usize = 4 * 1024 * 1024;
+
+/// Drop least-recently-used entries until the cached text fits the budget.
+///
+/// The newest entry is never evicted on its own (the caller just inserted it),
+/// so the cache always keeps at least the session being searched.
+fn evict_text_cache(idx: &mut HashMap<String, TextEntry>, budget: usize) {
+    let mut total: usize = idx.values().map(|e| e.bytes).sum();
+    while total > budget && idx.len() > 1 {
+        let Some(lru) = idx
+            .iter()
+            .min_by_key(|(_, e)| e.touched)
+            .map(|(k, _)| k.clone())
+        else {
+            break;
+        };
+        if let Some(e) = idx.remove(&lru) {
+            total = total.saturating_sub(e.bytes);
+        }
+    }
 }
 
 impl SessionStore {
@@ -201,6 +236,7 @@ impl SessionStore {
             messages: Vec::new(),
             usage: UsageTotals::default(),
             goal: None,
+            team: None,
         };
         if let Err(e) = self.persist(&s).await {
             tracing::error!("session {}: persist failed: {e}", s.meta.id);
@@ -640,6 +676,39 @@ impl SessionStore {
         Ok(())
     }
 
+    /// Read the Agent Teams board of the tree rooted at this session.
+    pub async fn get_team(&self, id: &str) -> Option<crate::team::TeamState> {
+        self.load(id).await.and_then(|s| s.team)
+    }
+
+    /// Persist the Agent Teams board of the tree rooted at this session.
+    ///
+    /// `None` clears the board. Mirrors `set_goal`'s mutate → bump → persist
+    /// shape, minus the error swallow: a team board write that silently failed
+    /// would leave two agents disagreeing about the state of the board.
+    pub async fn set_team(
+        &self,
+        id: &str,
+        team: Option<crate::team::TeamState>,
+    ) -> Result<(), HarnessError> {
+        // cache 未命中先回源磁盘（照 update_meta 的兜底模式）。
+        if !self.cache.lock().await.contains_key(id) {
+            self.load(id)
+                .await
+                .ok_or_else(|| HarnessError::NotFound(format!("session {id}")))?;
+        }
+        let mut cache = self.cache.lock().await;
+        let s = cache
+            .get_mut(id)
+            .ok_or_else(|| HarnessError::NotFound(format!("session {id}")))?;
+        s.team = team;
+        s.meta.updated_at = crate::event::now_ms();
+        let snapshot = s.clone();
+        drop(cache);
+        self.persist(&snapshot).await?;
+        Ok(())
+    }
+
     /// Search every session's message text for `query`.
     ///
     /// Returns one hit per matching message: the session id/title plus a
@@ -679,7 +748,11 @@ impl SessionStore {
     /// Per-session searchable text: (message index, role, text).
     ///
     /// Cached by the session file's (mtime, size), so repeated searches only
-    /// pay for the files that actually changed.
+    /// pay for the files that actually changed. The cache is bounded by total
+    /// text size (see `TEXT_CACHE_MAX_BYTES`): a long chat's text is worth
+    /// megabytes of RSS, and an unbounded cache would grow with the archive.
+    /// When the budget is exceeded the least-recently-used entries are
+    /// dropped, so the hot sessions stay hot and the cold ones are re-read.
     async fn session_text_index(&self, id: &str) -> Vec<(usize, String, String)> {
         let stamp = self
             .path_for(id)
@@ -691,8 +764,10 @@ impl SessionStore {
                 Some(((d.as_secs(), d.subsec_nanos()), m.len()))
             });
         if let Some(st) = stamp {
-            if let Some(hit) = self.text_index.lock().await.get(id) {
+            let mut idx = self.text_index.lock().await;
+            if let Some(hit) = idx.get_mut(id) {
                 if hit.stamp == st {
+                    hit.touched = std::time::Instant::now();
                     return hit.items.clone();
                 }
             }
@@ -704,13 +779,19 @@ impl SessionStore {
             }
         }
         if let Some(st) = stamp {
-            self.text_index.lock().await.insert(
+            let bytes: usize = items.iter().map(|(_, _, t)| t.len()).sum();
+            let mut idx = self.text_index.lock().await;
+            idx.insert(
                 id.to_string(),
                 TextEntry {
                     stamp: st,
+                    bytes,
+                    touched: std::time::Instant::now(),
                     items: items.clone(),
                 },
             );
+            // Evict least-recently-used entries until the budget is met.
+            evict_text_cache(&mut idx, TEXT_CACHE_MAX_BYTES);
         }
         items
     }
@@ -877,8 +958,43 @@ mod tests {
     }
 
     #[test]
-    fn summary_head_parses_without_messages() {
-        // The metadata fields come before `messages` in the file; the head
+    fn text_cache_evicts_least_recently_used() {
+        let mut idx: HashMap<String, TextEntry> = HashMap::new();
+        let mk = |name: &str, bytes: usize, touched: std::time::Instant| {
+            (
+                name.to_string(),
+                TextEntry {
+                    stamp: ((0, 0), 0),
+                    bytes,
+                    touched,
+                    items: Vec::new(),
+                },
+            )
+        };
+        let now = std::time::Instant::now();
+        // old(100) is the least recently used, mid(100), new(100).
+        let (k, v) = mk("old", 100, now);
+        idx.insert(k, v);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let (k, v) = mk("mid", 100, std::time::Instant::now());
+        idx.insert(k, v);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let (k, v) = mk("new", 100, std::time::Instant::now());
+        idx.insert(k, v);
+
+        // Budget of 250 must drop exactly one entry — the LRU one.
+        evict_text_cache(&mut idx, 250);
+        assert!(!idx.contains_key("old"), "least recently used must go first");
+        assert!(idx.contains_key("mid"));
+        assert!(idx.contains_key("new"));
+
+        // A budget smaller than a single entry keeps at least one entry.
+        evict_text_cache(&mut idx, 1);
+        assert_eq!(idx.len(), 1, "the newest entry must survive");
+    }
+
+    #[test]
+    fn summary_head_parses_without_messages() {        // The metadata fields come before `messages` in the file; the head
         // parser must read them without touching the message array.
         let full = r#"{
   "id": "s_abc",
@@ -902,5 +1018,67 @@ mod tests {
         assert_eq!(s.thinking_level, 2);
         // No `messages` key in the head -> nothing to parse.
         assert!(parse_summary_head("{\"id\":\"x\"}").is_none());
+    }
+
+    #[test]
+    fn a_session_file_without_a_team_still_loads() {
+        // Older session files have no `team` key: the field must default
+        // to None rather than failing the whole session load.
+        let old = serde_json::json!({
+            "id": "s_old",
+            "title": "老会话",
+            "workspace": "w",
+            "created_at": 1,
+            "updated_at": 2,
+            "messages": [],
+        });
+        let s: Session = serde_json::from_value(old).expect("old files must load");
+        assert!(s.team.is_none());
+    }
+
+    #[test]
+    fn team_state_round_trips_through_the_session() {
+        let mut team = crate::team::TeamState::new();
+        team.next_task_number = 2;
+        team.tasks.push(crate::team::TeamTask {
+            id: "task-1".into(),
+            revision: 3,
+            subject: "写文档".into(),
+            description: "写 README".into(),
+            status: crate::team::TaskStatus::InProgress,
+            owner_id: Some("s_child".into()),
+            owner_name: Some("agent-1".into()),
+            blocked_by: vec!["task-0".into()],
+            write_scopes: vec!["docs".into()],
+        });
+        let s = Session {
+            meta: SessionSummary {
+                id: "s_x".into(),
+                title: "t".into(),
+                workspace: "w".into(),
+                created_at: 0,
+                updated_at: 0,
+                pinned: false,
+                archived: false,
+                group: String::new(),
+                model: String::new(),
+                permission_mode: "ask".into(),
+                thinking_level: 2,
+            },
+            messages: Vec::new(),
+            usage: UsageTotals::default(),
+            goal: None,
+            team: Some(team),
+        };
+        let json = serde_json::to_string(&s).expect("serialize");
+        let back: Session = serde_json::from_str(&json).expect("deserialize");
+        let t = back.team.expect("team survives the round trip");
+        assert!(t.enabled);
+        assert_eq!(t.tasks.len(), 1);
+        assert_eq!(t.tasks[0].revision, 3);
+        assert_eq!(t.tasks[0].owner_name.as_deref(), Some("agent-1"));
+        assert_eq!(t.tasks[0].blocked_by, vec!["task-0".to_string()]);
+        assert_eq!(t.tasks[0].write_scopes, vec!["docs".to_string()]);
+        assert_eq!(t.tasks[0].status, crate::team::TaskStatus::InProgress);
     }
 }

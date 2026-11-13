@@ -276,6 +276,10 @@ pub struct PendingRequest {
     pub risk: &'static str,
     pub reason: String,
     pub diff_preview: Option<String>,
+    /// The session this request belongs to. Two conversations can run in
+    /// parallel (the side pane's side chat is a separate session), so the
+    /// request must carry its own session instead of relying on a global.
+    pub session_id: String,
 }
 
 /// Owns the rule table and the set of in-flight permission requests.
@@ -283,7 +287,6 @@ pub struct PermissionBroker {
     rules: RwLock<RuleSet>,
     pending: Mutex<HashMap<String, PendingRequest>>,
     hub: EventHub,
-    session_id: Mutex<String>,
     /// 每个 call 的权限判定来源("auto"=规则/模式放行,"requested"=用户决策),
     /// 供 Registry::execute 的执行审计取用。
     sources: Mutex<HashMap<String, &'static str>>,
@@ -295,13 +298,8 @@ impl PermissionBroker {
             rules: RwLock::new(RuleSet::load()),
             pending: Mutex::new(HashMap::new()),
             hub,
-            session_id: Mutex::new(String::new()),
             sources: Mutex::new(HashMap::new()),
         }
-    }
-
-    pub async fn set_session(&self, id: &str) {
-        *self.session_id.lock().await = id.to_string();
     }
 
     /// Decide whether `tool` acting on `path` may run without asking.
@@ -348,9 +346,13 @@ impl PermissionBroker {
     /// Suspend until the user answers. Emits `permission.request` and waits.
     /// `command` 是 shell 类工具渲染后的命令原文(bash / 插件命令),用于 Always
     /// 规则的精确持久化;非 shell 工具传 None。
+    /// `session_id` 是发起这次调用的会话:权限请求按会话投递,两个会话并行时
+    /// 不会串台。
+    #[allow(clippy::too_many_arguments)]
     pub async fn request(
         &self,
         call_id: &str,
+        session_id: &str,
         tool: &str,
         path: &str,
         risk: Risk,
@@ -370,12 +372,12 @@ impl PermissionBroker {
                     risk: risk.as_str(),
                     reason: reason.to_string(),
                     diff_preview: diff_preview.clone(),
+                    session_id: session_id.to_string(),
                 },
             );
         }
-        let sid = self.session_id.lock().await.clone();
         self.hub.publish(
-            &sid,
+            session_id,
             "permission.request",
             json!({
                 "callId": call_id,
@@ -415,7 +417,7 @@ impl PermissionBroker {
             }
         }
         self.hub.publish(
-            &sid,
+            session_id,
             "permission.resolved",
             json!({"id": call_id, "decision": match decision {
                 Decision::Once => "once",
@@ -450,6 +452,7 @@ impl PermissionBroker {
                     "risk": r.risk,
                     "reason": r.reason,
                     "diffPreview": r.diff_preview,
+                    "sessionId": r.session_id,
                 })
             })
             .collect();

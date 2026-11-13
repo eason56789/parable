@@ -25,7 +25,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use chrono::Datelike;
+use chrono::{Datelike, Timelike};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -56,14 +56,21 @@ pub struct UsageRecord {
     /// Wall-clock duration of the turn.
     #[serde(default)]
     pub wall_ms: u64,
+    /// Number of model turns this record accounts for. A journal record is
+    /// always 1; a legacy session record carries the session's turn count.
+    #[serde(default = "one")]
+    pub turns: u64,
+}
+
+fn one() -> u64 {
+    1
 }
 
 impl UsageRecord {
     /// Total tokens attributed to this record.
     pub fn total(&self) -> u64 {
         self.input_tokens + self.output_tokens + self.cache_read + self.cache_write
-    }
-}
+    }}
 
 /// Number of weeks shown in the heatmap (a GitHub-style year view).
 const HEATMAP_WEEKS: usize = 53;
@@ -74,6 +81,10 @@ const HEATMAP_DAYS: usize = 7;
 pub struct UsageJournal {
     dir: PathBuf,
     file: PathBuf,
+    /// Sentinel written once the legacy session import has run. Kept separate
+    /// from the journal file: a journal that already holds real turns must
+    /// not make the legacy import look "already done".
+    marker: PathBuf,
     records: Mutex<Vec<UsageRecord>>,
     /// Set once the legacy import has run, so it never runs twice.
     backfilled: Mutex<bool>,
@@ -86,11 +97,13 @@ impl UsageJournal {
     /// right away, so the usage history survives a restart.
     pub fn new(dir: PathBuf) -> Self {
         let file = dir.join("journal.jsonl");
+        let marker = dir.join("legacy-imported");
         let _ = std::fs::create_dir_all(&dir);
         let records = load_journal_file(&file);
         Self {
             dir,
             file,
+            marker,
             records: Mutex::new(records),
             backfilled: Mutex::new(false),
         }
@@ -136,9 +149,10 @@ impl UsageJournal {
 
     /// Import usage from session files written before the journal existed.
     ///
-    /// Idempotent: the second call is a no-op. Each session contributes one
-    /// record carrying its cumulative totals, attributed to the day the
-    /// session was last updated.
+    /// Idempotent: the sentinel file records that the import already ran, so
+    /// the second call is a no-op. Each session contributes one record
+    /// carrying its cumulative totals, attributed to the day the session was
+    /// last updated.
     pub async fn backfill_legacy(&self, sessions_root: &Path) {
         {
             let done = self.backfilled.lock().await;
@@ -146,24 +160,34 @@ impl UsageJournal {
                 return;
             }
         }
-        // The journal file's existence is the "already imported" marker: if
-        // the app has ever written a record, the legacy import already ran.
-        let marker = self.file.exists();
-        let mut recs = self.records.lock().await;
-        if recs.is_empty() && !marker {
-            let imported = import_sessions(sessions_root);
-            for r in imported {
-                if let Ok(line) = serde_json::to_string(&r) {
-                    let mut l = line;
-                    l.push('\n');
-                    if let Err(e) = append_line(&self.file, l.as_bytes()) {
-                        tracing::error!("usage journal: legacy append failed: {e}");
-                    }
-                }
-                recs.push(r);
-            }
+        // The sentinel — not the journal file — marks the import as done.
+        // A journal that already holds real turns must still get the legacy
+        // sessions imported, otherwise their tokens are lost from the total.
+        if self.marker.exists() {
+            let mut done = self.backfilled.lock().await;
+            *done = true;
+            return;
         }
-        drop(recs);
+        let imported = import_sessions(sessions_root);
+        if !imported.is_empty() {
+            let mut lines = String::new();
+            for r in &imported {
+                if let Ok(line) = serde_json::to_string(r) {
+                    lines.push_str(&line);
+                    lines.push('\n');
+                }
+            }
+            if let Err(e) = append_line(&self.file, lines.as_bytes()) {
+                tracing::error!("usage journal: legacy append failed: {e}");
+            }
+            let mut recs = self.records.lock().await;
+            recs.extend(imported);
+        }
+        // Write the sentinel last: if the import crashes midway the next run
+        // retries instead of silently losing the legacy sessions.
+        if let Err(e) = std::fs::write(&self.marker, b"1") {
+            tracing::warn!("usage journal: could not write legacy-import marker: {e}");
+        }
         let mut done = self.backfilled.lock().await;
         *done = true;
     }
@@ -255,11 +279,13 @@ fn import_sessions(root: &Path) -> Vec<UsageRecord> {
             output_tokens: output,
             cache_read,
             cache_write,
+            // The session's cumulative turns, so the imported record keeps
+            // the true turn count instead of collapsing to one.
+            turns,
             // wall_ms is the session's total across all turns; keep it so
             // `longestSessionMs` reflects the real chat length.
             wall_ms: u.get("wall_ms").and_then(|x| x.as_u64()).unwrap_or(0),
         });
-        let _ = turns;
     }
     out
 }
@@ -301,6 +327,47 @@ struct DayTotals {
     by_model: HashMap<String, u64>,
 }
 
+/// Per-session totals, used for the "top sessions" list.
+#[derive(Default, Clone)]
+struct SessionTotals {
+    total: u64,
+    input: u64,
+    output: u64,
+    turns: u64,
+    wall_ms: u64,
+    first_ts: u64,
+    last_ts: u64,
+    by_model: HashMap<String, u64>,
+}
+
+/// Accumulates tokens by hour of day and by weekday, for the activity charts.
+///
+/// Both are indexed 0..24 (hours) and 0..7 (weekday, Monday = 0).
+#[derive(Default)]
+struct Activity {
+    hours: [u64; 24],
+    hour_turns: [u64; 24],
+    weekdays: [u64; 7],
+    weekday_turns: [u64; 7],
+}
+
+impl Activity {
+    fn add(&mut self, rec: &UsageRecord) {
+        // The timestamp is the source of truth for "when did this happen";
+        // the `day` key is only the calendar bucket.
+        let dt = chrono::DateTime::from_timestamp_millis(rec.ts as i64)
+            .map(|d| d.with_timezone(&chrono::Local));
+        let Some(dt) = dt else { return };
+        let h = dt.hour() as usize;
+        let w = dt.weekday().num_days_from_monday() as usize;
+        let t = rec.total();
+        self.hours[h] += t;
+        self.hour_turns[h] += rec.turns.max(1);
+        self.weekdays[w] += t;
+        self.weekday_turns[w] += rec.turns.max(1);
+    }
+}
+
 /// Build the full snapshot from the records. Pure function — unit tested.
 fn build_snapshot(recs: &[UsageRecord], range: &str, now: u64) -> Value {
     let today = day_key(now);
@@ -318,6 +385,8 @@ fn build_snapshot(recs: &[UsageRecord], range: &str, now: u64) -> Value {
     let mut total_cache_write: u64 = 0;
     let mut total_turns: u64 = 0;
     let mut peak_day: u64 = 0;
+    let mut activity = Activity::default();
+    let mut session_detail: HashMap<String, SessionTotals> = HashMap::new();
 
     for r in recs {
         let t = r.total();
@@ -326,10 +395,25 @@ fn build_snapshot(recs: &[UsageRecord], range: &str, now: u64) -> Value {
         total_output += r.output_tokens;
         total_cache_read += r.cache_read;
         total_cache_write += r.cache_write;
-        total_turns += 1;
+        total_turns += r.turns.max(1);
         sessions.insert(r.session_id.as_str());
         *session_ms.entry(r.session_id.as_str()).or_insert(0) += r.wall_ms;
         *session_tokens.entry(r.session_id.as_str()).or_insert(0) += t;
+        activity.add(r);
+
+        let sd = session_detail.entry(r.session_id.clone()).or_default();
+        sd.total += t;
+        sd.input += r.input_tokens;
+        sd.output += r.output_tokens;
+        sd.turns += r.turns.max(1);
+        sd.wall_ms += r.wall_ms;
+        if sd.first_ts == 0 || r.ts < sd.first_ts {
+            sd.first_ts = r.ts;
+        }
+        if r.ts > sd.last_ts {
+            sd.last_ts = r.ts;
+        }
+        *sd.by_model.entry(r.model.clone()).or_insert(0) += t;
 
         let d = days.entry(r.day.clone()).or_default();
         d.total += t;
@@ -337,7 +421,7 @@ fn build_snapshot(recs: &[UsageRecord], range: &str, now: u64) -> Value {
         d.output += r.output_tokens;
         d.cache_read += r.cache_read;
         d.cache_write += r.cache_write;
-        d.turns += 1;
+        d.turns += r.turns.max(1);
         *d.by_model.entry(r.model.clone()).or_insert(0) += t;
         if d.total > peak_day {
             peak_day = d.total;
@@ -442,6 +526,59 @@ fn build_snapshot(recs: &[UsageRecord], range: &str, now: u64) -> Value {
             )
     });
 
+    // Top sessions by token spend, scoped to the same range as the charts.
+    // A session's cost is attributed to the session as a whole — a chat that
+    // started before the cutoff still shows up if it was active inside it.
+    let in_range: HashSet<&str> = match &cutoff {
+        Some(c) => recs
+            .iter()
+            .filter(|r| r.day.as_str() >= c.as_str())
+            .map(|r| r.session_id.as_str())
+            .collect(),
+        None => recs.iter().map(|r| r.session_id.as_str()).collect(),
+    };
+    let mut top_sessions: Vec<(String, SessionTotals)> = session_detail
+        .into_iter()
+        .filter(|(id, _)| in_range.contains(id.as_str()))
+        .collect();
+    top_sessions.sort_by(|a, b| b.1.total.cmp(&a.1.total).then(a.0.cmp(&b.0)));
+    top_sessions.truncate(10);
+    let top_sessions: Vec<Value> = top_sessions
+        .into_iter()
+        .map(|(id, s)| {
+            let model = s
+                .by_model
+                .iter()
+                .max_by_key(|(_, v)| **v)
+                .map(|(m, _)| m.clone())
+                .unwrap_or_default();
+            serde_json::json!({
+                "sessionId": id,
+                "totalTokens": s.total,
+                "inputTokens": s.input,
+                "outputTokens": s.output,
+                "turns": s.turns,
+                "wallMs": s.wall_ms,
+                "firstTs": s.first_ts,
+                "lastTs": s.last_ts,
+                "model": model,
+            })
+        })
+        .collect();
+
+    let hours: Vec<Value> = activity
+        .hours
+        .iter()
+        .enumerate()
+        .map(|(i, v)| serde_json::json!({"tokens": v, "turns": activity.hour_turns[i]}))
+        .collect();
+    let weekdays: Vec<Value> = activity
+        .weekdays
+        .iter()
+        .enumerate()
+        .map(|(i, v)| serde_json::json!({"tokens": v, "turns": activity.weekday_turns[i]}))
+        .collect();
+
     serde_json::json!({
         "range": range,
         "generatedAt": now,
@@ -463,6 +600,11 @@ fn build_snapshot(recs: &[UsageRecord], range: &str, now: u64) -> Value {
         "heatmap": heatmap,
         "daily": daily,
         "models": models,
+        "activity": {
+            "hours": hours,
+            "weekdays": weekdays,
+        },
+        "topSessions": top_sessions,
     })
 }
 
@@ -608,6 +750,7 @@ fn build_heatmap(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone as _;
 
     fn rec(day: &str, session: &str, model: &str, total: u64, wall_ms: u64) -> UsageRecord {
         UsageRecord {
@@ -620,6 +763,7 @@ mod tests {
             cache_read: 0,
             cache_write: 0,
             wall_ms,
+            turns: 1,
         }
     }
 
@@ -791,6 +935,40 @@ mod tests {
     }
 
     #[test]
+    fn legacy_import_runs_even_when_the_journal_already_has_turns() {
+        // Regression: the import used to be skipped whenever journal.jsonl
+        // existed, so a journal that already held real turns silently lost
+        // every legacy session's tokens.
+        let base = std::env::temp_dir().join(format!("parable-usagelg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let sessions = base.join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(
+            sessions.join("s_abc.json"),
+            r#"{"id":"s_abc","updated_at":1767225600000,"messages":[],
+                "usage":{"input_tokens":100,"output_tokens":20,"cache_read":0,
+                "cache_write":0,"turns":2,"steps":3,"wall_ms":4000}}"#,
+        )
+        .unwrap();
+        let j = UsageJournal::new(base.join("usage"));
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            // A real turn arrives first — the journal file now exists.
+            j.record(rec("2026-11-13", "s_new", "m1", 7, 5)).await;
+            j.backfill_legacy(&sessions).await;
+            // Both the new turn and the legacy session must be counted.
+            let snap = j.snapshot("all", &sessions).await;
+            assert_eq!(snap["summary"]["totalTokens"], 127u64);
+            assert_eq!(snap["summary"]["totalTurns"], 3u64);
+            assert_eq!(snap["models"].as_array().unwrap().len(), 2);
+        });
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn legacy_import_runs_once_and_is_not_double_counted() {
         let base = std::env::temp_dir().join(format!("parable-usagelt-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
@@ -819,7 +997,96 @@ mod tests {
             assert_eq!(snap["summary"]["totalTokens"], 120u64);
             assert_eq!(snap["models"][0]["modelId"], LEGACY_MODEL);
             assert_eq!(snap["summary"]["longestSessionMs"], 4000u64);
+            // The imported record keeps the session's real turn count.
+            assert_eq!(snap["summary"]["totalTurns"], 3u64);
         });
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A record with an explicit timestamp, for the activity charts.
+    fn rec_at(ts: u64, session: &str, model: &str, total: u64) -> UsageRecord {
+        let mut r = rec(&day_key(ts), session, model, total, 100);
+        r.ts = ts;
+        r
+    }
+
+    #[test]
+    fn activity_buckets_by_hour_and_weekday() {
+        // 2026-11-09 is a Monday; 10:00 local.
+        let monday_10 = chrono::Local
+            .with_ymd_and_hms(2026, 11, 9, 10, 0, 0)
+            .unwrap()
+            .timestamp_millis() as u64;
+        // The next day, Tuesday, 14:00.
+        let tuesday_14 = chrono::Local
+            .with_ymd_and_hms(2026, 11, 10, 14, 0, 0)
+            .unwrap()
+            .timestamp_millis() as u64;
+
+        let recs = vec![
+            rec_at(monday_10, "s1", "m1", 100),
+            rec_at(tuesday_14, "s1", "m1", 250),
+        ];
+        let v = build_snapshot(&recs, "all", tuesday_14);
+        let act = &v["activity"];
+        let hours = act["hours"].as_array().unwrap();
+        assert_eq!(hours.len(), 24);
+        // Every hour is present, so the chart never has holes.
+        assert!(hours.iter().all(|h| h["tokens"].is_u64()));
+        let sum: u64 = hours.iter().map(|h| h["tokens"].as_u64().unwrap()).sum();
+        assert_eq!(sum, 350u64);
+
+        let weekdays = act["weekdays"].as_array().unwrap();
+        assert_eq!(weekdays.len(), 7);
+        // Monday = index 0, Tuesday = index 1.
+        assert_eq!(weekdays[0]["tokens"], 100u64);
+        assert_eq!(weekdays[1]["tokens"], 250u64);
+        assert_eq!(weekdays[0]["turns"], 1u64);
+    }
+
+    #[test]
+    fn top_sessions_are_ranked_and_capped() {
+        let now = crate::event::now_ms();
+        let today = today_key();
+        let mut recs = Vec::new();
+        // s1 is the heaviest, s2 next, s3 the lightest.
+        recs.push(rec(&today, "s1", "m1", 900, 100));
+        recs.push(rec(&today, "s2", "m2", 500, 100));
+        recs.push(rec(&today, "s3", "m1", 100, 100));
+        // Twelve more sessions, all cheap: only the top ten survive.
+        for i in 0..12 {
+            recs.push(rec(&today, &format!("s_extra{i}"), "m1", 50, 10));
+        }
+        let v = build_snapshot(&recs, "all", now);
+        let top = v["topSessions"].as_array().unwrap();
+        assert_eq!(top.len(), 10);
+        // Sorted by tokens descending.
+        assert_eq!(top[0]["sessionId"], "s1");
+        assert_eq!(top[0]["totalTokens"], 900u64);
+        assert_eq!(top[1]["sessionId"], "s2");
+        assert_eq!(top[2]["sessionId"], "s3");
+        // The dominant model is reported for the session.
+        assert_eq!(top[0]["model"], "m1");
+        assert_eq!(top[1]["model"], "m2");
+    }
+
+    #[test]
+    fn top_sessions_respect_the_range() {
+        let now = crate::event::now_ms();
+        let today = today_key();
+        let old = (chrono::Local::now() - chrono::Duration::days(90))
+            .format("%Y-%m-%d")
+            .to_string();
+        let recs = vec![
+            rec(&today, "s_new", "m1", 100, 10),
+            rec(&old, "s_old", "m2", 900, 10),
+        ];
+        // "all" shows both, "7d" only the recent one.
+        let all = build_snapshot(&recs, "all", now);
+        assert_eq!(all["topSessions"].as_array().unwrap().len(), 2);
+        let d7 = build_snapshot(&recs, "7d", now);
+        let top = d7["topSessions"].as_array().unwrap();
+        assert_eq!(top.len(), 1);
+        assert_eq!(top[0]["sessionId"], "s_new");
     }
 }

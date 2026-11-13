@@ -161,6 +161,8 @@ pub struct ToolCtx {
     pub schedule: Option<Arc<crate::schedule::ScheduleService>>,
     /// Present when subagents are mounted; `agent_*` tools need it.
     pub subagents: Option<Arc<crate::subagent::SubagentService>>,
+    /// Session store — the team board lives with the root session.
+    pub store: crate::session::SharedStore,
     /// Agent runtime, so `spawn_agent` can start a child turn.
     pub runtime: Option<Arc<dyn TurnStarter>>,
     /// DeepSeek Search API key; empty disables `deepseek_search`.
@@ -223,6 +225,7 @@ impl ToolCtx {
             .broker
             .request(
                 &self.call_id,
+                &self.session_id,
                 tool,
                 path,
                 risk,
@@ -628,7 +631,7 @@ impl Registry {
             // ---- subagents (reference: DeepSeek Harness `subagent`) ----
             ToolSpec {
                 name: "spawn_agent".into(),
-                description: "Delegate a task to an isolated child agent with its own context. Use for independent research or parallel work. Returns immediately; the result arrives as a message.".into(),
+                description: "Delegate a task to an isolated child agent with its own context. Use for independent research or parallel work. Returns immediately; call agent_wait to collect the child's result.".into(),
                 input_schema: obj(json!({
                     "label": str_prop("Short task label for the catalogue"),
                     "task": str_prop("The task the child should carry out"),
@@ -640,13 +643,61 @@ impl Registry {
             },
             ToolSpec {
                 name: "agent_list".into(),
-                description: "List every child agent this conversation created, running or finished, with its result.".into(),
+                description: "List every child agent in your team tree, running or finished, with its result.".into(),
                 input_schema: obj(json!({}), &[]),
+            },
+            ToolSpec {
+                name: "agent_wait".into(),
+                description: "Wait for a child agent to finish and return its result. Blocks until the child settles or the timeout elapses. Use this to collect a spawned agent's answer.".into(),
+                input_schema: obj(json!({
+                    "agent": str_prop("Child agent id, name, or session id from agent_list"),
+                    "timeout_seconds": int_prop("How long to wait, in seconds (default 300, max 1800)"),
+                }), &["agent"]),
             },
             ToolSpec {
                 name: "agent_interrupt".into(),
                 description: "Stop a running child agent by id.".into(),
                 input_schema: obj(json!({"id": str_prop("Child agent id from agent_list")}), &["id"]),
+            },
+            // ---- agent teams (reference: DeepSeek Harness `tool-agent-team`) ----
+            ToolSpec {
+                name: "team_task_create".into(),
+                description: "Create one unowned pending task on the shared team task board. Use it to split work across teammates.".into(),
+                input_schema: obj(json!({
+                    "subject": str_prop("Concise task title"),
+                    "description": str_prop("Complete task details and acceptance criteria"),
+                    "blocked_by": json!({"type":"array","items":{"type":"string"},"description":"Task ids that must complete first"}),
+                    "write_scopes": json!({"type":"array","items":{"type":"string"},"description":"Advisory workspace-relative path prefixes this task expects to modify"}),
+                }), &["subject","description"]),
+            },
+            ToolSpec {
+                name: "team_task_list".into(),
+                description: "List shared team tasks, including readiness, owner, revision, blockers, and write-scope warnings.".into(),
+                input_schema: obj(json!({
+                    "status": str_prop("Optional exact status filter: pending | in_progress | completed"),
+                    "owner": str_prop("Optional owner agent name filter"),
+                    "unowned": bool_prop("Filter tasks by whether they have no owner"),
+                    "ready": bool_prop("Optional readiness filter"),
+                }), &[]),
+            },
+            ToolSpec {
+                name: "team_task_get".into(),
+                description: "Read the complete latest value of one shared team task before changing or executing it.".into(),
+                input_schema: obj(json!({"task_id": str_prop("Shared task id")}), &["task_id"]),
+            },
+            ToolSpec {
+                name: "team_task_update".into(),
+                description: "Compare-and-set a shared team task action using the latest revision from team_task_get or team_task_list.".into(),
+                input_schema: obj(json!({
+                    "task_id": str_prop("Shared task id"),
+                    "expected_revision": int_prop("Current task revision used as the compare-and-set precondition"),
+                    "action": str_prop("claim | release | edit | set_dependencies | complete | reopen | reassign | delete"),
+                    "subject": str_prop("Replacement title for edit"),
+                    "description": str_prop("Replacement details for edit"),
+                    "blocked_by": json!({"type":"array","items":{"type":"string"},"description":"Complete blocker list for set_dependencies"}),
+                    "write_scopes": json!({"type":"array","items":{"type":"string"},"description":"Replacement advisory write scopes for edit"}),
+                    "owner": str_prop("Agent name of the root or any teammate for reassign; omit to unassign"),
+                }), &["task_id","expected_revision","action"]),
             },
             // ---- computer use (reference: ZCode CUA — a11y first, vision fallback) ----
             ToolSpec {
@@ -802,8 +853,11 @@ impl Registry {
             "schedule_create" | "schedule_list" | "schedule_view" | "schedule_edit" => {
                 self.schedule_tool(name, args, ctx).await
             }
-            "spawn_agent" | "agent_list" | "agent_interrupt" => {
+            "spawn_agent" | "agent_list" | "agent_wait" | "agent_interrupt" => {
                 self.agent_tool(name, args, ctx).await
+            }
+            "team_task_create" | "team_task_list" | "team_task_get" | "team_task_update" => {
+                self.team_tool(name, args, ctx).await
             }
             other => match self.plugin_tools.iter().find(|t| t.name == other) {
                 Some(pt) => crate::plugin::run_plugin_tool(pt, args, ctx).await,
@@ -951,7 +1005,15 @@ impl Registry {
         // 命令原文进权限链:面板上能看到真正要执行的命令,Always 规则按命令精确匹配
         ctx.authorize_shell("bash", &cwd.to_string_lossy(), Risk::Shell, command)
             .await?;
-        shell::bash(command, &cwd, timeout, ctx).await
+        shell::bash(
+            command,
+            &cwd,
+            timeout,
+            &ctx.hub,
+            &ctx.session_id,
+            &ctx.call_id,
+        )
+        .await
     }
 
     async fn todo_write(&self, a: &Value, _ctx: &ToolCtx) -> Result<ToolOutcome, HarnessError> {
@@ -1183,6 +1245,18 @@ impl Registry {
 
     // ---------------------------------------------------------------- subagents
 
+    /// The root session of the tree the caller belongs to.
+    ///
+    /// A caller that is itself a child continues its parent's tree; anything
+    /// else is the root of its own tree. This is the same rule the subagent
+    /// service uses when it spawns, so both agree on the team's identity.
+    async fn team_root(&self, sub: &crate::subagent::SharedSubagents, session: &str) -> String {
+        match sub.catalog.find_by_session(session).await {
+            Some(child) => child.root_session,
+            None => session.to_string(),
+        }
+    }
+
     async fn agent_tool(
         &self,
         name: &str,
@@ -1216,19 +1290,25 @@ impl Registry {
                 Ok(ToolOutcome::text(
                     true,
                     format!("Spawned agent {id}"),
-                    format!("Spawned child agent {id}. Its result will arrive as a message."),
+                    format!(
+                        "Spawned child agent {id} (id `{id}`). It runs in the background; call agent_wait with this id to collect its result."
+                    ),
                 ))
             }
 
             "agent_list" => {
-                let kids = sub.list().await;
-                let mut body = format!("{} child agent(s):\n", kids.len());
+                // 只列自己这棵树里的成员——进程级的全局目录会把别的会话的
+                // 子代理也倒给模型，既噪音又是信息泄漏。
+                let root = self.team_root(&sub, &ctx.session_id).await;
+                let kids = sub.tree(&root).await;
+                let mut body = format!("{} child agent(s) in this team:\n", kids.len());
                 for k in &kids {
                     body.push_str(&format!(
-                        "  [{}] {} ({}) — {:?}{}\n",
+                        "  [{}] {} ({}) — depth {} {:?}{}\n",
                         k.id,
                         k.name,
                         k.label,
+                        k.depth,
                         k.status,
                         k.result
                             .as_ref()
@@ -1242,6 +1322,57 @@ impl Registry {
                 Ok(ToolOutcome {
                     ok: true,
                     title: format!("Listed {} child agent(s)", kids.len()),
+                    display: DisplayKind::Plain(body.clone()),
+                    for_model: body,
+                })
+            }
+
+            "agent_wait" => {
+                let target = a["agent"].as_str().unwrap_or("").trim();
+                if target.is_empty() {
+                    return Err(HarnessError::Tool("`agent` must not be empty".into()));
+                }
+                let root = self.team_root(&sub, &ctx.session_id).await;
+                let child = sub.resolve_child(&root, target).await.ok_or_else(|| {
+                    HarnessError::Tool(format!(
+                        "no agent `{target}` in this team; use agent_list to see the members"
+                    ))
+                })?;
+                // 等自己会死锁：调用方就是那个子代理。
+                if child.session_id == ctx.session_id {
+                    return Err(HarnessError::Tool(
+                        "an agent cannot wait for itself".into(),
+                    ));
+                }
+                let secs = a["timeout_seconds"].as_u64().unwrap_or(300).clamp(1, 1800);
+                let outcome = sub
+                    .wait_for(&child.id, std::time::Duration::from_secs(secs))
+                    .await;
+                let body = match outcome {
+                    Some(o) => match o.status {
+                        crate::subagent::ChildStatus::Done => {
+                            format!("Agent `{}` finished:\n\n{}", child.name, o.result)
+                        }
+                        crate::subagent::ChildStatus::Failed => format!(
+                            "Agent `{}` failed: {}",
+                            child.name,
+                            o.error.unwrap_or_else(|| "unknown error".into())
+                        ),
+                        crate::subagent::ChildStatus::Cancelled => {
+                            format!("Agent `{}` was cancelled.", child.name)
+                        }
+                        crate::subagent::ChildStatus::Running => {
+                            format!("Agent `{}` is still running.", child.name)
+                        }
+                    },
+                    None => format!(
+                        "Agent `{}` did not finish within {secs}s; it may still be running. Check agent_list.",
+                        child.name
+                    ),
+                };
+                Ok(ToolOutcome {
+                    ok: true,
+                    title: format!("Waited for {}", child.name),
                     display: DisplayKind::Plain(body.clone()),
                     for_model: body,
                 })
@@ -1264,6 +1395,281 @@ impl Registry {
             other => Err(HarnessError::Tool(format!("unknown agent tool: {other}"))),
         }
     }
+
+    // ---------------------------------------------------------------- team board
+
+    /// The shared team board of the tree the caller belongs to.
+    ///
+    /// Reads through to the root session's own board: children never keep a
+    /// second copy, so the whole team sees one state.
+    async fn team_board(
+        &self,
+        sub: &crate::subagent::SharedSubagents,
+        ctx: &ToolCtx,
+    ) -> Result<(String, crate::team::TeamState), HarnessError> {
+        let root = self.team_root(sub, &ctx.session_id).await;
+        let state = ctx
+            .store
+            .get_team(&root)
+            .await
+            .ok_or_else(|| HarnessError::Other("agent teams are not enabled for this session".into()))?;
+        Ok((root, state))
+    }
+
+    /// Who is asking, in what capacity, for the team board.
+    async fn team_caller(
+        &self,
+        sub: &crate::subagent::SharedSubagents,
+        ctx: &ToolCtx,
+        root: &str,
+    ) -> crate::team::Caller {
+        // A member's name comes from the catalogue; the root has no entry.
+        let name = sub
+            .catalog
+            .find_by_session(&ctx.session_id)
+            .await
+            .map(|c| c.name)
+            .unwrap_or_else(|| "lead".to_string());
+        crate::team::Caller {
+            session_id: ctx.session_id.clone(),
+            name,
+            root_id: root.to_string(),
+            is_lead: ctx.session_id == root,
+        }
+    }
+
+    async fn team_tool(
+        &self,
+        name: &str,
+        a: &Value,
+        ctx: &ToolCtx,
+    ) -> Result<ToolOutcome, HarnessError> {
+        let Some(sub) = ctx.subagents.clone() else {
+            return Err(HarnessError::Tool("subagents are not mounted".into()));
+        };
+        match name {
+            "team_task_create" => {
+                let (root, mut state) = self.team_board(&sub, ctx).await?;
+                ctx.authorize("team_task_create", &root, Risk::Write).await?;
+                let caller = self.team_caller(&sub, ctx, &root).await;
+                let req = crate::team::CreateTask {
+                    subject: a["subject"].as_str().unwrap_or("").to_string(),
+                    description: a["description"].as_str().unwrap_or("").to_string(),
+                    blocked_by: string_array(a, "blocked_by"),
+                    write_scopes: string_array(a, "write_scopes"),
+                };
+                let view = crate::team::create_task(&mut state, &caller, &req)?;
+                ctx.store.set_team(&root, Some(state)).await?;
+                self.publish_team_event(&ctx.hub, &root, &view);
+                Ok(ToolOutcome {
+                    ok: true,
+                    title: format!("Created task {}", view.id),
+                    display: DisplayKind::Plain(format!("{}", view.subject)),
+                    for_model: format!(
+                        "Created task {} (revision {}): {}",
+                        view.id, view.revision, view.subject
+                    ),
+                })
+            }
+
+            "team_task_list" => {
+                let (_root, state) = self.team_board(&sub, ctx).await?;
+                let owner = a["owner"].as_str();
+                let tasks: Vec<crate::team::TaskView> = crate::team::board_view(&state)
+                    .into_iter()
+                    .filter(|t| {
+                        a["status"].as_str().map(|s| t.status.as_str() == s).unwrap_or(true)
+                            && owner
+                                .map(|o| {
+                                    t.owner_name.as_deref() == Some(o)
+                                        || t.owner_id.as_deref() == Some(o)
+                                })
+                                .unwrap_or(true)
+                            && a["unowned"]
+                                .as_bool()
+                                .map(|u| t.owner_id.is_none() == u)
+                                .unwrap_or(true)
+                            && a["ready"].as_bool().map(|r| t.ready == r).unwrap_or(true)
+                    })
+                    .collect();
+                let body = if tasks.is_empty() {
+                    "No shared tasks.".to_string()
+                } else {
+                    tasks
+                        .iter()
+                        .map(|t| {
+                            format!(
+                                "{} [{}] rev{} {} — owner: {}{}{}",
+                                t.id,
+                                t.status.as_str(),
+                                t.revision,
+                                t.subject,
+                                t.owner_name
+                                    .as_deref()
+                                    .or(t.owner_id.as_deref())
+                                    .unwrap_or("unowned"),
+                                if t.ready { ", ready" } else { "" },
+                                if t.blocked_by.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!(", blocked by {}", t.blocked_by.join(", "))
+                                }
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                };
+                Ok(ToolOutcome {
+                    ok: true,
+                    title: format!("Listed {} team task(s)", tasks.len()),
+                    display: DisplayKind::Plain(body.clone()),
+                    for_model: body,
+                })
+            }
+
+            "team_task_get" => {
+                let (_root, state) = self.team_board(&sub, ctx).await?;
+                let id = a["task_id"].as_str().unwrap_or("");
+                let task = state
+                    .find(id)
+                    .ok_or_else(|| HarnessError::NotFound(format!("team task `{id}`")))?;
+                let view = crate::team::project_task_view(&state, task);
+                let blockers = if view.blocked_by.is_empty() {
+                    "-".to_string()
+                } else {
+                    view.blocked_by.join(", ")
+                };
+                let scopes = if view.write_scopes.is_empty() {
+                    "-".to_string()
+                } else {
+                    view.write_scopes.join(", ")
+                };
+                let body = format!(
+                    "{} (rev {}) [{}] {}\n{}\nowner: {}\nblocked by: {}\nwrite scopes: {}\nready: {}{}",
+                    view.id,
+                    view.revision,
+                    view.status.as_str(),
+                    view.subject,
+                    view.description,
+                    view.owner_name
+                        .as_deref()
+                        .or(view.owner_id.as_deref())
+                        .unwrap_or("unowned"),
+                    blockers,
+                    scopes,
+                    view.ready,
+                    if view.write_scope_warnings.is_empty() {
+                        String::new()
+                    } else {
+                        format!("\nwarnings: {}", view.write_scope_warnings.join("; "))
+                    }
+                );
+                Ok(ToolOutcome {
+                    ok: true,
+                    title: format!("Read task {}", view.id),
+                    display: DisplayKind::Plain(body.clone()),
+                    for_model: body,
+                })
+            }
+
+            "team_task_update" => {
+                let (root, mut state) = self.team_board(&sub, ctx).await?;
+                ctx.authorize("team_task_update", &root, Risk::Write).await?;
+                let caller = self.team_caller(&sub, ctx, &root).await;
+                let action = a["action"].as_str().unwrap_or("");
+                let action = crate::team::TaskAction::parse(action).ok_or_else(|| {
+                    HarnessError::Tool(format!(
+                        "unknown task action `{action}`; expected claim | release | edit | set_dependencies | complete | reopen | reassign | delete"
+                    ))
+                })?;
+                // `owner` is a name; resolve it to a session id in this tree.
+                let owner = match a["owner"].as_str() {
+                    Some(name) if !name.is_empty() => {
+                        let child = sub
+                            .tree(&root)
+                            .await
+                            .into_iter()
+                            .find(|c| c.name == name || c.id == name)
+                            .ok_or_else(|| {
+                                HarnessError::Tool(format!(
+                                    "no agent named `{name}` in this team; use agent_list to see the members"
+                                ))
+                            })?;
+                        Some((child.session_id.clone(), child.name.clone()))
+                    }
+                    _ => None,
+                };
+                let req = crate::team::UpdateTask {
+                    task_id: a["task_id"].as_str().unwrap_or("").to_string(),
+                    expected_revision: a["expected_revision"].as_u64().unwrap_or(0),
+                    action,
+                    subject: a["subject"].as_str().map(String::from),
+                    description: a["description"].as_str().map(String::from),
+                    blocked_by: a.get("blocked_by").and_then(|v| v.as_array()).map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    }),
+                    write_scopes: a.get("write_scopes").and_then(|v| v.as_array()).map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    }),
+                    owner: owner.as_ref().map(|(id, _)| id.clone()),
+                    owner_name: owner.map(|(_, name)| name),
+                };
+                let view = crate::team::update_task(&mut state, &caller, &req)?;
+                ctx.store.set_team(&root, Some(state)).await?;
+                self.publish_team_event(&ctx.hub, &root, &view);
+                Ok(ToolOutcome {
+                    ok: true,
+                    title: format!("{} task {}", req.action.as_str(), view.id),
+                    display: DisplayKind::Plain(format!("{}", view.subject)),
+                    for_model: format!(
+                        "Task {} is now {} (revision {}).",
+                        view.id,
+                        view.status.as_str(),
+                        view.revision
+                    ),
+                })
+            }
+
+            other => Err(HarnessError::Tool(format!("unknown team tool: {other}"))),
+        }
+    }
+
+    /// Tell the UI the board changed. Published to the root session so the
+    /// team panel sees it while that conversation is open.
+    fn publish_team_event(
+        &self,
+        hub: &crate::event::EventHub,
+        root: &str,
+        view: &crate::team::TaskView,
+    ) {
+        hub.publish(
+            root,
+            "team.task",
+            serde_json::json!({
+                "taskId": view.id,
+                "status": view.status.as_str(),
+                "revision": view.revision,
+                "subject": view.subject,
+                "owner": view.owner_name.clone().or(view.owner_id.clone()),
+            }),
+        );
+    }
+}
+
+/// Read a JSON array of strings, ignoring non-string entries.
+fn string_array(a: &Value, key: &str) -> Vec<String> {
+    a.get(key)
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn truncate(s: &str, n: usize) -> String {
@@ -1590,5 +1996,30 @@ mod tests {
         let err = read_image(&p, "image/png").unwrap_err();
         assert!(err.to_string().contains("magic bytes"));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn team_tools_are_declared() {
+        let specs = Registry::new(std::path::PathBuf::from(".")).specs();
+        let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
+        for want in [
+            "team_task_create",
+            "team_task_list",
+            "team_task_get",
+            "team_task_update",
+            "agent_wait",
+        ] {
+            assert!(names.contains(&want), "{want} must be declared");
+        }
+    }
+
+    #[test]
+    fn string_array_ignores_non_strings() {
+        let v = serde_json::json!(["a", 1, "b", null]);
+        assert_eq!(string_array(&v, "x").len(), 0, "not an array at that key");
+        assert_eq!(
+            string_array(&serde_json::json!({"k": ["a", 1, "b"]}), "k"),
+            vec!["a".to_string(), "b".to_string()]
+        );
     }
 }

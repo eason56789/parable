@@ -127,7 +127,13 @@ pub struct AgentRuntime {
     running: Arc<Mutex<HashMap<String, TurnControl>>>,
     stats: Arc<Mutex<HashMap<String, SessStats>>>,
     pub schedule: Option<crate::schedule::SharedSchedule>,
-    pub subagents: Option<crate::subagent::SharedSubagents>,
+    /// The subagent service, bound late.
+    ///
+    /// The service needs a runtime (to start child turns) and the runtime
+    /// needs the service (to mount the `agent_*` tools) — a construction-time
+    /// cycle. Binding late breaks it: one service serves the whole tree, so a
+    /// child agent can spawn a grandchild.
+    pub subagents: Arc<RwLock<Option<crate::subagent::SharedSubagents>>>,
     /// Persistent usage journal — one record per turn, for the 使用统计 page.
     pub usage: Option<Arc<crate::usage::UsageJournal>>,
     /// Computer use bridge (CDP browser control), shared across turns.
@@ -136,14 +142,21 @@ pub struct AgentRuntime {
 
 impl AgentRuntime {
     /// Attach the optional capability services so tools can reach them.
-    pub fn with_services(
+    pub async fn with_services(
         mut self,
         schedule: Option<crate::schedule::SharedSchedule>,
         subagents: Option<crate::subagent::SharedSubagents>,
     ) -> Self {
         self.schedule = schedule;
-        self.subagents = subagents;
+        if let Some(s) = subagents {
+            *self.subagents.write().await = Some(s);
+        }
         self
+    }
+
+    /// The bound subagent service, if any.
+    pub async fn subagents(&self) -> Option<crate::subagent::SharedSubagents> {
+        self.subagents.read().await.clone()
     }
 
     /// Attach the usage journal. Set before the runtime is cloned into the
@@ -153,7 +166,7 @@ impl AgentRuntime {
         self
     }
 
-    fn tool_ctx(
+    async fn tool_ctx(
         &self,
         workspace: &PathBuf,
         opts: &TurnOptions,
@@ -172,7 +185,8 @@ impl AgentRuntime {
             session_id: session_id.to_string(),
             call_id: call_id.to_string(),
             schedule: self.schedule.clone(),
-            subagents: self.subagents.clone(),
+            subagents: self.subagents.read().await.clone(),
+            store: self.store.clone(),
             runtime: Some(Arc::new(self.clone()) as Arc<dyn crate::tools::TurnStarter>),
             search_key: search_key.to_string(),
             search_pref: search_pref.to_string(),
@@ -267,7 +281,7 @@ impl AgentRuntime {
             running: Arc::new(Mutex::new(HashMap::new())),
             stats: Arc::new(Mutex::new(HashMap::new())),
             schedule: None,
-            subagents: None,
+            subagents: Arc::new(RwLock::new(None)),
             usage: None,
             computer: Arc::new(crate::computer::ComputerBridge::new()),
         }
@@ -736,7 +750,30 @@ When it is achieved, say so clearly in your reply.",
             system.push_str("\n\n## Plugin instructions\n");
             system.push_str(&plugin_prompt);
         }
+        // Agent Teams: the shared task board and the collaboration policy.
+        // Must live here rather than in `build_system_prompt`, so it survives
+        // a `systemPromptRaw` override — the same reason the goal block does.
+        // The board lives with the *root* session, so a child resolves its
+        // root first: the whole tree then sees one policy.
+        let team_root = self.team_root_of(session_id).await;
+        if let Some(team) = self.store.get_team(&team_root).await.filter(|t| t.enabled) {
+            system.push_str(&team_policy(team.live_tasks().len()));
+        }
         system
+    }
+
+    /// The root session of the tree `session_id` belongs to.
+    ///
+    /// A session the catalogue knows as a child continues its parent's tree;
+    /// anything else is the root of its own tree.
+    async fn team_root_of(&self, session_id: &str) -> String {
+        match self.subagents.read().await.as_ref() {
+            Some(sub) => match sub.catalog.find_by_session(session_id).await {
+                Some(child) => child.root_session,
+                None => session_id.to_string(),
+            },
+            None => session_id.to_string(),
+        }
     }
 
     /// `compose_system` resolved against the configured workspace — what the
@@ -1089,7 +1126,7 @@ When it is achieved, say so clearly in your reply.",
                     )> = Vec::new();
                     for (id, name, args) in batch {
                         let reg = Arc::clone(&registry);
-                        let ctx = self.tool_ctx(&workspace, &opts, session_id, &id, &search_key, &search_pref);
+                        let ctx = self.tool_ctx(&workspace, &opts, session_id, &id, &search_key, &search_pref).await;
                         let t0 = std::time::Instant::now();
                         handles.push((id.clone(), name.clone(), tokio::spawn(async move {
                             let r = reg.execute(&name, &args, &ctx).await;
@@ -1120,7 +1157,7 @@ When it is achieved, say so clearly in your reply.",
                     let (id, name, args) = calls[i].clone();
                     i += 1;
                     let reg = Arc::clone(&registry);
-                    let ctx = self.tool_ctx(&workspace, &opts, session_id, &id, &search_key, &search_pref);
+                    let ctx = self.tool_ctx(&workspace, &opts, session_id, &id, &search_key, &search_pref).await;
                     let t0 = std::time::Instant::now();
                     let r = reg.execute(&name, &args, &ctx).await;
                     tool_ms += t0.elapsed().as_millis() as u64;
@@ -1255,6 +1292,7 @@ When it is achieved, say so clearly in your reply.",
                 cache_read: turn_usage.cache_read_input_tokens,
                 cache_write: turn_usage.cache_creation_input_tokens,
                 wall_ms: wall,
+                turns: 1,
             })
             .await;
         }
@@ -1674,6 +1712,40 @@ async fn inline_attachments(atts: &[Attachment]) -> String {
         out.push_str(&format!("\n- {} ({}, {} bytes) — read it with read_file\n", a.name, a.path, a.size));
     }
     out
+}
+
+/// The collaboration policy shown to every member of an Agent Team.
+///
+/// Modelled on DeepSeek Harness's `TEAM_POLICY`: the shared working
+/// directory, the advisory write scopes, the claim → work → complete flow,
+/// and the rule that the root must collect its teammates' results before
+/// giving the final answer.
+fn team_policy(task_count: usize) -> String {
+    let mut s = String::from(
+        "\n\n## Agent team\n\
+You are working in an agent team. The team lead and all teammates share the same working \
+directory and filesystem: edits are immediately visible to every member.\n\
+\n\
+Split write work into disjoint scopes and record the expected write scopes on shared tasks \
+(`write_scopes`). A write-scope overlap is a warning, not a lock — it tells you and the \
+other owner that two tasks may touch the same files.\n\
+\n\
+Shared-task workflow: list tasks, get the task, claim it with its current revision, do the \
+work, then complete it. A task is ready to claim only when every task it depends on has \
+completed. You may only change a task you own; the team lead may also reassign tasks. \
+Every change needs the task's current revision as a precondition.\n\
+\n\
+Use the names returned by `agent_list` as the owner when assigning a task. \
+`spawn_agent` starts a teammate and returns immediately — call `agent_wait` to collect its \
+result. The team lead must wait for the teammates it depends on before giving the final \
+answer; do not answer from a guess about what a teammate would have found.\n",
+    );
+    if task_count > 0 {
+        s.push_str(&format!(
+            "\nThere {task_count} shared task(s) on the board right now.\n"
+        ));
+    }
+    s
 }
 
 /// 构造内置 system prompt。配置由调用方传入（内存 `Arc<RwLock<Config>>`

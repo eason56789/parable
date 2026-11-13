@@ -10,6 +10,10 @@
 //!   out-of-process backends upstream (ACP / Codex / Claude Code / SDK) are not ported.
 //! - Children are one-shot; `prepareContinuable` follow-up turns are not ported.
 //! - `outputSchema` / `agentPreset` capability flags are not ported.
+//!
+//! Tree shape: every child records the session that spawned it, its own depth,
+//! and the root of its tree. The root session identifies the Agent Teams board
+//! the tree shares (`crate::team`). Nesting is allowed up to [`MAX_DEPTH`].
 
 use crate::error::HarnessError;
 use crate::event::EventHub;
@@ -17,7 +21,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{watch, Mutex, RwLock};
+
+/// How deep a delegation chain may go. The root session is depth 0, so a
+/// great-grandchild is depth 3. Beyond this, `spawn_agent` is refused.
+pub const MAX_DEPTH: u32 = 3;
 
 /// Where the child's result is delivered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -27,6 +35,14 @@ pub enum Delivery {
     Parent,
     /// Return the result to the caller only (used by nested delegation).
     Caller,
+}
+
+/// How a child finished.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChildOutcome {
+    pub status: ChildStatus,
+    pub result: String,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,6 +86,15 @@ pub struct Child {
     pub status: ChildStatus,
     #[serde(rename = "sessionId")]
     pub session_id: String,
+    /// The session that spawned this child.
+    #[serde(default, rename = "parentSession")]
+    pub parent_session: String,
+    /// The root session of this child's tree. Also the id of the shared team board.
+    #[serde(default, rename = "rootSession")]
+    pub root_session: String,
+    /// 0 for the root session, 1 for its direct children, and so on.
+    #[serde(default)]
+    pub depth: u32,
     #[serde(rename = "startedAt")]
     pub started_at: String,
     #[serde(rename = "endedAt", default)]
@@ -85,7 +110,10 @@ pub struct Child {
 
 // ---------------------------------------------------------------- catalog
 
-/// Every child the parent created, discoverable whether running or settled.
+/// Every child the process created, discoverable whether running or settled.
+///
+/// The map is flat, but each record carries its parent, so a tree can be
+/// reconstructed by walking `parent_session` links.
 pub struct ChildCatalog {
     children: RwLock<HashMap<String, Child>>,
     order: Mutex<Vec<String>>,
@@ -108,10 +136,41 @@ impl ChildCatalog {
         self.children.read().await.get(id).cloned()
     }
 
+    /// The child whose own session is `session_id`, if any.
+    pub async fn find_by_session(&self, session_id: &str) -> Option<Child> {
+        self.children
+            .read()
+            .await
+            .values()
+            .find(|c| c.session_id == session_id)
+            .cloned()
+    }
+
     pub async fn list(&self) -> Vec<Child> {
         let order = self.order.lock().await.clone();
         let map = self.children.read().await;
         order.iter().filter_map(|id| map.get(id).cloned()).collect()
+    }
+
+    /// The direct children of one session.
+    pub async fn children_of(&self, parent: &str) -> Vec<Child> {
+        self.list()
+            .await
+            .into_iter()
+            .filter(|c| c.parent_session == parent)
+            .collect()
+    }
+
+    /// Every descendant of one session, at any depth.
+    ///
+    /// A child records the root of its own tree, so the whole subtree is the
+    /// set of records whose root matches. Direct children included.
+    pub async fn descendants_of(&self, root: &str) -> Vec<Child> {
+        self.list()
+            .await
+            .into_iter()
+            .filter(|c| c.root_session == root)
+            .collect()
     }
 
     pub async fn update<F: FnOnce(&mut Child)>(&self, id: &str, f: F) {
@@ -120,14 +179,17 @@ impl ChildCatalog {
         }
     }
 
-    /// Allocate the first free `agent-N` name.
-    pub async fn next_free_name(&self) -> String {
+    /// Allocate the first free `agent-N` **within one tree**, so two
+    /// independent trees can each have an `agent-1` without colliding.
+    ///
+    /// Scoped by the tree root, not the immediate parent: a grandchild and
+    /// its uncle share a tree and must not both be offered `agent-1`.
+    pub async fn next_free_name(&self, root: &str) -> String {
         let taken: Vec<String> = self
-            .children
-            .read()
+            .descendants_of(root)
             .await
-            .values()
-            .map(|c| c.name.clone())
+            .into_iter()
+            .map(|c| c.name)
             .collect();
         for n in 1..1000 {
             let cand = format!("agent-{n}");
@@ -162,7 +224,13 @@ pub struct SubagentService {
     /// 注入的共享 AgentRuntime（`with_runtime`，server.rs 装配时调用）：
     /// 用于子 turn 完成判定（`is_running`）、超时/取消时终止子 turn
     /// （`interrupt`），以及继承父 turn 的 `TurnOptions`（权限模式等）。
-    runtime: Option<Arc<crate::agent::AgentRuntime>>,
+    ///
+    /// 后绑定（`RwLock`）而非构造期字段：runtime 里挂着 subagents，而
+    /// subagents 又需要 runtime——两者互相持有会形成构造期死循环。用后绑定
+    /// 打破它，一套 subagents 服务即可服务整棵树（子代理也能再 spawn）。
+    runtime: Arc<RwLock<Option<Arc<crate::agent::AgentRuntime>>>>,
+    /// 每个子代理的完成通道：`agent_wait` 在这里挂起，直到子代理收尾。
+    outcomes: Arc<RwLock<HashMap<String, watch::Sender<Option<ChildOutcome>>>>>,
 }
 
 impl SubagentService {
@@ -171,14 +239,42 @@ impl SubagentService {
             catalog: Arc::new(ChildCatalog::new()),
             hub,
             running: Arc::new(Mutex::new(HashMap::new())),
-            runtime: None,
+            runtime: Arc::new(RwLock::new(None)),
+            outcomes: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
     /// 注入共享 AgentRuntime（builder；`new()` 签名保持不变）。
-    pub fn with_runtime(mut self, rt: Arc<crate::agent::AgentRuntime>) -> Self {
-        self.runtime = Some(rt);
+    ///
+    /// The runtime slot is late-bound, so this cannot await: use
+    /// [`SubagentService::set_runtime`] after construction instead. This
+    /// builder exists for callers that already hold an `Arc<AgentRuntime>`
+    /// and want the service ready in one expression.
+    pub fn with_runtime(self, rt: Arc<crate::agent::AgentRuntime>) -> Self {
+        let runtime = self.runtime.clone();
+        // The lock is uncontended at construction time, so blocking here is
+        // safe and keeps the builder synchronous.
+        let mut guard = runtime.blocking_write();
+        *guard = Some(rt);
+        drop(guard);
         self
+    }
+
+    /// 后绑定 AgentRuntime：装配顺序是 runtime → subagents → runtime，
+    /// 中间那一步用这个方法完成，不形成构造期环。
+    pub async fn set_runtime(&self, rt: Arc<crate::agent::AgentRuntime>) {
+        *self.runtime.write().await = Some(rt);
+    }
+
+    /// The root session and depth of `parent_session`'s tree.
+    ///
+    /// A session that the catalog knows as a child continues its own tree;
+    /// any other session is the root of a new tree.
+    async fn lineage(&self, parent_session: &str) -> (String, u32) {
+        match self.catalog.find_by_session(parent_session).await {
+            Some(parent) => (parent.root_session, parent.depth + 1),
+            None => (parent_session.to_string(), 1),
+        }
     }
 
     /// Start a child and return its catalog id immediately.
@@ -195,11 +291,11 @@ impl SubagentService {
         if req.label.trim().is_empty() {
             return Err(HarnessError::Other("label must not be empty".into()));
         }
-        // Delivery::Caller 目前结果无处投递——在校验阶段直接拒绝，绝不静默丢失。
-        if req.delivery == Some(Delivery::Caller) {
-            return Err(HarnessError::Other(
-                "Caller 结果回传未支持（结果无处投递），请改用 Delivery::Parent".into(),
-            ));
+        let (root_session, depth) = self.lineage(parent_session).await;
+        if depth > MAX_DEPTH {
+            return Err(HarnessError::Other(format!(
+                "delegation depth limit reached: this session is already at depth {depth} (max {MAX_DEPTH})"
+            )));
         }
         let name = match &req.name {
             Some(n) => {
@@ -210,7 +306,7 @@ impl SubagentService {
                 }
                 n.clone()
             }
-            None => self.catalog.next_free_name().await,
+            None => self.catalog.next_free_name(&root_session).await,
         };
 
         // The child gets its own session so its history is isolated from the parent.
@@ -229,6 +325,9 @@ impl SubagentService {
             task: req.task.clone(),
             status: ChildStatus::Running,
             session_id: child_session.clone(),
+            parent_session: parent_session.to_string(),
+            root_session: root_session.clone(),
+            depth,
             started_at: crate::event::now_ms().to_string(),
             ended_at: None,
             result: None,
@@ -236,6 +335,9 @@ impl SubagentService {
             tool_calls: 0,
         };
         self.catalog.add(child.clone()).await;
+        // 完成通道：先建好再放子代理，避免"子代理已完成但等待者还没注册"。
+        let (tx, _rx) = watch::channel(None);
+        self.outcomes.write().await.insert(child_id.clone(), tx);
         self.hub.publish(
             parent_session,
             "subagent.start",
@@ -271,7 +373,7 @@ impl SubagentService {
         // 子 turn 选项：优先继承父 turn 的 TurnOptions（permission_mode、
         // thinking_level、plan_mode 一并继承，不再硬编码 "full"）；模型选择
         // 用 req.model（为空则继承父的）。未注入 runtime 时退回 starter 的默认。
-        let child_opts: Option<crate::agent::TurnOptions> = match self.runtime.as_ref() {
+        let child_opts: Option<crate::agent::TurnOptions> = match self.runtime.read().await.as_ref() {
             Some(rt) => {
                 let mut o = rt
                     .current_turn_options(parent_session)
@@ -300,6 +402,7 @@ impl SubagentService {
         let delivery = req.delivery.unwrap_or(Delivery::Parent);
         let running = self.running.clone();
         let runtime = self.runtime.clone();
+        let outcomes = self.outcomes.clone();
 
         tokio::spawn(async move {
             // A child turn is a normal turn on its own session.
@@ -320,10 +423,13 @@ impl SubagentService {
             let mut tool_calls_seen: u64 = 0;
             let mut timed_out = false;
             let mut polls = 0u64;
+            // 轮询用的 store 复用一个实例：每次新建 SessionStore 都会重新读盘
+            // 解析会话 JSON，500ms 一次的开销没有必要。
+            let poll_store = crate::session::SessionStore::new();
             loop {
                 if cancel.is_cancelled() {
                     // 父侧取消：同时终止子 turn，避免留下孤儿轮继续跑。
-                    if let Some(rt) = runtime.as_ref() {
+                    if let Some(rt) = runtime.read().await.as_ref() {
                         rt.interrupt(&child_sid).await;
                     }
                     break;
@@ -333,14 +439,14 @@ impl SubagentService {
                     break;
                 }
                 polls += 1;
-                let msgs = store_neutral(&child_sid).await;
+                let msgs = poll_store.neutral_messages(&child_sid).await;
                 // 统计子会话消息里的 ToolUse parts 数，更新目录计数。
                 let tc = count_tool_uses(&msgs);
                 if tc != tool_calls_seen {
                     tool_calls_seen = tc;
                     cat.update(&cid, |c| c.tool_calls = tc).await;
                 }
-                match runtime.as_ref() {
+                match runtime.read().await.as_ref() {
                     Some(rt) => {
                         if !rt.is_running(&child_sid).await {
                             // 子 turn 已结束：取最后一条 assistant 消息中的非空 Text。
@@ -365,7 +471,7 @@ impl SubagentService {
 
             let (status, err) = if timed_out {
                 // 超时：先 interrupt 子 turn 并等它清槽，再标 Failed——不留孤儿运行槽。
-                if let Some(rt) = runtime.as_ref() {
+                if let Some(rt) = runtime.read().await.as_ref() {
                     rt.interrupt(&child_sid).await;
                     for _ in 0..20 {
                         if !rt.is_running(&child_sid).await {
@@ -403,6 +509,16 @@ impl SubagentService {
 
             running.lock().await.remove(&cid);
 
+            // 唤醒所有等待者（agent_wait）：终态经通道广播，等待者立刻返回。
+            let outcome = ChildOutcome {
+                status,
+                result: summary.clone(),
+                error: err.clone(),
+            };
+            if let Some(tx) = outcomes.read().await.get(&cid) {
+                let _ = tx.send(Some(outcome));
+            }
+
             let payload = json!({
                 "agentId": cid, "name": cname, "label": label,
                 "status": match status {
@@ -416,12 +532,32 @@ impl SubagentService {
             });
             hub.publish(&parent_sid, "subagent.end", payload.clone());
             if delivery == Delivery::Parent {
+                // 把结果写进父会话的历史，父代理下一轮就能看到；本轮内要立刻
+                // 看到则用 agent_wait（它把结果作为 tool_result 回填给模型）。
+                let text = format!(
+                    "[subagent `{}` (task: {}) finished]\n\n{}",
+                    cname,
+                    label,
+                    payload["result"].as_str().unwrap_or_default()
+                );
+                let deliver_store = crate::session::SessionStore::new();
+                let _ = deliver_store
+                    .append_message(
+                        &parent_sid,
+                        crate::session::StoredMessage {
+                            role: "user".into(),
+                            parts: json!({"User": [{"Text": text}]}),
+                            displays: Vec::new(),
+                            created_at: crate::event::now_ms(),
+                        },
+                    )
+                    .await;
                 hub.publish(
                     &parent_sid,
                     "subagent.result",
                     json!({
                         "agentId": cid, "name": cname, "label": label,
-                        "result": summary, "error": err,
+                        "result": payload["result"], "error": err,
                     }),
                 );
             }
@@ -430,13 +566,54 @@ impl SubagentService {
         Ok(child_id)
     }
 
+    /// Wait for one child of `parent_session`'s tree to finish.
+    ///
+    /// Returns the child's outcome, or `None` if the timeout elapsed first.
+    pub async fn wait_for(
+        &self,
+        id: &str,
+        timeout: std::time::Duration,
+    ) -> Option<ChildOutcome> {
+        let mut rx = {
+            let map = self.outcomes.read().await;
+            map.get(id)?.subscribe()
+        };
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            // 先看当前值再看是否变化：watch 保留最新值，不会漏掉"已完成"。
+            if let Some(outcome) = rx.borrow().clone() {
+                return Some(outcome);
+            }
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return None;
+            }
+            if tokio::time::timeout(remaining, rx.changed()).await.is_err() {
+                return None;
+            }
+        }
+    }
+
+    /// The child id addressed by `ref` — a catalog id, an agent name, or a
+    /// child session id, restricted to the tree rooted at `root_session`.
+    pub async fn resolve_child(&self, root_session: &str, r: &str) -> Option<Child> {
+        let tree = self.catalog.descendants_of(root_session).await;
+        if let Some(c) = tree.iter().find(|c| c.id == r) {
+            return Some(c.clone());
+        }
+        if let Some(c) = tree.iter().find(|c| c.name == r) {
+            return Some(c.clone());
+        }
+        tree.iter().find(|c| c.session_id == r).cloned()
+    }
+
     pub async fn interrupt(&self, child_id: &str) -> bool {
         let c = self.running.lock().await.get(child_id).cloned();
         if let Some(c) = c {
             c.cancel();
             // 同步取消子会话的 turn：只停轮询不停子 turn 会留下孤儿轮继续跑。
             if let Some(ch) = self.catalog.get(child_id).await {
-                if let Some(rt) = &self.runtime {
+                if let Some(rt) = self.runtime.read().await.as_ref() {
                     rt.interrupt(&ch.session_id).await;
                 }
             }
@@ -448,6 +625,15 @@ impl SubagentService {
                     }
                 })
                 .await;
+            // 唤醒等待者：被中断的子代理不该让 agent_wait 一直挂到超时。
+            let outcome = ChildOutcome {
+                status: ChildStatus::Cancelled,
+                result: String::new(),
+                error: Some("cancelled by parent".to_string()),
+            };
+            if let Some(tx) = self.outcomes.read().await.get(child_id) {
+                let _ = tx.send(Some(outcome));
+            }
             true
         } else {
             false
@@ -457,11 +643,11 @@ impl SubagentService {
     pub async fn list(&self) -> Vec<Child> {
         self.catalog.list().await
     }
-}
 
-async fn store_neutral(session_id: &str) -> Vec<crate::provider::Msg> {
-    let s = crate::session::SessionStore::new();
-    s.neutral_messages(session_id).await
+    /// Every descendant of one tree root.
+    pub async fn tree(&self, root_session: &str) -> Vec<Child> {
+        self.catalog.descendants_of(root_session).await
+    }
 }
 
 fn last_text(m: &crate::provider::Msg) -> Option<String> {
@@ -527,7 +713,7 @@ mod tests {
     #[tokio::test]
     async fn catalog_allocates_free_names() {
         let cat = ChildCatalog::new();
-        assert_eq!(cat.next_free_name().await, "agent-1");
+        assert_eq!(cat.next_free_name("s1").await, "agent-1");
         cat.add(Child {
             id: "x".into(),
             name: "agent-1".into(),
@@ -535,6 +721,9 @@ mod tests {
             task: "t".into(),
             status: ChildStatus::Running,
             session_id: "s".into(),
+            parent_session: "s1".into(),
+            root_session: "s1".into(),
+            depth: 1,
             started_at: "0".into(),
             ended_at: None,
             result: None,
@@ -542,8 +731,220 @@ mod tests {
             tool_calls: 0,
         })
         .await;
-        assert_eq!(cat.next_free_name().await, "agent-2");
+        assert_eq!(cat.next_free_name("s1").await, "agent-2");
         assert_eq!(cat.list().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn names_are_scoped_per_tree() {
+        let cat = ChildCatalog::new();
+        // Two independent trees may each have an `agent-1`.
+        assert_eq!(cat.next_free_name("root-a").await, "agent-1");
+        assert_eq!(cat.next_free_name("root-b").await, "agent-1");
+    }
+    #[tokio::test]
+    async fn descendants_follow_the_root() {
+        let cat = ChildCatalog::new();
+        let mk = |id: &str, parent: &str, root: &str, depth: u32| Child {
+            id: id.into(),
+            name: id.into(),
+            label: "l".into(),
+            task: "t".into(),
+            status: ChildStatus::Running,
+            session_id: format!("{id}-sess"),
+            parent_session: parent.into(),
+            root_session: root.into(),
+            depth,
+            started_at: "0".into(),
+            ended_at: None,
+            result: None,
+            error: None,
+            tool_calls: 0,
+        };
+        cat.add(mk("c1", "root", "root", 1)).await;
+        cat.add(mk("c2", "c1-sess", "root", 2)).await;
+        cat.add(mk("other", "root2", "root2", 1)).await;
+
+        let tree = cat.descendants_of("root").await;
+        assert_eq!(tree.len(), 2, "the grandchild and the child, not the other tree");
+        assert!(tree.iter().all(|c| c.root_session == "root"));
+
+        assert_eq!(cat.children_of("root").await.len(), 1);
+        assert_eq!(cat.children_of("c1-sess").await.len(), 1);
+        assert_eq!(cat.find_by_session("c2-sess").await.unwrap().id, "c2");
+    }
+
+    #[tokio::test]
+    async fn lineage_tracks_nesting() {
+        let svc = SubagentService::new(EventHub::new());
+        // An unknown session is a tree root.
+        assert_eq!(svc.lineage("s_root").await, ("s_root".to_string(), 1));
+        svc.catalog
+            .add(Child {
+                id: "c1".into(),
+                name: "agent-1".into(),
+                label: "l".into(),
+                task: "t".into(),
+                status: ChildStatus::Running,
+                session_id: "child_sess".into(),
+                parent_session: "s_root".into(),
+                root_session: "s_root".into(),
+                depth: 1,
+                started_at: "0".into(),
+                ended_at: None,
+                result: None,
+                error: None,
+                tool_calls: 0,
+            })
+            .await;
+        // A child of that child is depth 2, same root.
+        assert_eq!(
+            svc.lineage("child_sess").await,
+            ("s_root".to_string(), 2)
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_child_accepts_id_name_and_session() {
+        let svc = SubagentService::new(EventHub::new());
+        svc.catalog
+            .add(Child {
+                id: "sa_1".into(),
+                name: "researcher".into(),
+                label: "l".into(),
+                task: "t".into(),
+                status: ChildStatus::Running,
+                session_id: "sess-1".into(),
+                parent_session: "root".into(),
+                root_session: "root".into(),
+                depth: 1,
+                started_at: "0".into(),
+                ended_at: None,
+                result: None,
+                error: None,
+                tool_calls: 0,
+            })
+            .await;
+        assert_eq!(
+            svc.resolve_child("root", "sa_1").await.unwrap().name,
+            "researcher"
+        );
+        assert_eq!(
+            svc.resolve_child("root", "researcher").await.unwrap().id,
+            "sa_1"
+        );
+        assert_eq!(
+            svc.resolve_child("root", "sess-1").await.unwrap().id,
+            "sa_1"
+        );
+        // A different tree cannot address it.
+        assert!(svc.resolve_child("other-root", "researcher").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn wait_returns_the_settled_outcome() {
+        let svc = Arc::new(SubagentService::new(EventHub::new()));
+        let (tx, _rx) = watch::channel(None);
+        svc.outcomes.write().await.insert("c1".into(), tx.clone());
+        let svc2 = svc.clone();
+        let waiter = tokio::spawn(async move {
+            svc2.wait_for("c1", std::time::Duration::from_secs(5)).await
+        });
+        // Let the waiter subscribe before the outcome lands.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        tx.send(Some(ChildOutcome {
+            status: ChildStatus::Done,
+            result: "the answer".into(),
+            error: None,
+        }))
+        .unwrap();
+        let outcome = waiter.await.unwrap().expect("outcome");
+        assert_eq!(outcome.result, "the answer");
+        assert_eq!(outcome.status, ChildStatus::Done);
+    }
+
+    #[tokio::test]
+    async fn wait_times_out_cleanly() {
+        let svc = SubagentService::new(EventHub::new());
+        let (tx, _rx) = watch::channel(None);
+        svc.outcomes.write().await.insert("c1".into(), tx);
+        let out = svc
+            .wait_for("c1", std::time::Duration::from_millis(100))
+            .await;
+        assert!(out.is_none(), "timeout returns None, never hangs");
+    }
+
+    #[tokio::test]
+    async fn wait_on_an_unknown_child_returns_none() {
+        let svc = SubagentService::new(EventHub::new());
+        assert!(svc
+            .wait_for("nope", std::time::Duration::from_millis(50))
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn spawn_beyond_the_depth_cap_is_refused() {
+        let svc = SubagentService::new(EventHub::new());
+        // A starter that never runs: the spawn call itself is what we test.
+        struct NoopStarter;
+        #[async_trait::async_trait]
+        impl crate::tools::TurnStarter for NoopStarter {
+            async fn start_child(
+                &self,
+                _session_id: &str,
+                _prompt: &str,
+                _model: &str,
+            ) -> Result<String, HarnessError> {
+                Ok("t".into())
+            }
+        }
+        let starter: Arc<dyn crate::tools::TurnStarter> = Arc::new(NoopStarter);
+
+        // Walk the tree down to the cap.
+        let mut parent = "root".to_string();
+        for depth in 1..=crate::subagent::MAX_DEPTH {
+            let id = svc
+                .spawn(
+                    starter.clone(),
+                    &parent,
+                    ".",
+                    SpawnRequest {
+                        label: format!("l{depth}"),
+                        name: None,
+                        task: "t".into(),
+                        cwd: None,
+                        seed_history: false,
+                        model: String::new(),
+                        delivery: Some(Delivery::Parent),
+                    },
+                )
+                .await
+                .expect("spawn inside the cap must work");
+            let child = svc.catalog.get(&id).await.expect("child exists");
+            assert_eq!(child.depth, depth);
+            assert_eq!(child.root_session, "root");
+            parent = child.session_id;
+        }
+        // One more level is refused with a clear message.
+        let err = svc
+            .spawn(
+                starter,
+                &parent,
+                ".",
+                SpawnRequest {
+                    label: "too deep".into(),
+                    name: None,
+                    task: "t".into(),
+                    cwd: None,
+                    seed_history: false,
+                    model: String::new(),
+                    delivery: Some(Delivery::Parent),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("depth limit"), "got: {err}");
     }
 
     #[test]

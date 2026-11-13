@@ -498,6 +498,114 @@ select.mp-in{appearance:none;background-image:linear-gradient(45deg,transparent 
 @media(max-width:760px){.tabs{display:none}#body{position:relative}#side{position:absolute;z-index:30;top:0;bottom:0;left:0;width:280px!important;background:var(--side);box-shadow:0 0 40px rgba(0,0,0,.2)}#scr{display:block;position:absolute;inset:0;z-index:29;background:rgba(0,0,0,.35);transition:opacity calc(.5s * var(--animd))}body.sc #scr{opacity:0;pointer-events:none}body.sc #side{transform:translateX(-102%)}body.sc #sin{opacity:1}.gr{font-size:30px}#card{width:100vw;height:100vh;height:100dvh;border-radius:0;flex-direction:column}#snav{width:auto;flex-direction:row;padding:12px;overflow-x:auto}#snav h3{display:none}.sr .ct{width:150px}}
 @media(prefers-reduced-motion:reduce){.msg,.pn,.sr,.rc,.c,.shim,.pop.open>*,.es.fx{animation:none}}
 
+/* ==================================================================
+   侧边栏(side pane)：右侧可折叠面板 + 标签栏 + 启动器
+   ================================================================== */
+#sdp{flex:none;width:420px;max-width:50vw;overflow:hidden;background:var(--bg);border-left:.5px solid var(--line);
+    display:flex;flex-direction:column;transition:width calc(.45s * var(--animd)) cubic-bezier(.32,.72,0,1),opacity calc(.3s * var(--animd))}
+body.sp0 #sdp{width:0;opacity:0;border-left-color:transparent}
+/* 全屏化：面板盖住窗口主体，只留顶栏 */
+body.spmax #sdp{position:fixed;inset:46px 0 0 0;width:100vw;max-width:none;z-index:20;border-left:0}
+.sptabs{flex:none;display:flex;align-items:stretch;gap:2px;padding:5px 6px 0;border-bottom:.5px solid var(--line);overflow-x:auto;overflow-y:hidden;scrollbar-width:none}
+.sptabs::-webkit-scrollbar{display:none}
+.sptl{display:flex;align-items:stretch;gap:2px;flex:none}
+.sptab{display:flex;align-items:center;gap:6px;flex:1 1 9.75rem;min-width:64px;max-width:156px;height:30px;padding:0 7px 0 9px;
+    border-radius:8px 8px 0 0;background:none;border:0;color:var(--fg2);font:12.5px var(--sans);cursor:pointer;white-space:nowrap;
+    transition:background-color calc(.2s * var(--animd)),color calc(.2s * var(--animd))}
+.sptab:hover{background:var(--hov);color:var(--fg)}
+.sptab.on{background:var(--hov);color:var(--fg)}
+.sptab>svg{width:14px;height:14px;flex:none;opacity:.75}
+.sptab .t{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis}
+.sptab .x{width:17px;height:17px;flex:none;border-radius:5px;display:grid;place-items:center;opacity:0;transition:opacity calc(.2s * var(--animd)),background-color calc(.2s * var(--animd))}
+.sptab:hover .x,.sptab.on .x{opacity:.6}
+.sptab .x:hover{opacity:1;background:var(--line)}
+.sptab .x svg{width:11px;height:11px}
+.spb{flex:none;width:30px;height:30px;margin:0 2px 3px 4px;border:0;background:none;color:var(--fg2);border-radius:8px;display:grid;place-items:center;cursor:pointer;transition:background-color calc(.2s * var(--animd)),color calc(.2s * var(--animd))}
+.spb:hover{background:var(--hov);color:var(--fg)}
+.spb svg{width:16px;height:16px}
+.spbody{flex:1;min-height:0;overflow:auto;padding:0}
+.spbody>*{animation:spIn calc(.4s * var(--animd)) cubic-bezier(.16,.84,.3,1) both}
+@keyframes spIn{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}
+/* 启动器（新标签页）：标题 + 两列卡片 */
+.spl{padding:26px 22px 34px;max-width:760px;margin:0 auto}
+.spl h2{margin:0 0 4px;font:600 20px var(--serif);color:var(--fg)}
+.spl>p{margin:0 0 22px;color:var(--fg2);font-size:12.5px}
+.splg{display:grid;grid-template-columns:1fr 1fr;gap:2px 22px}
+@media(max-width:640px){.splg{grid-template-columns:1fr}}
+.spcard{display:flex;align-items:center;gap:12px;padding:9px 8px;border-radius:11px;cursor:pointer;text-align:left;
+    border:0;background:none;color:var(--fg);font:inherit;transition:background-color calc(.2s * var(--animd))}
+.spcard:hover{background:var(--hov)}
+.spic{width:46px;height:46px;flex:none;border-radius:11px;background:var(--hov);display:grid;place-items:center;color:var(--fg2)}
+.spic svg{width:22px;height:22px}
+.spcd{flex:1;min-width:0}
+.spcd b{display:block;font:500 14px var(--sans);color:var(--fg)}
+.spcd small{display:block;margin-top:2px;color:var(--fg2);font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.spop{flex:none;padding:4px 11px;border-radius:999px;border:0;background:var(--hov);color:var(--fg2);font:12px var(--sans);cursor:pointer;transition:background-color calc(.2s * var(--animd)),color calc(.2s * var(--animd))}
+.spop:hover{background:var(--fg);color:var(--bg)}
+/* 面板通用骨架 */
+.sph2{padding:16px 16px 8px;font:600 14px var(--serif)}
+.sph3{margin:0;padding:14px 16px 6px;color:var(--fg2);font:11.5px var(--sans);letter-spacing:.04em;text-transform:uppercase}
+.spempty{padding:26px 16px;color:var(--fg2);font-size:12.5px;text-align:center;line-height:1.6}
+.spbar{display:flex;align-items:center;gap:6px;padding:8px 10px;border-bottom:.5px solid var(--line);position:sticky;top:0;background:var(--bg);z-index:2}
+.spbar input{flex:1;min-width:0;padding:6px 10px;border:1px solid var(--line);border-radius:8px;background:var(--input);color:var(--fg);font:12.5px var(--sans);outline:0}
+.spbar input:focus{border-color:var(--fg2)}
+.spbtn{border:1px solid var(--line);background:var(--input);color:var(--fg);border-radius:8px;padding:6px 11px;font:12.5px var(--sans);cursor:pointer;flex:none;transition:background-color calc(.2s * var(--animd))}
+.spbtn:hover{background:var(--hov)}
+.spbtn.pri{background:var(--fg);color:var(--bg);border-color:var(--fg)}
+.spbtn:disabled{opacity:.45;cursor:default}
+/* 文件面板 */
+.sptree{font:12.5px var(--sans)}
+.sprow{display:flex;align-items:center;gap:6px;padding:3px 16px;cursor:pointer;color:var(--fg);white-space:nowrap}
+.sprow:hover{background:var(--hov)}
+.sprow svg{width:14px;height:14px;flex:none;color:var(--fg2)}
+.sprow .nm{overflow:hidden;text-overflow:ellipsis}
+.sprow .sz{margin-left:auto;color:var(--fg2);font-size:11px;padding-left:10px}
+.spfile{padding:10px 16px 30px}
+.spfile pre{margin:0;white-space:pre-wrap;word-break:break-word;font:12px/1.6 var(--mono);color:var(--fg)}
+.spfmeta{padding:6px 16px;color:var(--fg2);font-size:11.5px;border-bottom:.5px solid var(--line)}
+/* 审查面板 */
+.spgit{padding:8px 0}
+.spgf{display:flex;align-items:center;gap:8px;padding:6px 16px;cursor:pointer;font:12.5px var(--mono)}
+.spgf:hover{background:var(--hov)}
+.spgf .st{flex:none;width:16px;height:16px;border-radius:4px;display:grid;place-items:center;font:700 10px var(--sans);color:#fff}
+.spgf .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis}
+.spgf.add .st{background:var(--uch2)}.spgf.mod .st{background:var(--uch3)}.spgf.del .st{background:var(--uch4)}.spgf.new .st{background:var(--uch5)}
+.spdiff{margin:0 0 12px;border:.5px solid var(--line);border-radius:9px;overflow:hidden;font:12px/1.55 var(--mono)}
+.spdiff .hh{padding:5px 11px;background:var(--hov);color:var(--fg2);font-size:11px}
+.spdiff .dl{display:flex;padding:0 10px;white-space:pre-wrap;word-break:break-word}
+.spdiff .dl .sg{flex:none;width:12px;color:var(--fg2)}
+.spdiff .dl.p{background:color-mix(in srgb,var(--uch2) 14%,transparent)}
+.spdiff .dl.p .sg{color:var(--uch2)}
+.spdiff .dl.m{background:color-mix(in srgb,var(--uch4) 14%,transparent)}
+.spdiff .dl.m .sg{color:var(--uch4)}
+/* 终端面板 */
+.spterm{padding:0;display:flex;flex-direction:column;height:100%}
+.spterm .log{padding:10px 14px;font:12px/1.6 var(--mono);white-space:pre-wrap;word-break:break-word;flex:1;min-height:0;overflow:auto;color:var(--fg)}
+.spterm .cmd{display:flex;gap:8px;align-items:center;padding:9px 12px;border-top:.5px solid var(--line);background:var(--bg)}
+.spterm .cmd input{flex:1;min-width:0;padding:7px 11px;border:1px solid var(--line);border-radius:8px;background:var(--input);color:var(--fg);font:12.5px var(--mono);outline:0}
+.spterm .cmd input:focus{border-color:var(--fg2)}
+.spterm .pr{color:var(--fg2);font:12px var(--mono);flex:none}
+/* 浏览器面板 */
+.spbrow{padding:10px 12px;display:flex;flex-direction:column;gap:8px}
+.spbrow img{width:100%;border-radius:9px;border:.5px solid var(--line);display:block;background:var(--hov)}
+.spbrow pre{margin:0;padding:10px;border-radius:9px;background:var(--hov);font:12px/1.6 var(--mono);white-space:pre-wrap;word-break:break-word;max-height:320px;overflow:auto}
+/* 辅助对话面板 */
+.spsc{padding:0;display:flex;flex-direction:column;height:100%}
+.spsc .msgs{flex:1;min-height:0;overflow:auto;padding:12px 12px 8px;font:13px/1.6 var(--sans)}
+.spsc .m{margin-bottom:10px;white-space:pre-wrap;word-break:break-word}
+.spsc .m.u{max-width:86%;background:var(--bubble);border-radius:12px;padding:6px 11px;margin-left:auto}
+.spsc .m.a{color:var(--fg)}
+.spsc .m.err{color:var(--uch4)}
+.spsc .in{border-top:.5px solid var(--line);padding:9px 10px;display:flex;gap:8px;align-items:flex-end}
+.spsc .in textarea{flex:1;min-width:0;resize:none;max-height:110px;padding:8px 11px;border:1px solid var(--line);border-radius:9px;background:var(--input);color:var(--fg);font:13px var(--sans);outline:0}
+.spsc .in textarea:focus{border-color:var(--fg2)}
+.spsc .pm{padding:8px 12px;margin:0 12px 8px;border:.5px solid var(--line);border-radius:9px;background:var(--hov);font-size:12px}
+.spsc .pm .cmd{font:12px var(--mono);word-break:break-all;margin-bottom:6px}
+.spsc .pm button{border:1px solid var(--line);background:var(--input);color:var(--fg);border-radius:7px;padding:4px 10px;font:12px var(--sans);cursor:pointer;margin-right:6px}
+.spsc .pm button:hover{background:var(--fg);color:var(--bg)}
+@media(max-width:760px){#sdp{position:absolute;z-index:31;top:0;bottom:0;right:0;width:min(420px,100vw)!important;box-shadow:0 0 40px rgba(0,0,0,.2)}
+  body.spmax #sdp{position:fixed;inset:46px 0 0 0;width:100vw!important}}
+
 /* ============ 使用统计 ============ */
 .ug{display:flex;flex-direction:column;gap:18px;max-width:1100px;margin:0 auto;padding:38px 44px 60px}
 @media(max-width:760px){.ug{padding:22px 20px 40px}}
@@ -551,6 +659,53 @@ select.mp-in{appearance:none;background-image:linear-gradient(45deg,transparent 
 .ug-mu-i em{font-style:normal;font:12px var(--sans);color:var(--fg2)}
 .ug-mu-i span{font:11.5px var(--sans);color:var(--fg2);min-width:64px;text-align:right}
 .ug-empty{padding:40px 0;text-align:center;color:var(--fg2);font-size:13px}
+/* Token 构成：输入 / 输出 / 缓存读 / 缓存写 一条堆叠条 + 图例 */
+.ug-comp{display:flex;flex-direction:column;gap:14px}
+.ug-cbar{display:flex;height:12px;border-radius:6px;overflow:hidden;background:var(--hov)}
+.ug-cbar i{display:block;height:100%;transition:width calc(.5s * var(--animd)) cubic-bezier(.16,.84,.3,1)}
+.ug-cbar i+i{box-shadow:-1px 0 0 var(--bg)}
+.ug-cleg{display:grid;grid-template-columns:repeat(auto-fit,minmax(148px,1fr));gap:10px 18px}
+.ug-cleg>div{display:flex;align-items:baseline;gap:7px;min-width:0}
+.ug-cleg i{width:8px;height:8px;border-radius:2px;flex:none;align-self:center}
+.ug-cleg b{font:12.5px var(--mono);color:var(--fg);font-weight:500}
+.ug-cleg em{font-style:normal;font:11.5px var(--sans);color:var(--fg2);margin-left:auto;white-space:nowrap}
+.ug-cleg span{font:11.5px var(--sans);color:var(--fg2);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* 活跃时段：24 小时柱状图 + 星期条 */
+.ug-act{display:grid;grid-template-columns:1fr;gap:18px}
+.ug-hours{display:flex;align-items:flex-end;gap:2px;height:96px;padding-bottom:2px;border-bottom:.5px solid var(--line)}
+.ug-hour{flex:1;min-width:0;display:flex;flex-direction:column;justify-content:flex-end;height:100%;position:relative}
+.ug-hour i{display:block;width:100%;border-radius:2px 2px 0 0;background:color-mix(in srgb,var(--uch1) 55%,transparent);
+    transition:height calc(.45s * var(--animd)) cubic-bezier(.16,.84,.3,1),background-color calc(.2s * var(--animd))}
+.ug-hour:hover i{background:var(--uch1)}
+.ug-hour.zero i{background:color-mix(in srgb,var(--fg2) 12%,transparent)}
+.ug-hour b{position:absolute;bottom:100%;left:50%;transform:translateX(-50%);margin-bottom:3px;padding:2px 6px;border-radius:5px;
+    background:var(--fg);color:var(--bg);font:10.5px var(--mono);white-space:nowrap;opacity:0;pointer-events:none;
+    transition:opacity calc(.18s * var(--animd))}
+.ug-hour:hover b{opacity:1}
+.ug-haxis{display:flex;justify-content:space-between;margin-top:5px;color:var(--fg2);font:10.5px var(--mono)}
+.ug-wdays{display:grid;grid-template-columns:repeat(7,1fr);gap:8px}
+.ug-wday{text-align:center}
+.ug-wday .b{height:7px;border-radius:4px;background:color-mix(in srgb,var(--uch1) 22%,transparent);overflow:hidden}
+.ug-wday .b i{display:block;height:100%;border-radius:4px;background:var(--uch1);transition:width calc(.45s * var(--animd)) cubic-bezier(.16,.84,.3,1)}
+.ug-wday span{display:block;margin-top:6px;color:var(--fg2);font:11px var(--sans)}
+.ug-wday em{display:block;font:10.5px var(--mono);color:var(--fg2);font-style:normal;margin-top:2px}
+/* 高活跃时段提示 */
+.ug-peaks{display:flex;flex-wrap:wrap;gap:8px 18px;margin-top:14px;padding-top:12px;border-top:.5px solid var(--line)}
+.ug-peak{display:flex;align-items:baseline;gap:7px;font:12px var(--sans);color:var(--fg2)}
+.ug-peak b{font:500 12.5px var(--mono);color:var(--fg)}
+/* 用量最高的会话 */
+.ug-ts{display:flex;flex-direction:column;gap:1px}
+.ug-ts-r{display:flex;align-items:center;gap:10px;padding:9px 8px;margin:0 -8px;border-radius:9px;cursor:pointer;
+    transition:background-color calc(.2s * var(--animd))}
+.ug-ts-r:hover{background:var(--hov)}
+.ug-ts-r .rank{flex:none;width:20px;text-align:right;font:11.5px var(--mono);color:var(--fg2)}
+.ug-ts-r .nm{flex:1;min-width:0}
+.ug-ts-r .nm b{display:block;font:12.5px var(--sans);color:var(--fg);font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ug-ts-r .nm small{display:block;margin-top:2px;color:var(--fg2);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ug-ts-r .bar{flex:none;width:110px;height:5px;border-radius:3px;background:var(--hov);overflow:hidden}
+.ug-ts-r .bar i{display:block;height:100%;border-radius:3px;background:var(--uch1);transition:width calc(.45s * var(--animd)) cubic-bezier(.16,.84,.3,1)}
+.ug-ts-r .val{flex:none;min-width:82px;text-align:right;font:11.5px var(--mono);color:var(--fg2)}
+@media(max-width:700px){.ug-ts-r .bar{display:none}}
 
 /* ============ 命令面板 ============ */
 #cmdk{position:fixed;inset:0;z-index:95;display:none;justify-content:center;align-items:flex-start;padding:11vh 20px 20px;background:rgba(0,0,0,0);-webkit-backdrop-filter:blur(0);backdrop-filter:blur(0);opacity:0;pointer-events:none;transition:opacity calc(.32s * var(--animd)) ease,background-color calc(.32s * var(--animd)) ease,backdrop-filter calc(.32s * var(--animd)) ease}
@@ -626,6 +781,7 @@ body.dragging #main{outline:2px dashed var(--accent);outline-offset:-8px}
   <div id="tb">
     <button class="ib" id="tgl" data-ic="side"></button><button class="ib off" data-ic="back"></button><button class="ib off" data-ic="fwd"></button>
     <button class="ib" id="cmdbtn" data-ic="search" title="命令面板 Ctrl K"></button>
+    <button class="ib" id="spbtn" data-ic="panel" title="侧边栏"></button>
   </div>
   <div id="body">
     <div id="scr"></div>
@@ -633,6 +789,7 @@ body.dragging #main{outline:2px dashed var(--accent);outline-offset:-8px}
       <div class="nav" id="nc"><span class="np" data-ic="plus"></span><span data-i="new"></span></div>
       <div class="nav" data-pg="plugins"><span data-ic="plug"></span><span data-i="plugins"></span></div>
       <div class="nav" data-pg="auto"><span data-ic="clock"></span><span data-i="autom"></span></div>
+      <div class="nav" data-pg="team"><span data-ic="user"></span><span data-i="team"></span></div>
       <div class="sh" data-i="rec"></div>
       <div id="rcs"><div id="rcp" class="rcg" hidden><div class="rch" data-i="pinned"></div></div><div id="rcu" class="rcg"></div><div id="rca" class="rcg" hidden><div class="rch" data-i="archd"></div></div></div>
       <div class="nav" id="setnav"><span data-ic="tune"></span><span data-i="setnav"></span></div>
@@ -703,6 +860,10 @@ body.dragging #main{outline:2px dashed var(--accent);outline-offset:-8px}
         <div class="disc" data-i="disc"></div>
       </div>
     </main>
+    <aside id="sdp">
+      <div class="sptabs"><div class="sptl" id="sptl"></div><button class="spb" id="spadd" title="新标签页"></button></div>
+      <div class="spbody" id="spbody"></div>
+    </aside>
   </div>
 </div>
 <div id="modal"><div id="card"><nav id="snav"></nav><div id="sp"></div></div></div>
@@ -758,7 +919,10 @@ const IC = {
   terminal:'<rect x="3" y="4" width="14" height="12" rx="2"/><path d="M6 9l2 2-2 2M10 13h4"/>',
   globe:'<circle cx="10" cy="10" r="7"/><path d="M3 10h14M10 3c2 2.2 2 11.8 0 14M10 3c-2 2.2-2 11.8 0 14"/>',
   plan:'<path d="M6 4h9a1 1 0 011 1v11a1 1 0 01-1 1H6a1 1 0 01-1-1V5a1 1 0 011-1z"/><path d="M8 8h5M8 11h5M8 14h3"/>',
-  ask:'<circle cx="10" cy="10" r="7"/><path d="M8.2 8a1.9 1.9 0 113.6.8c-.3.7-1 1-1.4 1.6-.2.3-.3.6-.3.9"/><circle cx="10" cy="14" r=".7" fill="currentColor" stroke="none"/>'
+  ask:'<circle cx="10" cy="10" r="7"/><path d="M8.2 8a1.9 1.9 0 113.6.8c-.3.7-1 1-1.4 1.6-.2.3-.3.6-.3.9"/><circle cx="10" cy="14" r=".7" fill="currentColor" stroke="none"/>',
+  panel:'<rect x="3" y="4" width="14" height="12" rx="2.5"/><path d="M13 4v12"/>',
+  x:'<path d="M5.5 5.5l9 9M14.5 5.5l-9 9"/>',
+  git:'<circle cx="6" cy="5" r="2"/><circle cx="6" cy="15" r="2"/><circle cx="14.5" cy="10" r="2"/><path d="M6 7v6M8 5h3.5a3 3 0 013 3v.5"/>'
 };
 const ic = n => '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">' + (IC[n] || IC.file) + '</svg>';
 const esc = s => String(s == null ? '' : s)
@@ -766,7 +930,7 @@ const esc = s => String(s == null ? '' : s)
 /* ---------------------------------------------------------------- i18n */
 const L = {
   zh: {
-    new:'新对话', plugins:'插件', autom:'自动化', setnav:'设置', set:'设置', search:'搜索', chats:'聊天', projects:'项目', arts:'工件', rec:'最近', pinned:'已置顶',
+    new:'新对话', plugins:'插件', autom:'自动化', team:'团队', setnav:'设置', set:'设置', search:'搜索', chats:'聊天', projects:'项目', arts:'工件', rec:'最近', pinned:'已置顶',
     ago_now:'刚刚', ago_m:'{n}分', ago_h:'{n}小时', ago_d:'{n}天',
     ph:'今天我能帮你什么？', ph2:'回复 Parable…',
     thinking:'思考中…', thought:'思考了 {n} 秒', worked:'已工作 {t}',
@@ -793,6 +957,13 @@ const L = {
     ug_tokens:'tokens', ug_turns:'轮', ug_refresh:'刷新', ug_empty:'还没有用量记录',
     ug_legacy:'历史会话（模型未知）', ug_hm_tip:'{d} · {t} tokens · {n} 轮',
     ug_hm_total:'{d} · 累计 {t} tokens', ug_hm_week:'{d} 起 · {t} tokens',
+    ug_comp:'Token 构成', ug_comp_in:'输入', ug_comp_out:'输出',
+    ug_comp_cr:'缓存读取', ug_comp_cw:'缓存写入', ug_comp_none:'还没有 token 记录',
+    ug_act:'活跃时段', ug_act_hour:'按小时', ug_act_week:'按星期',
+    ug_peak_hour:'最活跃时段', ug_peak_day:'最活跃一天',
+    ug_tops:'用量最高的会话', ug_tops_empty:'还没有会话用量记录',
+    ug_turns_n:'{n} 轮', ug_sessions_n:'{n} 个会话', ug_days_n:'{n} 天',
+    ug_open_session:'打开会话',
     sprefT:'优先搜索引擎', sprefH:'auto：两种搜索都交给模型，配了 DeepSeek key 时优先它；deepseek：只推荐 DeepSeek 搜索；anysearch / multi：web_search 只查对应来源',
     sp_auto:'自动', sp_deepseek:'DeepSeek', sp_anysearch:'AnySearch', sp_multi:'多平台',
     name:'你的名字', nameh:'Parable 会用它来称呼你', prefs:'个人偏好', prefsh:'你希望 Parable 在回复时考虑哪些偏好？',
@@ -818,6 +989,8 @@ const L = {
     mp_refreshed:'已刷新', mp_deleted:'已删除',
     mp_del_confirm:'确定删除供应商 “{n}” 及其全部模型？', mp_del_model:'确定删除模型 “{n}”？',
     send_answer:'发送回答', ask_label:'提问', plan_label:'计划', done_label:'结果',
+    agent_spawned:'已委派', agent_waited:'已收回', agent_listed:'成员列表', agent_stopped:'已中断',
+    task_created:'已建任务', task_listed:'任务列表', task_read:'任务详情', task_updated:'任务已更新',
     copy_fail:'复制失败', conn_lost:'连接断开，重连中…', conn_ok:'连接已恢复',
     perm_run:'执行中…', perm_timeout:'已超时，自动拒绝', your_answer:'你的回答：',
     cf_del_chat:'确定删除这个对话？此操作不可恢复。', cf_del_task:'确定删除这个任务？',
@@ -830,13 +1003,27 @@ const L = {
     sysprev_empty:'（空 — 下一轮会话将没有 system 提示词）', sysprev_fail:'预览失败：',
     plan_mode:'计划模式', plan_mode_h:'先制定计划，经确认后再执行', plan_badge:'计划',
     auto_no_chat:'当前没有会话，不能投递到当前对话', disc:'Parable 是 AI，可能会出错，请核实重要内容',
+    sp_title:'新标签页', sp_title_h:'选择要打开的工具面板。',
+    sp_files:'文件', sp_files_h:'浏览工作区目录与文件。',
+    sp_browser:'浏览器', sp_browser_h:'浏览网页和预览应用。',
+    sp_term:'终端', sp_term_h:'运行命令和查看输出。',
+    sp_review:'审查', sp_review_h:'查看代码变更与差异。',
+    sp_deploy:'部署', sp_deploy_h:'查看站点、部署记录和用量。',
+    sp_sidechat:'辅助对话', sp_sidechat_h:'在侧边面板中继续对话。',
+    sp_open:'打开', sp_close:'关闭', sp_max:'全屏', sp_unmax:'退出全屏',
+    sp_empty_fs:'选择一个文件查看内容。', sp_empty_git:'没有需要审查的变更。',
+    sp_empty_browser:'还没有打开页面。', sp_empty_term:'在下方输入命令。',
+    sp_not_repo:'当前工作区不是 Git 仓库。', sp_no_files:'没有匹配的文件。',
+    sp_run:'运行', sp_path_hint:'工作区路径', sp_search_hint:'按文件名搜索…',
+    sp_deploy_note:'部署面板尚未提供：Parable 目前没有站点、构建或部署的概念。此处会用于展示部署记录、目标站点与用量。',
+    sp_perm:'需要你的许可', sp_sidechat_placeholder:'给辅助对话发消息…',
     g:['夜深了，','早上好，','下午好，','晚上好，'],
     chips:['写作','学习','编程','生活','Parable 的选择'],
     cp:['帮我写一封措辞得体的邮件','用通俗的话讲讲量子纠缠','帮我修个 bug','周末在家做点什么好','给我一个惊喜'],
     md:['兼顾速度与智能','适合复杂任务','最快、最省']
   },
   en: {
-    new:'New chat', plugins:'Plugins', autom:'Automation', setnav:'Settings', set:'Settings', search:'Search', chats:'Chats', projects:'Projects', arts:'Artifacts', rec:'Recents', pinned:'Pinned',
+    new:'New chat', plugins:'Plugins', autom:'Automation', team:'Team', setnav:'Settings', set:'Settings', search:'Search', chats:'Chats', projects:'Projects', arts:'Artifacts', rec:'Recents', pinned:'Pinned',
     ago_now:'now', ago_m:'{n}m', ago_h:'{n}h', ago_d:'{n}d',
     ph:'How can I help you today?', ph2:'Reply to Parable…',
     thinking:'Thinking…', thought:'Thought for {n}s', worked:'Worked for {t}',
@@ -863,6 +1050,13 @@ const L = {
     ug_tokens:'tokens', ug_turns:'turns', ug_refresh:'Refresh', ug_empty:'No usage recorded yet',
     ug_legacy:'Earlier chats (model unknown)', ug_hm_tip:'{d} · {t} tokens · {n} turns',
     ug_hm_total:'{d} · {t} tokens total', ug_hm_week:'from {d} · {t} tokens',
+    ug_comp:'Token breakdown', ug_comp_in:'Input', ug_comp_out:'Output',
+    ug_comp_cr:'Cache read', ug_comp_cw:'Cache write', ug_comp_none:'No tokens recorded yet',
+    ug_act:'Activity', ug_act_hour:'By hour', ug_act_week:'By weekday',
+    ug_peak_hour:'Busiest hour', ug_peak_day:'Busiest day',
+    ug_tops:'Top sessions', ug_tops_empty:'No session usage yet',
+    ug_turns_n:'{n} turns', ug_sessions_n:'{n} sessions', ug_days_n:'{n} days',
+    ug_open_session:'Open chat',
     sprefT:'Preferred search engine', sprefH:'auto: both tools stay available, DeepSeek first once a key is set; deepseek: DeepSeek search only; anysearch / multi: web_search queries that source exclusively',
     sp_auto:'Auto', sp_deepseek:'DeepSeek', sp_anysearch:'AnySearch', sp_multi:'Multi-engine',
     name:'Your name', nameh:'Parable will use it to address you', prefs:'Personal preferences',
@@ -892,6 +1086,8 @@ const L = {
     mp_refreshed:'Refreshed', mp_deleted:'Deleted',
     mp_del_confirm:'Delete provider “{n}” and all its models?', mp_del_model:'Delete model “{n}”?',
     send_answer:'Send answer', ask_label:'Asked', plan_label:'Planned', done_label:'Result',
+    agent_spawned:'Delegated', agent_waited:'Collected', agent_listed:'Members', agent_stopped:'Interrupted',
+    task_created:'Task created', task_listed:'Task list', task_read:'Task detail', task_updated:'Task updated',
     copy_fail:'Copy failed', conn_lost:'Connection lost, reconnecting…', conn_ok:'Connection restored',
     perm_run:'Running…', perm_timeout:'Timed out — auto-denied', your_answer:'Your answer: ',
     cf_del_chat:'Delete this conversation? This cannot be undone.', cf_del_task:'Delete this task?',
@@ -904,6 +1100,20 @@ const L = {
     sysprev_empty:'(empty — the next turn will have no system prompt)', sysprev_fail:'Preview failed: ',
     plan_mode:'Plan mode', plan_mode_h:'Draft a plan first and wait for approval before running', plan_badge:'Plan',
     auto_no_chat:'No active chat to deliver to', disc:'Parable is AI and can make mistakes. Please double-check important content',
+    sp_title:'New tab', sp_title_h:'Choose a tool panel to open.',
+    sp_files:'Files', sp_files_h:'Browse workspace files and folders.',
+    sp_browser:'Browser', sp_browser_h:'Browse pages and preview the app.',
+    sp_term:'Terminal', sp_term_h:'Run commands and see their output.',
+    sp_review:'Review', sp_review_h:'Inspect code changes and diffs.',
+    sp_deploy:'Deploy', sp_deploy_h:'Review sites, deploy records and usage.',
+    sp_sidechat:'Side conversation', sp_sidechat_h:'Keep chatting in the side panel.',
+    sp_open:'Open', sp_close:'Close', sp_max:'Expand', sp_unmax:'Exit full screen',
+    sp_empty_fs:'Pick a file to see its contents.', sp_empty_git:'No changes to review.',
+    sp_empty_browser:'No page open yet.', sp_empty_term:'Type a command below.',
+    sp_not_repo:'The workspace is not a Git repository.', sp_no_files:'No matching files.',
+    sp_run:'Run', sp_path_hint:'Workspace path', sp_search_hint:'Search files by name…',
+    sp_deploy_note:'The deploy panel is not available yet: Parable has no notion of sites, builds or deployments. It will show deploy records, target sites and usage.',
+    sp_perm:'Needs your permission', sp_sidechat_placeholder:'Message the side conversation…',
     g:['Burning the midnight oil, ','Good morning, ','Good afternoon, ','Good evening, '],
     chips:['Write','Learn','Code','Life stuff','Parable’s choice'],
     cp:['Help me write a polite email','Explain quantum entanglement simply','Help me fix a bug','What to do at home this weekend','Surprise me'],
@@ -1073,16 +1283,19 @@ async function go(name, force) {
   if (pg === name && !force) return;
   if (pg) { el.classList.add('sw'); await sleep(A(300)); if (my !== gt) return; }
   pg = name;
-  if (name === 'plugins' || name === 'auto') {
+  if (name === 'plugins' || name === 'auto' || name === 'team') {
     el.firstChild.className = 'page';
     el.firstChild.innerHTML = '<div class="pload"></div>';
     el.classList.add('on');
     requestAnimationFrame(() => requestAnimationFrame(() => el.classList.remove('sw')));
-    const html = name === 'plugins' ? await renderPluginsPage() : await renderAutoPage();
+    const html = name === 'plugins' ? await renderPluginsPage()
+      : name === 'auto' ? await renderAutoPage()
+      : await renderTeamPage();
     if (my !== gt) return;
     el.firstChild.innerHTML = html;
     if (name === 'plugins') bindPluginsPage(el.firstChild);
-    else bindAutoPage(el.firstChild);
+    else if (name === 'auto') bindAutoPage(el.firstChild);
+    else bindTeamPage(el.firstChild);
     return;
   }
   el.firstChild.className = '';
@@ -1295,6 +1508,178 @@ function bindPluginsPage(root) {
   });
   const r = root.querySelector('#pl-refresh');
   if (r) r.onclick = () => go('plugins', true);
+}
+
+/* ---------------------------------------------------- 智能体团队（任务板） */
+/* 共享任务板 + 成员名册。板的状态在服务端的根会话上，这里只做展示与操作：
+   每次改动都带上 expected_revision，版本过期时服务端会明确拒绝，
+   前端提示"先刷新"而不是覆盖别人的修改。 */
+
+function teamStatusLabel(st) {
+  const z = S.lang === 'zh';
+  return st === 'in_progress' ? (z ? '进行中' : 'In progress')
+    : st === 'completed' ? (z ? '已完成' : 'Completed')
+    : st === 'deleted' ? (z ? '已删除' : 'Deleted')
+    : (z ? '待认领' : 'Pending');
+}
+
+function teamStatusClass(st) {
+  return st === 'in_progress' ? 'active'
+    : st === 'completed' ? 'active'
+    : st === 'deleted' ? 'ended' : 'paused';
+}
+
+function teamMemberStatus(st) {
+  const z = S.lang === 'zh';
+  return st === 'Running' ? (z ? '运行中' : 'Running')
+    : st === 'Done' ? (z ? '已完成' : 'Done')
+    : st === 'Failed' ? (z ? '失败' : 'Failed')
+    : st === 'Cancelled' ? (z ? '已取消' : 'Cancelled') : st;
+}
+
+async function renderTeamPage() {
+  const z = S.lang === 'zh';
+  // 团队以当前会话为准：没开新会话时无从谈起一个团队。
+  if (!conv || !conv.id) {
+    return '<div class="pg-head"><h2>' + (z ? '智能体团队' : 'Agent team') + '</h2>' +
+      '<p>' + (z ? '先打开一个会话，再回来组建团队。' : 'Open a conversation first, then come back to build a team.') + '</p></div>';
+  }
+  let data = null;
+  try {
+    data = await api('/team?session=' + encodeURIComponent(conv.id));
+  } catch (e) {
+    return '<div class="pg-head"><h2>' + (z ? '智能体团队' : 'Agent team') + '</h2>' +
+      '<p>' + esc(e.message) + '</p></div>';
+  }
+  const enabled = !!data.enabled;
+  const members = data.members || [];
+  const tasks = data.tasks || [];
+
+  const modeBtn = enabled
+    ? '<button class="btn" data-act="mode-off">' + (z ? '关闭团队模式' : 'Turn team mode off') + '</button>'
+    : '<button class="btn" data-act="mode-on">' + (z ? '开启团队模式' : 'Turn team mode on') + '</button>';
+
+  const memberRows = members.map(m =>
+    '<div class="taskrow col" data-mid="' + esc(m.id) + '">' +
+      '<div class="tk-top">' +
+        '<b class="tk-name">' + esc(m.name) + '</b>' +
+        '<span class="tk-st ' + (m.status === 'Running' ? 'active' : m.status === 'Done' ? 'active' : 'ended') + '">' +
+          esc(teamMemberStatus(m.status)) + '</span>' +
+        '<span class="tk-ver">' + esc(m.label || '') + '</span>' +
+        '<span class="tk-ver">' + (z ? '第 ' + (m.depth || 1) + ' 层' : 'depth ' + (m.depth || 1)) + '</span>' +
+        '<span class="tk-ver">' + (m.toolCalls || 0) + (z ? ' 次工具调用' : ' tool calls') + '</span>' +
+      '</div>' +
+      (m.result ? '<div class="tk-prompt">' + esc(String(m.result).slice(0, 400)) + '</div>' : '') +
+      (m.error ? '<div class="tk-meta" style="color:#e5534b">' + esc(m.error) + '</div>' : '') +
+      (m.status === 'Running'
+        ? '<div class="tk-acts" style="margin-top:10px"><button class="btn danger" data-act="stop">' + (z ? '中断' : 'Interrupt') + '</button></div>'
+        : '') +
+    '</div>'
+  ).join('');
+
+  const taskRows = tasks.map(t => {
+    const owner = t.ownerName || t.ownerId || (z ? '未认领' : 'Unowned');
+    const blockers = (t.blockedBy || []).length
+      ? (z ? '依赖 ' : 'blocked by ') + t.blockedBy.join(', ') : '';
+    const scopes = (t.writeScopes || []).length
+      ? (z ? '写入范围 ' : 'scopes ') + t.writeScopes.join(', ') : '';
+    const warns = (t.writeScopeWarnings || []).length
+      ? '<div class="tk-meta" style="color:#c9a227">' + (z ? '注意：' : 'warning: ') + esc(t.writeScopeWarnings.join('; ')) + '</div>' : '';
+    const ready = t.ready ? (z ? ' · 可认领' : ' · ready') : '';
+    let acts = '';
+    if (t.status === 'pending') {
+      acts += '<button class="btn" data-act="claim">' + (z ? '认领' : 'Claim') + '</button>';
+    }
+    if (t.status === 'in_progress') {
+      acts += '<button class="btn" data-act="complete">' + (z ? '完成' : 'Complete') + '</button>';
+      acts += '<button class="btn" data-act="release">' + (z ? '释放' : 'Release') + '</button>';
+    }
+    if (t.status === 'completed') {
+      acts += '<button class="btn" data-act="reopen">' + (z ? '重开' : 'Reopen') + '</button>';
+    }
+    acts += '<button class="btn danger" data-act="delete">' + (z ? '删除' : 'Delete') + '</button>';
+    return '<div class="taskrow col" data-tid="' + esc(t.id) + '" data-rev="' + (t.revision || 0) + '">' +
+      '<div class="tk-top">' +
+        '<b class="tk-name">' + esc(t.id) + ' · ' + esc(t.subject) + '</b>' +
+        '<span class="tk-st ' + teamStatusClass(t.status) + '">' + esc(teamStatusLabel(t.status)) + '</span>' +
+        '<span class="tk-ver">' + (z ? 'v' : 'rev ') + (t.revision || 0) + '</span>' +
+      '</div>' +
+      '<div class="tk-meta">' + (z ? '负责人 ' : 'owner ') + esc(owner) + ready +
+        (blockers ? ' <span class="tk-dot">·</span> ' + esc(blockers) : '') +
+        (scopes ? ' <span class="tk-dot">·</span> ' + esc(scopes) : '') + '</div>' +
+      warns +
+      '<div class="tk-prompt">' + esc(t.description || '') + '</div>' +
+      '<div class="tk-acts" style="margin-top:10px">' + acts + '</div>' +
+    '</div>';
+  }).join('');
+
+  return '<div class="pg-head"><h2>' + (z ? '智能体团队' : 'Agent team') + '</h2>' +
+    '<p>' + (z
+      ? '一个会话和它的子代理共享同一块任务板：拆分工作、认领任务、跟踪依赖。'
+      : 'A conversation and its subagents share one task board: split work, claim tasks, track dependencies.') + '</p></div>' +
+    '<div class="tk-acts" style="margin-bottom:16px">' + modeBtn +
+      '<button class="btn" id="tm-refresh">' + (z ? '刷新' : 'Refresh') + '</button>' +
+      (enabled ? '<span class="tk-ver">' + (z ? '团队已开启' : 'team mode on') + '</span>'
+               : '<span class="tk-ver">' + (z ? '团队未开启——模型看不到任务板' : 'team mode off — the model cannot see the board') + '</span>') +
+    '</div>' +
+    '<h3>' + (z ? '成员' : 'Members') + ' (' + members.length + ')</h3>' +
+    (memberRows || '<div class="pempty">' + (z ? '还没有子代理。用 spawn_agent 委派任务。' : 'No subagents yet. Delegate work with spawn_agent.') + '</div>') +
+    '<h3 style="margin-top:22px">' + (z ? '任务板' : 'Task board') + ' (' + tasks.length + ')</h3>' +
+    (taskRows || '<div class="pempty">' + (z ? '还没有共享任务。' : 'No shared tasks yet.') + '</div>');
+}
+
+function bindTeamPage(root) {
+  const z = S.lang === 'zh';
+  const sid = conv && conv.id ? conv.id : '';
+  const refresh = () => go('team', true);
+
+  root.querySelectorAll('[data-act="mode-on"],[data-act="mode-off"]').forEach(b => {
+    b.onclick = async () => {
+      try {
+        await api('/team/mode', { method: 'POST', body: { session_id: sid, enabled: b.dataset.act === 'mode-on' } });
+        refresh();
+      } catch (e) { toast(e.message); }
+    };
+  });
+  const r = root.querySelector('#tm-refresh');
+  if (r) r.onclick = refresh;
+
+  // 中断成员
+  root.querySelectorAll('.taskrow[data-mid]').forEach(row => {
+    const b = row.querySelector('[data-act="stop"]');
+    if (!b) return;
+    b.onclick = async () => {
+      try {
+        await api('/agents/' + encodeURIComponent(row.dataset.mid) + '/interrupt', { method: 'POST' });
+        refresh();
+      } catch (e) { toast(e.message); }
+    };
+  });
+
+  // 任务状态流转：每个动作都带上当前 revision 做乐观并发控制。
+  root.querySelectorAll('.taskrow[data-tid]').forEach(row => {
+    const tid = row.dataset.tid;
+    const rev = +(row.dataset.rev || 0);
+    row.querySelectorAll('[data-act]').forEach(b => {
+      b.onclick = async () => {
+        const act = b.dataset.act;
+        if (act === 'claim' && !window.confirm(z ? '认领这个任务？' : 'Claim this task?')) return;
+        if (act === 'delete' && !window.confirm(z ? '删除这个任务？' : 'Delete this task?')) return;
+        try {
+          await api('/team/tasks/' + encodeURIComponent(tid), {
+            method: 'PATCH',
+            body: { session_id: sid, expected_revision: rev, action: act }
+          });
+          refresh();
+        } catch (e) {
+          // 版本过期：服务端拒绝。此时提示先刷新，而不是重试覆盖。
+          toast(/stale/i.test(e.message)
+            ? (z ? '任务已被他人修改，请刷新' : 'the task changed — refresh and retry')
+            : e.message);
+        }
+      };
+    });
+  });
 }
 
 /* ---------------------------------------------------------------- streaming render */
@@ -1861,10 +2246,17 @@ function setActs(a, on) {
   if (ac) ac.classList.toggle('show', on);
 }
 
-function fmtDur(ms) {
-  const s = Math.max(1, Math.round(ms / 1000));
+function fmtDur(ms) {  const s = Math.max(1, Math.round(ms / 1000));
   const m = Math.floor(s / 60), r = s % 60;
   return m ? t('dur_m').replace('{n}', m) + ' ' + t('dur_s').replace('{n}', r) : t('dur_s').replace('{n}', s);
+}
+
+/** Byte size in a short human form (B / KB / MB). */
+function fmtBytes(n) {
+  n = +n || 0;
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(n < 10240 ? 1 : 0) + ' KB';
+  return (n / 1024 / 1024).toFixed(n < 1024 * 1024 * 10 ? 1 : 0) + ' MB';
 }
 
 /**
@@ -1914,7 +2306,10 @@ const TOOL_ICON = {
   ask_user:'ask', web_fetch:'globe', web_search:'search',
   computer_screenshot:'globe', computer_axtree:'search', computer_click:'globe',
   computer_type:'edit', computer_key:'terminal', computer_scroll:'globe',
-  computer_navigate:'globe'
+  computer_navigate:'globe',
+  // 智能体团队
+  spawn_agent:'user', agent_list:'user', agent_wait:'clock', agent_interrupt:'stop',
+  team_task_create:'plan', team_task_list:'plan', team_task_get:'plan', team_task_update:'plan'
 };
 
 function toolCard(host, callId, tool, title) {
@@ -1943,6 +2338,15 @@ function toolCard(host, callId, tool, title) {
 function labelFor(d, tool) {
   if (tool === 'web_search') return t('searched');
   if (tool === 'web_fetch') return t('fetched');
+  // 团队工具：状态词比通用的「结果」更贴切
+  if (tool === 'spawn_agent') return t('agent_spawned');
+  if (tool === 'agent_wait') return t('agent_waited');
+  if (tool === 'agent_list') return t('agent_listed');
+  if (tool === 'agent_interrupt') return t('agent_stopped');
+  if (tool === 'team_task_create') return t('task_created');
+  if (tool === 'team_task_list') return t('task_listed');
+  if (tool === 'team_task_get') return t('task_read');
+  if (tool === 'team_task_update') return t('task_updated');
   if (d && d.kind === 'read') return t('rd');
   if (d && d.kind === 'diff') return t('ed');
   if (d && d.kind === 'shell') return 'shell';
@@ -2186,6 +2590,9 @@ function dispatch(ev) {
   // seq 去重：hello 的 seq=0（falsy）始终放行；重连后在 onopen 里清零水位。
   if (ev.seq && ev.seq <= lastSeq) return;
   if (ev.seq) lastSeq = ev.seq;
+  // 侧边栏先于一切会话过滤取事件：它的辅助对话是独立会话，主对话区的
+  // 会话隔离不应该把它的事件吃掉。钩子只写侧边栏自己的标签。
+  spOnEvent(ev);
   if (ignoreSid && ev.sessionId === ignoreSid) return;
   if (ev.type === 'turn.end') { delete SHADOW[ev.sessionId]; delete INFLIGHT[ev.sessionId]; }
   // Only handle events for the active session (or the initial one).
@@ -2438,6 +2845,18 @@ function dispatch(ev) {
     case 'goal':
       // 目标状态变化（judge 判定、续跑、暂停）时刷新输入框上方的徽标
       refreshGoalBadge();
+      break;
+
+    case 'team.task':
+    case 'team.mode':
+      // 任务板变了：团队页开着就实时刷新
+      if (pg === 'team') go('team', true);
+      break;
+
+    case 'subagent.start':
+    case 'subagent.end':
+      // 成员上下线：团队页开着就实时刷新名册
+      if (pg === 'team') go('team', true);
       break;
 
     case 'turn.end':
@@ -3473,6 +3892,13 @@ function toolTitle(name, args) {
   if (name === 'web_fetch') return String(args.url || '');
   if (name === 'web_search') return '“' + String(args.query || '') + '”';
   if (name === 'todo_write') return 'plan';
+  // 团队工具：标题取最有信息量的那个参数
+  if (name === 'spawn_agent') return String(args.label || args.name || '');
+  if (name === 'agent_wait') return String(args.agent || '');
+  if (name === 'agent_interrupt') return String(args.id || '');
+  if (name === 'team_task_create') return String(args.subject || '');
+  if (name === 'team_task_get') return String(args.task_id || '');
+  if (name === 'team_task_update') return String(args.task_id || '');
   return name || '';
 }
 
@@ -3910,6 +4336,23 @@ if ($('#setnav')) $('#setnav').onclick = openSet;
 $('#nc').onclick = newChat;
 $('#tgl').onclick = () => document.body.classList.toggle('sc');
 $('#scr').onclick = () => document.body.classList.add('sc');
+
+/* ---------------------------------------------------------------- side pane */
+$('#spbtn').onclick = () => {
+  // 同一颗按钮两用：普通点击开关侧边栏，右键（或带 Ctrl）切全屏。
+  if (window.event && (window.event.ctrlKey || window.event.metaKey)) spToggleMax();
+  else if (document.body.classList.contains('sp0')) spShow();
+  else spHide();
+};
+$('#spbtn').oncontextmenu = e => { e.preventDefault(); spToggleMax(); };
+$('#spadd').onclick = spAddTab;
+$('#spadd').innerHTML = ic('plus');
+$('#sptl').onclick = e => {
+  const x = e.target.closest('[data-spx]');
+  if (x) { e.stopPropagation(); spClose(x.dataset.spx); return; }
+  const tb = e.target.closest('[data-sp]');
+  if (tb) spSelect(tb.dataset.sp);
+};
 
 /* ==================================================================
    keyboard shortcuts panel
@@ -4998,6 +5441,533 @@ async function loadServerStatus() {
     if (r.thinkingLevel !== undefined && +r.thinkingLevel !== +S.lvl) { S.lvl = +r.thinkingLevel || 0; dirty = true; }
     if (dirty) apply(false);
   } catch (e) { /* 服务不可达时保持本地值 */ }
+}
+
+/* ==================================================================
+   side pane — 右侧标签栏面板
+   ================================================================== */
+
+/** 侧边栏状态。tabs 是打开的标签,active 是当前标签 id。 */
+const SP = { tabs: [], active: null, seq: 0, open: false };
+
+/** 每个面板类型的展示信息：图标、标题键、描述键。 */
+const SP_KIND = {
+  files:    { ic: 'folder',   t: 'sp_files',    d: 'sp_files_h' },
+  browser:  { ic: 'globe',    t: 'sp_browser',  d: 'sp_browser_h' },
+  terminal: { ic: 'terminal', t: 'sp_term',     d: 'sp_term_h' },
+  review:   { ic: 'git',      t: 'sp_review',   d: 'sp_review_h' },
+  deploy:   { ic: 'art',      t: 'sp_deploy',   d: 'sp_deploy_h' },
+  sidechat: { ic: 'chat',     t: 'sp_sidechat', d: 'sp_sidechat_h' },
+  launcher: { ic: 'panel',    t: 'sp_title',    d: 'sp_title_h' }
+};
+
+/** 打开侧边栏（并保证至少有一个标签）。 */
+function spShow() {
+  document.body.classList.remove('sp0');
+  SP.open = true;
+  if (!SP.tabs.length) spAddTab();
+  else spRender();
+}
+
+/** 折叠侧边栏。 */
+function spHide() {
+  document.body.classList.add('sp0');
+  SP.open = false;
+}
+
+/** 在全屏与并排之间切换。 */
+function spToggleMax() {
+  document.body.classList.toggle('spmax');
+  const b = $('#spbtn');
+  if (b) b.title = document.body.classList.contains('spmax') ? t('sp_unmax') : t('sp_max');
+}
+
+/** 打开一个新的「新标签页」启动器标签。 */
+function spAddTab() {
+  document.body.classList.remove('sp0');
+  SP.open = true;
+  const tab = { id: 't' + (++SP.seq), kind: 'launcher', title: t('sp_title'), st: {} };
+  SP.tabs.push(tab);
+  SP.active = tab.id;
+  spRender();
+}
+
+/** 打开某个面板类型的新标签。 */
+function spOpen(kind, opts) {
+  document.body.classList.remove('sp0');
+  SP.open = true;
+  const tab = { id: 't' + (++SP.seq), kind: kind, title: t(SP_KIND[kind].t), st: opts || {} };
+  SP.tabs.push(tab);
+  SP.active = tab.id;
+  spRender();
+  if (kind === 'sidechat') spSideChatInit(tab);
+  return tab;
+}
+
+/** 关闭标签。 */
+function spClose(id) {
+  const i = SP.tabs.findIndex(x => x.id === id);
+  if (i < 0) return;
+  const tab = SP.tabs[i];
+  // 释放标签占用的资源（终端的流式收集器等）。
+  if (tab.st && tab.st.cleanup) { try { tab.st.cleanup(); } catch (e) {} }
+  SP.tabs.splice(i, 1);
+  if (SP.active === id) {
+    SP.active = SP.tabs.length ? SP.tabs[SP.tabs.length - 1].id : null;
+  }
+  if (!SP.tabs.length) spHide();
+  else spRender();
+}
+
+/** 切到某个标签。 */
+function spSelect(id) {
+  if (SP.active === id) return;
+  SP.active = id;
+  spRender();
+}
+
+/** 渲染标签栏与当前面板。 */
+function spRender() {
+  const tl = $('#sptl'), body = $('#spbody');
+  if (!tl || !body) return;
+  tl.innerHTML = SP.tabs.map(tb => {
+    const k = SP_KIND[tb.kind] || SP_KIND.launcher;
+    return '<button class="sptab' + (tb.id === SP.active ? ' on' : '') + '" data-sp="' + tb.id + '">' +
+      ic(k.ic) + '<span class="t">' + esc(tb.title) + '</span>' +
+      '<span class="x" data-spx="' + tb.id + '">' + ic('x') + '</span></button>';
+  }).join('');
+  const cur = SP.tabs.find(x => x.id === SP.active);
+  body.innerHTML = '';
+  if (!cur) return;
+  const R = spRenderers[cur.kind];
+  if (!R) { body.innerHTML = '<div class="spempty">' + esc(t('sp_empty_fs')) + '</div>'; return; }
+  R(body, cur);
+}
+
+/** 各面板的渲染函数。 */
+const spRenderers = {
+  launcher: (host, tab) => spRenderLauncher(host, tab),
+  files: (host, tab) => spRenderFiles(host, tab),
+  browser: (host, tab) => spRenderBrowser(host, tab),
+  terminal: (host, tab) => spRenderTerminal(host, tab),
+  review: (host, tab) => spRenderReview(host, tab),
+  deploy: (host, tab) => spRenderDeploy(host, tab),
+  sidechat: (host, tab) => spRenderSideChat(host, tab)
+};
+
+/** 启动器：新标签页的卡片网格。 */
+function spRenderLauncher(host) {
+  const kinds = ['files', 'browser', 'terminal', 'review', 'deploy', 'sidechat'];
+  host.innerHTML = '<div class="spl"><h2>' + esc(t('sp_title')) + '</h2>' +
+    '<p>' + esc(t('sp_title_h')) + '</p><div class="splg">' +
+    kinds.map(k => {
+      const info = SP_KIND[k];
+      return '<button class="spcard" data-spo="' + k + '">' +
+        '<span class="spic">' + ic(info.ic) + '</span>' +
+        '<span class="spcd"><b>' + esc(t(info.t)) + '</b><small>' + esc(t(info.d)) + '</small></span>' +
+        '<span class="spop">' + esc(t('sp_open')) + '</span></button>';
+    }).join('') + '</div></div>';
+  host.querySelectorAll('[data-spo]').forEach(b => {
+    b.onclick = () => {
+      const k = b.dataset.spo;
+      // 从启动器打开面板：把启动器标签换成该面板（而不是堆一个新标签）。
+      const tab = SP.tabs.find(x => x.id === SP.active);
+      if (tab && tab.kind === 'launcher') {
+        tab.kind = k;
+        tab.title = t(SP_KIND[k].t);
+        spRender();
+        if (k === 'sidechat') spSideChatInit(tab);
+      } else {
+        spOpen(k);
+      }
+    };
+  });
+}
+
+/* ------------------------------------------------------------ 文件面板 */
+
+function spRenderFiles(host, tab) {
+  const st = tab.st;
+  st.path = st.path || '';
+  host.innerHTML = '<div class="spbar"><input id="spf-q" placeholder="' + esc(t('sp_search_hint')) +
+    '" spellcheck="false" autocomplete="off"><button class="spbtn" id="spf-up">↑</button></div>' +
+    '<div class="sptree" id="spf-tree"></div><div id="spf-file"></div>';
+  const q = host.querySelector('#spf-q');
+  q.value = st.q || '';
+  q.oninput = () => {
+    st.q = q.value;
+    clearTimeout(st.qt);
+    st.qt = setTimeout(() => spFilesSearch(tab), 220);
+  };
+  const up = host.querySelector('#spf-up');
+  up.onclick = () => {
+    st.path = st.path.includes('/') ? st.path.slice(0, st.path.lastIndexOf('/')) : '';
+    spFilesTree(tab);
+  };
+  spFilesTree(tab);
+}
+
+async function spFilesTree(tab) {
+  const host = $('#spbody');
+  if (!host) return;
+  const tree = host.querySelector('#spf-tree');
+  if (!tree) return;
+  if (tab.st.q) return spFilesSearch(tab);
+  tree.innerHTML = '<div class="spempty">…</div>';
+  let res;
+  try {
+    res = await api('/fs/tree?path=' + encodeURIComponent(tab.st.path || ''));
+  } catch (e) {
+    tree.innerHTML = '<div class="spempty">' + esc(e.message) + '</div>';
+    return;
+  }
+  if (SP.active !== tab.id) return;
+  const rows = [];
+  if (tab.st.path) {
+    rows.push('<div class="sprow" data-spup="1">' + ic('back') + '<span class="nm">..</span></div>');
+  }
+  (res.entries || []).forEach(e => {
+    rows.push('<div class="sprow" data-spp="' + esc(e.path) + '" data-dir="' + (e.is_dir ? '1' : '') + '">' +
+      ic(e.is_dir ? 'folder' : 'file') +
+      '<span class="nm">' + esc(e.name) + '</span>' +
+      (e.is_dir ? '' : '<span class="sz">' + fmtBytes(e.size) + '</span>') + '</div>');
+  });
+  tree.innerHTML = rows.join('') || '<div class="spempty">' + esc(t('sp_no_files')) + '</div>';
+  tree.querySelectorAll('[data-spp]').forEach(r => {
+    r.onclick = () => {
+      const p = r.dataset.spp;
+      if (r.dataset.dir) { tab.st.path = p; tab.st.q = ''; spFilesTree(tab); }
+      else spFilesOpen(tab, p);
+    };
+  });
+  const upRow = tree.querySelector('[data-spup]');
+  if (upRow) upRow.onclick = () => {
+    tab.st.path = tab.st.path.includes('/') ? tab.st.path.slice(0, tab.st.path.lastIndexOf('/')) : '';
+    spFilesTree(tab);
+  };
+}
+
+async function spFilesSearch(tab) {
+  const host = $('#spbody');
+  const tree = host && host.querySelector('#spf-tree');
+  if (!tree) return;
+  const q = (tab.st.q || '').trim();
+  if (!q) return spFilesTree(tab);
+  tree.innerHTML = '<div class="spempty">…</div>';
+  let res;
+  try {
+    res = await api('/fs/search?q=' + encodeURIComponent(q));
+  } catch (e) {
+    tree.innerHTML = '<div class="spempty">' + esc(e.message) + '</div>';
+    return;
+  }
+  if (SP.active !== tab.id) return;
+  tree.innerHTML = (res.matches || []).map(m =>
+    '<div class="sprow" data-spp="' + esc(m.path) + '" data-dir="' + (m.is_dir ? '1' : '') + '">' +
+    ic(m.is_dir ? 'folder' : 'file') + '<span class="nm">' + esc(m.path) + '</span></div>'
+  ).join('') || '<div class="spempty">' + esc(t('sp_no_files')) + '</div>';
+  tree.querySelectorAll('[data-spp]').forEach(r => {
+    r.onclick = () => {
+      if (r.dataset.dir) { tab.st.path = r.dataset.spp; tab.st.q = ''; spFilesTree(tab); }
+      else spFilesOpen(tab, r.dataset.spp);
+    };
+  });
+}
+
+async function spFilesOpen(tab, path) {
+  const host = $('#spbody');
+  const box = host && host.querySelector('#spf-file');
+  if (!box) return;
+  box.innerHTML = '<div class="spempty">…</div>';
+  let res;
+  try {
+    res = await api('/fs/file?path=' + encodeURIComponent(path));
+  } catch (e) {
+    box.innerHTML = '<div class="spempty">' + esc(e.message) + '</div>';
+    return;
+  }
+  if (SP.active !== tab.id) return;
+  const f = res.file;
+  if (!f) { box.innerHTML = '<div class="spempty">' + esc(t('sp_empty_fs')) + '</div>'; return; }
+  box.innerHTML = '<div class="spfmeta">' + esc(f.path) + ' · ' + fmtBytes(f.size) +
+    (f.total_lines ? ' · ' + f.total_lines + ' 行' : '') + '</div>' +
+    '<div class="spfile">' + (f.binary ? '<div class="spempty">' + esc(t('sp_empty_fs')) + '</div>'
+      : '<pre>' + esc(f.text) + '</pre>') + '</div>';
+}
+
+/* ------------------------------------------------------------ 审查面板 */
+
+async function spRenderReview(host, tab) {
+  host.innerHTML = '<div class="spbar"><button class="spbtn" id="spg-ref">↻</button>' +
+    '<span style="flex:1;color:var(--fg2);font-size:11.5px" id="spg-branch"></span></div>' +
+    '<div class="spgit" id="spg-list"></div><div id="spg-diff"></div>';
+  host.querySelector('#spg-ref').onclick = () => spRenderReview(host, tab);
+  const list = host.querySelector('#spg-list');
+  list.innerHTML = '<div class="spempty">…</div>';
+  let res;
+  try {
+    res = await api('/git/status');
+  } catch (e) {
+    list.innerHTML = '<div class="spempty">' + esc(e.message) + '</div>';
+    return;
+  }
+  const st = res.status || {};
+  if (SP.active !== tab.id) return;
+  const branch = host.querySelector('#spg-branch');
+  if (branch) branch.textContent = st.is_repo ? st.branch : '';
+  if (!st.is_repo) {
+    list.innerHTML = '<div class="spempty">' + esc(t('sp_not_repo')) + '</div>';
+    return;
+  }
+  if (!(st.files || []).length) {
+    list.innerHTML = '<div class="spempty">' + esc(t('sp_empty_git')) + '</div>';
+    return;
+  }
+  list.innerHTML = st.files.map(f => {
+    const cls = f.state === 'untracked' ? 'new' : f.state === 'added' ? 'add'
+      : f.state === 'deleted' ? 'del' : 'mod';
+    const letter = f.state === 'untracked' ? '?' : f.state === 'added' ? 'A'
+      : f.state === 'deleted' ? 'D' : 'M';
+    return '<div class="spgf ' + cls + '" data-spgp="' + esc(f.path) + '">' +
+      '<span class="st">' + letter + '</span><span class="nm">' + esc(f.path) + '</span></div>';
+  }).join('');
+  list.querySelectorAll('[data-spgp]').forEach(r => {
+    r.onclick = () => spGitDiff(tab, r.dataset.spgp);
+  });
+}
+
+async function spGitDiff(tab, path) {
+  const host = $('#spbody');
+  const box = host && host.querySelector('#spg-diff');
+  if (!box) return;
+  box.innerHTML = '<div class="spempty">…</div>';
+  let res;
+  try {
+    res = await api('/git/diff?path=' + encodeURIComponent(path));
+  } catch (e) {
+    box.innerHTML = '<div class="spempty">' + esc(e.message) + '</div>';
+    return;
+  }
+  if (SP.active !== tab.id) return;
+  const d = res.diff || {};
+  if (d.note) {
+    box.innerHTML = '<div class="spempty">' + esc(d.note) + '</div>';
+    return;
+  }
+  if (!(d.hunks || []).length) {
+    box.innerHTML = '<div class="spempty">' + esc(t('sp_empty_git')) + '</div>';
+    return;
+  }
+  box.innerHTML = '<div style="padding:12px 16px 0"><div class="spfmeta" style="padding:0 0 8px;border:0">' +
+    esc(d.path) + '</div></div>' + d.hunks.map(h =>
+      '<div class="spdiff"><div class="hh">' + esc(h.header) + '</div>' +
+      h.lines.map(l => '<div class="dl ' + (l.sign === '+' ? 'p' : l.sign === '-' ? 'm' : '') + '">' +
+        '<span class="sg">' + esc(l.sign) + '</span><span>' + esc(l.text) + '</span></div>').join('') +
+      '</div>').join('');
+}
+
+/* ------------------------------------------------------------ 浏览器面板 */
+
+function spRenderBrowser(host, tab) {
+  host.innerHTML = '<div class="spbar"><input id="spb-url" placeholder="https://" spellcheck="false" autocomplete="off">' +
+    '<button class="spbtn pri" id="spb-go">' + esc(t('sp_run')) + '</button></div>' +
+    '<div class="spbrow" id="spb-body"><div class="spempty">' + esc(t('sp_empty_browser')) + '</div></div>';
+  const url = host.querySelector('#spb-url');
+  url.value = tab.st.url || '';
+  const go = host.querySelector('#spb-go');
+  go.onclick = async () => {
+    const u = url.value.trim();
+    if (!u) return;
+    go.disabled = true;
+    try {
+      await api('/browser/navigate', { method: 'POST', body: { url: u } });
+      tab.st.url = u;
+      // 给浏览器一点时间加载页面再取状态。
+      setTimeout(() => spBrowserState(tab), 1200);
+    } catch (e) {
+      toast(e.message);
+    }
+    go.disabled = false;
+  };
+  url.onkeydown = e => { if (e.key === 'Enter') go.click(); };
+  if (tab.st.url) spBrowserState(tab);
+}
+
+async function spBrowserState(tab) {
+  const host = $('#spbody');
+  const box = host && host.querySelector('#spb-body');
+  if (!box) return;
+  let res;
+  try {
+    res = await api('/browser/state');
+  } catch (e) {
+    box.innerHTML = '<div class="spempty">' + esc(e.message) + '</div>';
+    return;
+  }
+  if (SP.active !== tab.id) return;
+  const url = res.url || '';
+  if (url) {
+    const inp = host.querySelector('#spb-url');
+    if (inp && !inp.value) inp.value = url;
+  }
+  const img = res.screenshot
+    ? '<img src="data:image/png;base64,' + esc(res.screenshot) + '" alt="">'
+    : '';
+  box.innerHTML = img + (res.text ? '<pre>' + esc(res.text) + '</pre>' : '');
+}
+
+/* ------------------------------------------------------------ 终端面板 */
+
+function spRenderTerminal(host, tab) {
+  const st = tab.st;
+  st.out = st.out || '';
+  st.runId = st.runId || null;
+  host.innerHTML = '<div class="spterm"><div class="log" id="spt-log"></div>' +
+    '<div class="cmd"><span class="pr">$</span><input id="spt-in" spellcheck="false" autocomplete="off"></div></div>';
+  const log = host.querySelector('#spt-log');
+  log.textContent = st.out;
+  const inp = host.querySelector('#spt-in');
+  const run = async () => {
+    const cmd = inp.value.trim();
+    if (!cmd) return;
+    inp.value = '';
+    st.out += '$ ' + cmd + '\n';
+    log.textContent = st.out;
+    log.scrollTop = log.scrollHeight;
+    // 客户端自选 id：流式输出在命令结束前就开始了，服务端生成 id 的话
+    // 前端来不及订阅，所以由客户端先定下来再发请求。
+    const cid = 'term_c' + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36);
+    st.runId = cid;
+    try {
+      const res = await api('/term/exec', { method: 'POST', body: { command: cmd, call_id: cid } });
+      if (res.error) st.out += res.error + '\n';
+      else if (res.stdout) st.out += res.stdout.replace(/\n$/, '') + '\n';
+      st.out += '\n';
+      st.runId = null;
+    } catch (e) {
+      st.out += e.message + '\n';
+      st.runId = null;
+    }
+    if (SP.active === tab.id) {
+      const l2 = $('#spbody') && $('#spbody').querySelector('#spt-log');
+      if (l2) { l2.textContent = st.out; l2.scrollTop = l2.scrollHeight; }
+    }
+  };
+  inp.onkeydown = e => { if (e.key === 'Enter') run(); };
+}
+
+/* ------------------------------------------------------------ 部署面板 */
+
+function spRenderDeploy(host) {
+  host.innerHTML = '<div class="spl"><h2>' + esc(t('sp_deploy')) + '</h2>' +
+    '<p>' + esc(t('sp_deploy_h')) + '</p><div class="spempty" style="text-align:left;padding:14px 0">' +
+    esc(t('sp_deploy_note')) + '</div></div>';
+}
+
+/* ------------------------------------------------------------ 辅助对话 */
+
+/** 为辅助对话标签创建独立会话。 */
+async function spSideChatInit(tab) {
+  try {
+    const res = await api('/session/new', { method: 'POST', body: { title: t('sp_sidechat') } });
+    tab.st.sid = res.session && res.session.id;
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+function spRenderSideChat(host, tab) {
+  const st = tab.st;
+  st.msgs = st.msgs || [];
+  host.innerHTML = '<div class="spsc"><div class="msgs" id="spc-msgs"></div>' +
+    '<div id="spc-perm"></div>' +
+    '<div class="in"><textarea id="spc-in" rows="1" placeholder="' + esc(t('sp_sidechat_placeholder')) + '"></textarea>' +
+    '<button class="spbtn pri" id="spc-send">' + esc(t('sp_run')) + '</button></div></div>';
+  const msgs = host.querySelector('#spc-msgs');
+  msgs.innerHTML = st.msgs.map(m =>
+    '<div class="m ' + (m.role === 'user' ? 'u' : m.role === 'error' ? 'err' : 'a') + '">' +
+    esc(m.text) + '</div>').join('');
+  msgs.scrollTop = msgs.scrollHeight;
+
+  const inp = host.querySelector('#spc-in');
+  const send = host.querySelector('#spc-send');
+  const doSend = async () => {
+    const text = inp.value.trim();
+    if (!text) return;
+    if (!st.sid) { toast(t('sp_sidechat_placeholder')); return; }
+    inp.value = '';
+    st.msgs.push({ role: 'user', text: text });
+    st.streaming = true;
+    spRenderSideChat(host, tab);
+    try {
+      await api('/chat', {
+        method: 'POST',
+        body: {
+          session_id: st.sid,
+          text: text,
+          permission_mode: S.perm,
+          thinking_level: S.lvl
+        }
+      });
+    } catch (e) {
+      st.streaming = false;
+      st.msgs.push({ role: 'error', text: e.message });
+      spRenderSideChat(host, tab);
+    }
+  };
+  send.onclick = doSend;
+  inp.onkeydown = e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doSend(); }
+  };
+}
+
+/**
+ * 侧边栏的 SSE 钩子。
+ *
+ * 主对话区在 dispatch() 里按会话过滤事件；侧边栏需要看到全部事件
+ * （尤其是辅助对话自己那个会话的流式输出），所以这个钩子挂在会话过滤
+ * 之前。它只往侧边栏自己的标签里写，不会污染主对话区。
+ */
+function spOnEvent(ev) {
+  if (!SP.tabs.length || !ev) return;
+  // 辅助对话标签：只处理属于自己会话的事件。
+  SP.tabs.forEach(tab => {
+    if (tab.kind !== 'sidechat') return;
+    const sid = tab.st.sid;
+    if (!sid || ev.sessionId !== sid) return;
+    if (ev.type === 'text.delta') {
+      if (!tab.st.cur) tab.st.cur = { role: 'assistant', text: '' };
+      tab.st.cur.text += (ev.text || '');
+    } else if (ev.type === 'text.done') {
+      if (tab.st.cur) { tab.st.msgs.push(tab.st.cur); tab.st.cur = null; }
+    } else if (ev.type === 'turn.end') {
+      if (tab.st.cur) { tab.st.msgs.push(tab.st.cur); tab.st.cur = null; }
+      tab.st.streaming = false;
+    } else if (ev.type === 'permission.request') {
+      tab.st.perm = ev;
+    } else if (ev.type === 'question') {
+      tab.st.question = ev;
+    } else if (ev.type === 'error') {
+      tab.st.msgs.push({ role: 'error', text: ev.error || ev.message || 'error' });
+    }
+  });
+  // 终端面板：收集本标签发起的命令的流式输出。
+  SP.tabs.forEach(tab => {
+    if (tab.kind !== 'terminal' || !tab.st.runId) return;
+    if (ev.type === 'tool.progress' && ev.callId === tab.st.runId) {
+      tab.st.out += (ev.chunk || '') + '\n';
+    }
+  });
+  // 只有当前可见的面板需要重绘。
+  const cur = SP.tabs.find(x => x.id === SP.active);
+  if (!cur) return;
+  if (cur.kind === 'sidechat' && (ev.type === 'text.delta' || ev.type === 'turn.end' ||
+      ev.type === 'text.done' || ev.type === 'permission.request' || ev.type === 'question')) {
+    spRenderSideChat($('#spbody'), cur);
+  } else if (cur.kind === 'terminal' && ev.type === 'tool.progress' && ev.callId === cur.st.runId) {
+    const log = $('#spbody') && $('#spbody').querySelector('#spt-log');
+    if (log) { log.textContent = cur.st.out; log.scrollTop = log.scrollHeight; }
+  }
 }
 
 /* ==================================================================

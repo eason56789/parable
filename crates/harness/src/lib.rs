@@ -5,6 +5,7 @@ pub mod computer;
 pub mod config;
 pub mod error;
 pub mod event;
+pub mod git;
 pub mod permission;
 pub mod plugin;
 pub mod provider;
@@ -12,9 +13,11 @@ pub mod schedule;
 pub mod server;
 pub mod session;
 pub mod subagent;
+pub mod team;
 pub mod tools;
 pub mod token;
 pub mod usage;
+pub mod wsfs;
 
 /// Performance micro-benchmarks. Only compiled under `cfg(test)`.
 #[cfg(test)]
