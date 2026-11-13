@@ -231,6 +231,13 @@ pub struct SubagentService {
     runtime: Arc<RwLock<Option<Arc<crate::agent::AgentRuntime>>>>,
     /// 每个子代理的完成通道：`agent_wait` 在这里挂起，直到子代理收尾。
     outcomes: Arc<RwLock<HashMap<String, watch::Sender<Option<ChildOutcome>>>>>,
+    /// 共享的会话存储。
+    ///
+    /// 轮询子代理的输出必须走**同一个** store 实例：另起一个
+    /// `SessionStore::new()` 会得到自己的缓存，而缓存不会随磁盘变化失效，
+    /// 于是轮询永远看到子会话的第一份（空）快照——子代理明明答了，父代理
+    /// 却读到"没有输出"。
+    store: Option<crate::session::SharedStore>,
 }
 
 impl SubagentService {
@@ -241,6 +248,7 @@ impl SubagentService {
             running: Arc::new(Mutex::new(HashMap::new())),
             runtime: Arc::new(RwLock::new(None)),
             outcomes: Arc::new(RwLock::new(HashMap::new())),
+            store: None,
         }
     }
 
@@ -264,6 +272,12 @@ impl SubagentService {
     /// 中间那一步用这个方法完成，不形成构造期环。
     pub async fn set_runtime(&self, rt: Arc<crate::agent::AgentRuntime>) {
         *self.runtime.write().await = Some(rt);
+    }
+
+    /// 绑定共享的会话存储（轮询子代理输出用）。
+    pub fn with_store(mut self, store: crate::session::SharedStore) -> Self {
+        self.store = Some(store);
+        self
     }
 
     /// The root session and depth of `parent_session`'s tree.
@@ -310,7 +324,12 @@ impl SubagentService {
         };
 
         // The child gets its own session so its history is isolated from the parent.
-        let store = crate::session::SessionStore::new();
+        // Use the shared store when we have one: a private instance has its own
+        // cache, which would not see the child's later writes.
+        let shared_store = self.store.clone();
+        let store = shared_store.clone().unwrap_or_else(|| {
+            Arc::new(crate::session::SessionStore::new())
+        });
         let child_session = store
             .create(parent_workspace, &format!("⚙ {label}", label = req.label))
             .await
@@ -423,9 +442,11 @@ impl SubagentService {
             let mut tool_calls_seen: u64 = 0;
             let mut timed_out = false;
             let mut polls = 0u64;
-            // 轮询用的 store 复用一个实例：每次新建 SessionStore 都会重新读盘
-            // 解析会话 JSON，500ms 一次的开销没有必要。
-            let poll_store = crate::session::SessionStore::new();
+            // 轮询用**共享** store：另起一个实例会带上自己的缓存，而缓存不会
+            // 随磁盘变化失效，于是永远读到子会话创建时的空快照。
+            let poll_store = shared_store.clone().unwrap_or_else(|| {
+                Arc::new(crate::session::SessionStore::new())
+            });
             loop {
                 if cancel.is_cancelled() {
                     // 父侧取消：同时终止子 turn，避免留下孤儿轮继续跑。
@@ -540,7 +561,9 @@ impl SubagentService {
                     label,
                     payload["result"].as_str().unwrap_or_default()
                 );
-                let deliver_store = crate::session::SessionStore::new();
+                let deliver_store = shared_store.clone().unwrap_or_else(|| {
+                    Arc::new(crate::session::SessionStore::new())
+                });
                 let _ = deliver_store
                     .append_message(
                         &parent_sid,

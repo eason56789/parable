@@ -171,13 +171,16 @@ pub struct TaskView {
     pub subject: String,
     pub description: String,
     pub status: TaskStatus,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "ownerId", skip_serializing_if = "Option::is_none")]
     pub owner_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "ownerName", skip_serializing_if = "Option::is_none")]
     pub owner_name: Option<String>,
+    #[serde(rename = "blockedBy")]
     pub blocked_by: Vec<String>,
+    #[serde(rename = "writeScopes")]
     pub write_scopes: Vec<String>,
     pub ready: bool,
+    #[serde(rename = "writeScopeWarnings")]
     pub write_scope_warnings: Vec<String>,
 }
 

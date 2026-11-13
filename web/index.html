@@ -47,6 +47,11 @@ body.sc #side{width:0}body.sc #sin{opacity:0}
 .rc.pin .rci{display:block}
 .rc .rci svg{width:14px;height:14px}
 .rc .rct{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* 会话过多时的「加载更多」 */
+.rcmore{display:block;width:calc(100% - 20px);margin:6px 10px 10px;padding:7px 10px;border:0;border-radius:8px;
+  background:var(--hov);color:var(--fg2);font:12px var(--sans);cursor:pointer;
+  transition:background-color calc(.2s * var(--animd)),color calc(.2s * var(--animd))}
+.rcmore:hover{color:var(--fg)}
 .rc.unread .rct{font-weight:600}
 .rc .rcmeta{display:flex;align-items:center;gap:5px;flex:none;margin-left:auto}
 .rc .rcdt{display:none;width:6px;height:6px;border-radius:50%;background:#e5534b}
@@ -613,16 +618,27 @@ body.spmax #sdp{position:fixed;inset:46px 0 0 0;width:100vw;max-width:none;z-ind
 .ug-h h2{margin:0;font:600 26px var(--serif)}
 .ug-h p{margin:5px 0 0;color:var(--fg2);font-size:13px;line-height:1.5}
 .ug-ha{display:flex;align-items:center;gap:8px;flex:none}
-/* 顶部 5 格概览 */
-.ug-sum{display:grid;grid-template-columns:repeat(5,1fr);border:.5px solid var(--line);border-radius:14px;overflow:hidden;background:var(--bg)}
-@media(max-width:900px){.ug-sum{grid-template-columns:repeat(3,1fr)}}
-@media(max-width:560px){.ug-sum{grid-template-columns:repeat(2,1fr)}}
-.ug-sum>div{padding:18px 16px;text-align:center;border-left:.5px solid var(--line)}
-.ug-sum>div:first-child{border-left:0}
-@media(max-width:900px){.ug-sum>div:nth-child(4),.ug-sum>div:nth-child(1){border-left:0}}
-@media(max-width:560px){.ug-sum>div:nth-child(3),.ug-sum>div:nth-child(5){border-left:0}}
+/* 顶部概览格 */
+.ug-sum{display:grid;grid-template-columns:repeat(4,1fr);border:.5px solid var(--line);border-radius:14px;overflow:hidden;background:var(--bg)}
+@media(max-width:900px){.ug-sum{grid-template-columns:repeat(4,1fr)}}
+@media(max-width:620px){.ug-sum{grid-template-columns:repeat(2,1fr)}}
+.ug-sum>div{padding:18px 16px;text-align:center;border-left:.5px solid var(--line);border-top:.5px solid var(--line)}
+.ug-sum>div:nth-child(4n+1){border-left:0}
+.ug-sum>div:nth-child(-n+4){border-top:0}
+@media(max-width:620px){
+  .ug-sum>div:nth-child(4n+1){border-left:.5px solid var(--line)}
+  .ug-sum>div:nth-child(2n+1){border-left:0}
+  .ug-sum>div:nth-child(-n+4){border-top:.5px solid var(--line)}
+  .ug-sum>div:nth-child(-n+2){border-top:0}
+}
 .ug-sum b{display:block;font:600 22px var(--serif);color:var(--fg);letter-spacing:-.01em}
 .ug-sum span{display:block;margin-top:4px;color:var(--fg2);font-size:11.5px}
+/* 常用模型 / 峰值时段：概览下方的两条高亮 */
+.ug-hl{display:flex;flex-wrap:wrap;gap:10px 26px;margin-top:-6px;padding:12px 16px;border:.5px solid var(--line);border-radius:12px;background:var(--hov)}
+.ug-hl-i{display:flex;align-items:baseline;gap:8px;min-width:0}
+.ug-hl-i>span{color:var(--fg2);font:11.5px var(--sans);white-space:nowrap}
+.ug-hl-i>b{font:500 13px var(--mono);color:var(--fg);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ug-hl-i>em{font-style:normal;font:11.5px var(--mono);color:var(--fg2);white-space:nowrap}
 .ug-card{border:.5px solid var(--line);border-radius:14px;background:var(--bg);padding:18px 20px 20px}
 .ug-card>h3{margin:0 0 14px;font:500 14px var(--sans);color:var(--fg)}
 .ug-ch{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px}
@@ -693,6 +709,7 @@ body.spmax #sdp{position:fixed;inset:46px 0 0 0;width:100vw;max-width:none;z-ind
 .ug-peaks{display:flex;flex-wrap:wrap;gap:8px 18px;margin-top:14px;padding-top:12px;border-top:.5px solid var(--line)}
 .ug-peak{display:flex;align-items:baseline;gap:7px;font:12px var(--sans);color:var(--fg2)}
 .ug-peak b{font:500 12.5px var(--mono);color:var(--fg)}
+.ug-peak em{font-style:normal;font:11px var(--mono);color:var(--fg2)}
 /* 用量最高的会话 */
 .ug-ts{display:flex;flex-direction:column;gap:1px}
 .ug-ts-r{display:flex;align-items:center;gap:10px;padding:9px 8px;margin:0 -8px;border-radius:9px;cursor:pointer;
@@ -963,6 +980,9 @@ const L = {
     ug_peak_hour:'最活跃时段', ug_peak_day:'最活跃一天',
     ug_tops:'用量最高的会话', ug_tops_empty:'还没有会话用量记录',
     ug_turns_n:'{n} 轮', ug_sessions_n:'{n} 个会话', ug_days_n:'{n} 天',
+    ug_sessions:'会话数', ug_days:'活跃天数',
+    ug_trend_stack:'堆叠', ug_trend_line:'折线',
+    ug_fav_model:'常用模型',
     ug_open_session:'打开会话',
     sprefT:'优先搜索引擎', sprefH:'auto：两种搜索都交给模型，配了 DeepSeek key 时优先它；deepseek：只推荐 DeepSeek 搜索；anysearch / multi：web_search 只查对应来源',
     sp_auto:'自动', sp_deepseek:'DeepSeek', sp_anysearch:'AnySearch', sp_multi:'多平台',
@@ -1056,6 +1076,9 @@ const L = {
     ug_peak_hour:'Busiest hour', ug_peak_day:'Busiest day',
     ug_tops:'Top sessions', ug_tops_empty:'No session usage yet',
     ug_turns_n:'{n} turns', ug_sessions_n:'{n} sessions', ug_days_n:'{n} days',
+    ug_sessions:'Sessions', ug_days:'Active days',
+    ug_trend_stack:'Stacked', ug_trend_line:'Lines',
+    ug_fav_model:'Favorite model',
     ug_open_session:'Open chat',
     sprefT:'Preferred search engine', sprefH:'auto: both tools stay available, DeepSeek first once a key is set; deepseek: DeepSeek search only; anysearch / multi: web_search queries that source exclusively',
     sp_auto:'Auto', sp_deepseek:'DeepSeek', sp_anysearch:'AnySearch', sp_multi:'Multi-engine',
@@ -2663,6 +2686,13 @@ function dispatch(ev) {
       if (!expectBubble && (ev.text || '').trim()) uMsg(ev.text, null, []);
       expectBubble = false;
       if (!curA) startTurnUI();
+      // 事件丢失自愈：开始轮询核对服务端的 turn 状态。
+      startTurnProbe();
+      break;
+
+    case 'events.lost':
+      // 服务端承认丢了事件（慢客户端被 broadcast 缓冲甩掉）。
+      onEventsLost(ev);
       break;
 
     case 'reasoning.delta':
@@ -2864,6 +2894,7 @@ function dispatch(ev) {
       finishThink(curThinkEl);
       curThinkEl = null;
       thinkStart = 0;
+      stopTurnProbe();
       if (curA) {
         stopSpin(curA, ev.ms);
         setActs(curA, true);
@@ -3014,6 +3045,8 @@ async function run(q) {
   busy = true;
   sig = { stop: false };
   sync();
+  // 事件丢失自愈：核对服务端是否还在跑这一轮。
+  startTurnProbe();
 
   try {
     const res = await api('/chat', {
@@ -3597,10 +3630,17 @@ function addRc(c) {
   return d;
 }
 
+/* 会话列表分页：一次只渲染前 N 条，避免上千个会话把侧栏拖死。 */
+let sessLimit = 200;
+let sessTotal = 0;
+let sessLimited = false;
+
 async function loadSessions(quiet) {
   try {
-    const res = await api('/sessions');
+    const res = await api('/sessions?limit=' + sessLimit);
     const list = res.sessions || [];
+    sessTotal = res.total || list.length;
+    sessLimited = !!res.limited;
     CONVS = list.map(s => ({
       id: s.id, t: s.title, ts: s.updated_at || s.created_at,
       pin: s.pinned, pinAt: s.updated_at, group: s.group, arch: !!s.archived
@@ -3636,9 +3676,34 @@ async function loadSessions(quiet) {
     });
     sortRcs();
     refreshTimes();
+    renderMoreBtn();
   } catch (e) {
     if (!quiet) toast(e.message);
   }
+}
+
+/** 侧栏底部的「加载更多」按钮（还有未显示的会话时才出现）。 */
+function renderMoreBtn() {
+  const host = $('#rcu');
+  if (!host) return;
+  let btn = $('#rcmore');
+  if (!sessLimited) {
+    if (btn) btn.remove();
+    return;
+  }
+  if (!btn) {
+    btn = document.createElement('button');
+    btn.id = 'rcmore';
+    btn.className = 'rcmore';
+    btn.onclick = async () => {
+      sessLimit = Math.min(sessLimit + 200, 1000);
+      await loadSessions(true);
+    };
+    host.parentElement.append(btn);
+  }
+  const shown = CONVS.length;
+  btn.textContent = (S.lang === 'zh' ? '加载更多（' : 'Load more (') +
+    shown + '/' + sessTotal + (S.lang === 'zh' ? '）' : ')');
 }
 
 let openTok = 0;   // openSession 竞态令牌：连点两个会话时旧请求直接作废
@@ -4833,8 +4898,8 @@ function pushProvider(p) {
    使用统计（settings → usage）
    ================================================================== */
 const UCH = ['--uch1', '--uch2', '--uch3', '--uch4', '--uch5', '--uch6'];
-/** 用量页状态：区间范围、热力图模式、模型显示名缓存 */
-let ugRange = '30d', ugHmMode = 'daily', ugModelNames = {}, ugSnap = null;
+/** 用量页状态：区间范围、热力图模式、趋势图模式、模型显示名缓存 */
+let ugRange = '30d', ugHmMode = 'daily', ugTrendMode = 'stack', ugModelNames = {}, ugSnap = null;
 
 /** 大数字格式化：中文用「万 / 亿」，英文用 K / M / B。 */
 function fmtBig(n) {
@@ -4908,7 +4973,29 @@ function paintUsage(body, s) {
     '<div><b>' + esc(fmtLongMs(sum.longestSessionMs)) + '</b><span>' + t('ug_longest') + '</span></div>' +
     '<div><b>' + esc(String(sum.currentStreakDays || 0)) + '</b><span>' + t('ug_streak_now') + '</span></div>' +
     '<div><b>' + esc(String(sum.longestStreakDays || 0)) + '</b><span>' + t('ug_streak_max') + '</span></div>' +
-    '</div>';
+    '<div><b>' + esc(String(sum.totalSessions || 0)) + '</b><span>' + t('ug_sessions') + '</span></div>' +
+    '<div><b>' + esc(String(sum.totalTurns || 0)) + '</b><span>' + t('ug_turns') + '</span></div>' +
+    '<div><b>' + esc(String(sum.activeDays || 0)) + '</b><span>' + t('ug_days') + '</span></div>' +
+    '</div>' +
+    // 常用模型 + 峰值时段：ZCode 把这两项单独拎出来，数据缺失时整条不渲染。
+    (() => {
+      const fav = sum.favoriteModel;
+      const a = s.activity || {};
+      if (!fav && a.peakHour == null) return '';
+      const items = [];
+      if (fav) {
+        items.push('<div class="ug-hl-i"><span>' + t('ug_fav_model') + '</span>' +
+          '<b>' + esc(ugModelName(fav.modelId)) + '</b>' +
+          '<em>' + esc((Number(fav.share || 0) * 100).toFixed(1)) + '%</em></div>');
+      }
+      if (a.peakHour != null) {
+        const hTok = ((a.hours || [])[a.peakHour] || {}).tokens || 0;
+        items.push('<div class="ug-hl-i"><span>' + t('ug_peak_hour') + '</span>' +
+          '<b>' + String(a.peakHour).padStart(2, '0') + ':00</b>' +
+          '<em>' + esc(fmtBig(hTok)) + ' ' + esc(t('ug_tokens')) + '</em></div>');
+      }
+      return '<div class="ug-hl">' + items.join('') + '</div>';
+    })();
 
   // ---- 热力图
   const hm = s.heatmap || { weeks: [] };
@@ -4921,13 +5008,149 @@ function paintUsage(body, s) {
   // ---- 时间范围 + 趋势图
   const rSeg = '<div class="ug-seg">' + [['7d', 'ug_7d'], ['30d', 'ug_30d'], ['all', 'ug_all']].map(([k, l]) =>
     '<button data-ugrange="' + k + '" class="' + (ugRange === k ? 'on' : '') + '">' + t(l) + '</button>').join('') + '</div>';
-  const trend = '<div class="ug-card"><div class="ug-ch"><h3>' + t('ug_trend') + '</h3>' + rSeg + '</div>' +
+  const tSeg = '<div class="ug-seg">' + [['stack', 'ug_trend_stack'], ['line', 'ug_trend_line']].map(([k, l]) =>
+    '<button data-ugtrend="' + k + '" class="' + (ugTrendMode === k ? 'on' : '') + '">' + t(l) + '</button>').join('') + '</div>';
+  const trend = '<div class="ug-card"><div class="ug-ch"><h3>' + t('ug_trend') + '</h3>' +
+    '<div style="display:flex;gap:8px;align-items:center">' + tSeg + rSeg + '</div></div>' +
     ugTrend(daily) + '</div>';
+
+  // ---- Token 构成
+  const comp = '<div class="ug-card"><h3>' + t('ug_comp') + '</h3>' + ugComposition(sum) + '</div>';
+
+  // ---- 活跃时段
+  const act = '<div class="ug-card"><h3>' + t('ug_act') + '</h3>' + ugActivity(s.activity || {}) + '</div>';
 
   // ---- 模型用量
   const mu = '<div class="ug-card"><h3>' + t('ug_model_usage') + '</h3>' + ugModelUsage(models) + '</div>';
 
-  body.innerHTML = strip + heat + trend + mu;
+  // ---- 用量最高的会话
+  const tops = '<div class="ug-card"><h3>' + t('ug_tops') + '</h3>' + ugTopSessions(s.topSessions || []) + '</div>';
+
+  body.innerHTML = strip + heat + comp + act + trend + mu + tops;
+}
+
+/* ------------------------------------------------------------ Token 构成 */
+
+/**
+ * Token 构成：输入 / 输出 / 缓存读 / 缓存写 的堆叠条 + 图例。
+ * 缓存命中率高时，缓存读那一段会占掉大部分条宽——这正是要让人看见的。
+ */
+function ugComposition(sum) {
+  const parts = [
+    { k: 'inputTokens', c: '--uch1', l: 'ug_comp_in' },
+    { k: 'outputTokens', c: '--uch2', l: 'ug_comp_out' },
+    { k: 'cacheReadTokens', c: '--uch3', l: 'ug_comp_cr' },
+    { k: 'cacheCreationTokens', c: '--uch5', l: 'ug_comp_cw' },
+  ];
+  const vals = parts.map(p => Number(sum[p.k]) || 0);
+  const total = vals.reduce((a, b) => a + b, 0);
+  if (!total) return '<div class="ug-empty">' + t('ug_comp_none') + '</div>';
+
+  const bar = parts.map((p, i) => vals[i] > 0
+    ? '<i style="width:' + (vals[i] / total * 100).toFixed(2) + '%;background:var(' + p.c + ')"></i>'
+    : '').join('');
+
+  const leg = parts.map((p, i) =>
+    '<div><i style="background:var(' + p.c + ')"></i>' +
+    '<span>' + t(p.l) + '</span>' +
+    '<b>' + esc(fmtBig(vals[i])) + '</b>' +
+    '<em>' + (total ? (vals[i] / total * 100).toFixed(1) : '0.0') + '%</em></div>').join('');
+
+  const hit = Number(sum.cacheHitRate) || 0;
+  const rate = '<div class="ug-peaks"><div class="ug-peak">' + t('tk_cache') +
+    ' <b>' + (hit * 100).toFixed(1) + '%</b></div>' +
+    '<div class="ug-peak">' + t('ug_total') + ' <b>' + esc(fmtBig(total)) + '</b></div></div>';
+
+  return '<div class="ug-comp"><div class="ug-cbar">' + bar + '</div>' +
+    '<div class="ug-cleg">' + leg + '</div>' + rate + '</div>';
+}
+
+/* ------------------------------------------------------------ 活跃时段 */
+
+/**
+ * 活跃时段：24 小时柱状图 + 星期条。
+ * 小时轴按本地时间，0 点在最左。
+ */
+function ugActivity(act) {
+  const hours = act.hours || [];
+  const wdays = act.weekdays || [];
+  if (!hours.length && !wdays.length) return '<div class="ug-empty">' + t('ug_empty') + '</div>';
+
+  const maxH = Math.max(1, ...hours.map(h => Number(h.tokens) || 0));
+  const hourBar = hours.map((h, i) => {
+    const v = Number(h.tokens) || 0;
+    const pct = v / maxH * 100;
+    const tip = String(i).padStart(2, '0') + ':00 · ' + fmtBig(v) + ' ' + t('ug_tokens');
+    return '<div class="ug-hour' + (v ? '' : ' zero') + '" title="' + esc(tip) + '">' +
+      '<b>' + esc(tip) + '</b>' +
+      '<i style="height:' + (v ? Math.max(3, pct) : 2) + '%"></i></div>';
+  }).join('');
+
+  const maxW = Math.max(1, ...wdays.map(d => Number(d.tokens) || 0));
+  const wdNames = S.lang === 'zh'
+    ? ['一', '二', '三', '四', '五', '六', '日']
+    : ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+  const wdBar = wdays.map((d, i) => {
+    const v = Number(d.tokens) || 0;
+    const tip = wdNames[i] + ' · ' + fmtBig(v) + ' ' + t('ug_tokens');
+    return '<div class="ug-wday" title="' + esc(tip) + '">' +
+      '<div class="b"><i style="width:' + (v / maxW * 100).toFixed(1) + '%"></i></div>' +
+      '<span>' + esc(wdNames[i]) + '</span>' +
+      '<em>' + esc(fmtBig(v)) + '</em></div>';
+  }).join('');
+
+  // 最活跃的小时 / 星期。全零时不报「峰值」，否则会把 00:00 / 周一
+  // 当成真实结论展示出来。
+  const argmax = (arr) => {
+    let at = 0, best = -1;
+    (arr || []).forEach((x, i) => {
+      const v = Number(x && x.tokens) || 0;
+      if (v > best) { best = v; at = i; }
+    });
+    return { at, best };
+  };
+  const ph = argmax(hours);
+  const pw = argmax(wdays);
+
+  const peaks = '<div class="ug-peaks">' +
+    (ph.best > 0
+      ? '<div class="ug-peak">' + t('ug_peak_hour') + ' <b>' + String(ph.at).padStart(2, '0') + ':00</b>' +
+        ' <em>' + esc(fmtBig(ph.best)) + '</em></div>'
+      : '') +
+    (pw.best > 0
+      ? '<div class="ug-peak">' + t('ug_peak_day') + ' <b>' + esc(wdNames[pw.at]) + '</b>' +
+        ' <em>' + esc(fmtBig(pw.best)) + '</em></div>'
+      : '') +
+    '</div>';
+
+  return '<div class="ug-act">' +
+    '<div><div class="ug-hours">' + hourBar + '</div>' +
+    '<div class="ug-haxis"><span>00</span><span>06</span><span>12</span><span>18</span><span>23</span></div></div>' +
+    '<div><div class="ug-wdays">' + wdBar + '</div>' + peaks + '</div>' +
+    '</div>';
+}
+
+/* -------------------------------------------------------- 用量最高的会话 */
+
+/**
+ * 用量最高的会话。点一行直接跳到那个会话。
+ */
+function ugTopSessions(list) {
+  if (!list || !list.length) return '<div class="ug-empty">' + t('ug_tops_empty') + '</div>';
+  const max = Math.max(1, ...list.map(s => Number(s.totalTokens) || 0));
+  const rows = list.map((s, i) => {
+    const id = s.sessionId || '';
+    const title = s.title || t('ug_legacy');
+    const model = ugModelName(s.model);
+    const sub = model + ' · ' + t('ug_turns_n').replace('{n}', String(s.turns || 0));
+    return '<div class="ug-ts-r" data-ugsess="' + esc(id) + '" title="' + esc(t('ug_open_session')) + '">' +
+      '<span class="rank">' + (i + 1) + '</span>' +
+      '<div class="nm"><b>' + esc(title) + '</b><small>' + esc(sub) + '</small></div>' +
+      '<div class="bar"><i style="width:' + ((Number(s.totalTokens) || 0) / max * 100).toFixed(1) + '%"></i></div>' +
+      '<span class="val">' + esc(fmtBig(s.totalTokens)) + '</span>' +
+      '</div>';
+  }).join('');
+  return '<div class="ug-ts">' + rows + '</div>';
 }
 
 /* ---------------------------------------------------------------- 热力图 */
@@ -4948,10 +5171,7 @@ function ugHeatmap(hm) {
     cells.push({ date: c.date, total: c.totalTokens || 0, turns: c.turnCount || 0, level: c.level || 0, void: false });
   }));
   const active = cells.filter(c => !c.void && c.total > 0).map(c => c.total).sort((a, b) => a - b);
-  const maxT = hm.maxTokens || (active.length ? active[active.length - 1] : 0);
-  const q = p => active.length ? active[Math.min(active.length - 1, Math.round((active.length - 1) * p))] : 0;
-  const [q1, q2, q3] = [q(.25), q(.5), q(.75)];
-  const lvlOf = v => v <= 0 ? 0 : v <= q1 ? 1 : v <= q2 ? 2 : v <= q3 ? 3 : 4;
+  const dayMax = hm.maxTokens || (active.length ? active[active.length - 1] : 0);
 
   // 按模式重算每格的聚合值
   const vals = cells.map(c => c.total);
@@ -4965,7 +5185,6 @@ function ugHeatmap(hm) {
         }
         for (let j = i; j < Math.min(i + 7, vals.length); j++) {
           cells[j].total = has ? sum : 0;
-          cells[j].level = lvlOf(cells[j].total);
         }
       }
     } else { // cumulative
@@ -4974,10 +5193,20 @@ function ugHeatmap(hm) {
         if (c.void) return;
         run += c.total;
         c.total = run;
-        c.level = lvlOf(run);
       });
     }
   }
+
+  // 色阶必须按「当前模式下聚合后的值」重新分位。拿日分位去比周和，
+  // 几乎每一格都会落到最高档，色阶就废了。
+  const agg = cells.filter(c => !c.void && c.total > 0).map(c => c.total).sort((a, b) => a - b);
+  const q = p => agg.length ? agg[Math.min(agg.length - 1, Math.round((agg.length - 1) * p))] : 0;
+  const [q1, q2, q3] = [q(.25), q(.5), q(.75)];
+  const lvlOf = v => v <= 0 ? 0 : v <= q1 ? 1 : v <= q2 ? 2 : v <= q3 ? 3 : 4;
+  cells.forEach(c => { if (!c.void) c.level = lvlOf(c.total); });
+  const maxT = mode === 'daily'
+    ? dayMax
+    : (agg.length ? agg[agg.length - 1] : 0);
 
   const cols = Math.ceil(cells.length / 7);
   const grid = [];
@@ -5020,13 +5249,17 @@ function ugHeatmap(hm) {
 /* ---------------------------------------------------------------- 趋势图 */
 
 /**
- * 每日 Token 趋势图：一个模型一条折线。
- * 纯 SVG（项目里没有图表库），坐标轴 + 网格线 + 平滑曲线。
+ * 每日 Token 趋势图：一个模型一条折线（`line`），或按模型堆叠（`stack`）。
+ * 纯 SVG（项目里没有图表库），坐标轴 + 网格线 + 折线。
+ *
+ * 折线按「该模型有数据的连续段」断开：中间没有数据的那天不连直线，
+ * 否则一条稀疏的曲线会被画成横跨整张图的斜线。
  */
 function ugTrend(daily) {
   if (!daily || !daily.length) return '<div class="ug-empty">' + t('ug_empty') + '</div>';
   const W = 720, H = 220, PL = 52, PR = 12, PT = 12, PB = 26;
   const iw = W - PL - PR, ih = H - PT - PB;
+  const stack = ugTrendMode === 'stack';
 
   // 每个模型一条序列
   const series = new Map();
@@ -5042,8 +5275,12 @@ function ugTrend(daily) {
     return sb - sa;
   });
   const maxV = Math.max(1, ...ids.flatMap(id => series.get(id)));
-  const niceMax = niceCeil(maxV);
   const x = i => PL + (daily.length <= 1 ? iw / 2 : iw * i / (daily.length - 1));
+
+  // 堆叠模式下 y 轴按「每日各模型之和」定标。
+  const dayTotals = daily.map((_, i) => ids.reduce((s, id) => s + series.get(id)[i], 0));
+  const scaleMax = stack ? Math.max(1, ...dayTotals) : maxV;
+  const niceMax = niceCeil(scaleMax);
   const y = v => PT + ih - (v / niceMax) * ih;
 
   // 网格线 + y 轴标签
@@ -5062,20 +5299,41 @@ function ugTrend(daily) {
       esc(String(daily[i].date || '').slice(5)) + '</text>';
   });
 
-  // 折线（Catmull-Rom 转 bezier 的简化版：相邻点中点作为控制点）
+  // 堆叠时每个模型的 y 偏移是它下面所有模型之和。
+  const base = new Array(daily.length).fill(0);
   let paths = '';
   ids.forEach((id, k) => {
     const col = 'var(' + UCH[k % UCH.length] + ')';
     const pts = series.get(id);
-    let d = '', started = false;
+    // 拆成若干「连续有数据」的段，每段单独画一条折线。
+    const segs = [];
+    let cur = [];
     pts.forEach((v, i) => {
-      if (v <= 0 && !started) return;
-      started = true;
-      const px = x(i), py = y(v);
-      d += (d ? ' L' : 'M') + px.toFixed(1) + ' ' + py.toFixed(1);
+      if (v > 0) cur.push(i);
+      else if (cur.length) { segs.push(cur); cur = []; }
     });
-    if (!d) return;
-    paths += '<path d="' + d + '" fill="none" stroke="' + col + '" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity=".9"/>';
+    if (cur.length) segs.push(cur);
+
+    segs.forEach(seg => {
+      if (stack) {
+        // 堆叠面积：上下沿各自成折线，闭合成一块。
+        let up = '', down = '';
+        seg.forEach((i, n) => {
+          const y0 = y(base[i]), y1 = y(base[i] + pts[i]);
+          up += (n ? ' L' : 'M') + x(i).toFixed(1) + ' ' + y1.toFixed(1);
+          down = ' L' + x(i).toFixed(1) + ' ' + y0.toFixed(1) + down;
+        });
+        paths += '<path d="' + up + down + ' Z" fill="' + col + '" fill-opacity=".22" stroke="' + col +
+          '" stroke-width="1.5" stroke-linejoin="round"/>';
+      } else {
+        let d = '';
+        seg.forEach((i, n) => {
+          d += (n ? ' L' : 'M') + x(i).toFixed(1) + ' ' + y(pts[i]).toFixed(1);
+        });
+        paths += '<path d="' + d + '" fill="none" stroke="' + col + '" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity=".9"/>';
+      }
+    });
+    if (stack) for (let i = 0; i < daily.length; i++) base[i] += pts[i];
   });
 
   const legend = ids.length
@@ -5101,6 +5359,11 @@ function niceCeil(v) {
 /** 模型用量：环形图 + 排名列表。 */
 function ugModelUsage(models) {
   if (!models || !models.length) return '<div class="ug-empty">' + t('ug_empty') + '</div>';
+  // 历史会话（模型未知）不是真实模型，排到最后：它只是导入时补的桶，
+  // 放在第一位会让人以为它是「最常用的模型」。
+  const rank = (m) => (m.modelId === '__legacy__' ? 1 : 0);
+  models = models.slice().sort((a, b) =>
+    rank(a) - rank(b) || (b.totalTokens || 0) - (a.totalTokens || 0));
   const total = models.reduce((s, m) => s + (m.totalTokens || 0), 0);
   const R = 58, C = 2 * Math.PI * R, ST = 24;
   let off = 0, segs = '';
@@ -5126,7 +5389,7 @@ function ugModelUsage(models) {
   return '<div class="ug-mu">' + donut + '<div class="ug-mu-l"></div><div class="ug-mu-r">' + list + '</div></div>';
 }
 
-$('#sp').addEventListener('click', e => {
+$('#sp').addEventListener('click', async e => {
   if (tab !== 'u') return;
   const r = e.target.closest('[data-ugrange]');
   if (r) { ugRange = r.dataset.ugrange; loadUsage(); return; }
@@ -5135,6 +5398,32 @@ $('#sp').addEventListener('click', e => {
     ugHmMode = hm.dataset.ughm;
     const body = document.getElementById('ugbody');
     if (body && ugSnap) paintUsage(body, ugSnap);
+    return;
+  }
+  const tc = e.target.closest('[data-ugtrend]');
+  if (tc) {
+    ugTrendMode = tc.dataset.ugtrend;
+    const body = document.getElementById('ugbody');
+    if (body && ugSnap) paintUsage(body, ugSnap);
+    return;
+  }
+  // 点「用量最高的会话」的一行 → 关掉设置、打开那个会话。
+  const ts = e.target.closest('[data-ugsess]');
+  if (ts) {
+    const id = ts.dataset.ugsess;
+    if (!id) return;
+    closeSet();
+    // 会话列表可能还没加载，先把标题补上再打开。
+    const known = CONVS.find(c => c.id === id);
+    if (!known) {
+      try {
+        const res = await api('/sessions');
+        CONVS = (res.sessions || res || []).map(s => ({
+          id: s.id, t: s.title || '', u: s.updated_at || 0, p: !!s.pinned, a: !!s.archived
+        }));
+      } catch (err) { /* 打开会话时再用 id 兜底 */ }
+    }
+    await openSession(id);
     return;
   }
   if (e.target.closest('[data-ugref]')) { loadUsage(); return; }
@@ -5359,6 +5648,65 @@ let es = null;
 // 停顿不受影响。
 let busyWatchdog = null;
 function disarmBusyWatchdog() { clearTimeout(busyWatchdog); busyWatchdog = null; }
+
+/* ---- 事件丢失自愈 --------------------------------------------------
+   SSE 走 broadcast：慢客户端会被缓冲甩掉事件（包括 turn.end）。那时
+   连接还在、前端却以为还在生成 —— 界面永久停在「思考中」。
+   这里主动向服务端核对：/api/turn/running 报告该会话没有 turn 在跑时，
+   说明 turn 已经结束（只是收尾事件丢了），按 turn.end 收尾视图。
+   与断连看门狗互补：那个依赖断连，这个不依赖。 */
+let turnProbeTimer = null;
+let turnProbeBusy = false;
+
+function stopTurnProbe() {
+  if (turnProbeTimer) { clearInterval(turnProbeTimer); turnProbeTimer = null; }
+}
+
+/** 启动轮询核对（每次 turn 开始时调用）。 */
+function startTurnProbe() {
+  stopTurnProbe();
+  turnProbeTimer = setInterval(async () => {
+    if (turnProbeBusy || !busy || !conv || !conv.id) return;
+    turnProbeBusy = true;
+    try {
+      const r = await api('/turn/running?session=' + encodeURIComponent(conv.id));
+      if (r && r.running === false) {
+        // 服务端说没有 turn 在跑：收尾事件丢了，按 turn.end 补收尾。
+        if (busy) {
+          busy = false;
+          if (curStream) sflush(curStream);
+          finishThink(curThinkEl);
+          curThinkEl = null;
+          thinkStart = 0;
+          if (curA) {
+            stopSpin(curA);
+            setActs(curA, true);
+            foldFlow(curA, 0);
+            reconcileTail();
+          }
+          sync();
+          resetTurn();
+          restamp();
+        }
+        stopTurnProbe();
+      }
+    } catch (e) {
+      // 服务端不可达：等下一次轮询。
+    } finally {
+      turnProbeBusy = false;
+    }
+  }, 3000);
+}
+
+/** 收到 events.lost：服务端承认丢了事件，立刻重新同步。 */
+async function onEventsLost(ev) {
+  toast(t('conn_lost'));
+  if (!conv || !conv.id) return;
+  // 丢掉的事件可能包含整轮内容，用存储里的最终状态校正视图。
+  try {
+    await reconcileTail();
+  } catch (e) { /* 忽略 */ }
+}
 function connectEvents() {
   if (es) { try { es.close(); } catch (e) {} }
   es = new EventSource('/api/events?token=' + encodeURIComponent(TOKEN));

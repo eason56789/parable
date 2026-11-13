@@ -208,6 +208,9 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/schedule/{id}/run", post(run_task_now))
         .route("/agents", get(list_agents))
         .route("/agents/{id}/interrupt", post(interrupt_agent))
+        // 该会话当前是否还有 turn 在跑。前端用它核对"我以为在生成"的状态：
+        // 如果服务端说没有在跑，前端就复位 busy（事件丢失时的自愈）。
+        .route("/turn/running", get(turn_running))
         // 智能体团队：共享任务板 + 成员名册
         .route("/team", get(get_team))
         .route("/team/mode", post(set_team_mode))
@@ -318,7 +321,25 @@ async fn sse_events(
                                 }
                             }
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        // The client fell too far behind and events were dropped.
+                        // Silently continuing is what caused permanently "stuck
+                        // on thinking" frontends: the missing `turn.end` never
+                        // arrived, so the UI never cleared its busy state.
+                        // Tell the client to re-sync instead — it can rebuild
+                        // the view from the store.
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            tracing::warn!("SSE client lagged, {n} events dropped");
+                            let gap = json!({
+                                "type": "events.lost",
+                                "sessionId": sid,
+                                "seq": 0,
+                                "ts": crate::event::now_ms(),
+                                "dropped": n,
+                            });
+                            if let Ok(sse) = Event::default().json_data(&gap) {
+                                yield Ok(sse);
+                            }
+                        }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }
                 }
@@ -854,8 +875,18 @@ async fn list_sessions(
         return unauthorized();
     }
     let query = q.get("q").cloned().unwrap_or_default();
-    let list = state.store.list(&query).await;
-    Json(json!({"sessions": list})).into_response()
+    let mut list = state.store.list(&query).await;
+    // The sidebar renders every entry it gets. With thousands of sessions
+    // that is a multi-second DOM build — the page appears frozen. Cap the
+    // default page and let the client ask for more.
+    let limit: usize = q
+        .get("limit")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(200)
+        .clamp(1, 1000);
+    let total = list.len();
+    list.truncate(limit);
+    Json(json!({"sessions": list, "total": total, "limited": total > list.len()})).into_response()
 }
 
 /// GET /api/search/messages?q=… —— 全文搜索所有会话里的消息正文。
@@ -1418,6 +1449,27 @@ async fn run_task_now(
         }
         Err(e) => server_error(e),
     }
+}
+
+/// GET /api/turn/running?session=<id> —— 该会话是否还有 turn 在跑。
+///
+/// 前端用它做自愈核对：如果 UI 认为正在生成、而服务端说没有在跑，说明
+/// `turn.end` 事件丢了（慢客户端被 broadcast 缓冲甩掉），UI 必须复位。
+async fn turn_running(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(q): Query<SessionQuery>,
+) -> Response {
+    if !check_auth(&headers, q.token.as_deref(), &state) {
+        return unauthorized();
+    }
+    let sid = q.session.unwrap_or_default();
+    let running = if sid.is_empty() {
+        false
+    } else {
+        state.agent.is_running(&sid).await
+    };
+    Json(json!({"running": running})).into_response()
 }
 
 /// List the members of one agent tree.
@@ -2023,8 +2075,9 @@ pub async fn serve(
         store.clone(),
     )
     .with_usage(usage.clone());
-    let subagents: crate::subagent::SharedSubagents =
-        Arc::new(crate::subagent::SubagentService::new(hub.clone()));
+    let subagents: crate::subagent::SharedSubagents = Arc::new(
+        crate::subagent::SubagentService::new(hub.clone()).with_store(store.clone()),
+    );
     // 子代理的 runtime 与根 runtime 共享全部内部状态（config/hub/broker/
     // store/运行槽），差别只在于它自己也是那棵树的成员。
     let child_runtime: Arc<AgentRuntime> = Arc::new(

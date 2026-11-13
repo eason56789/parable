@@ -267,7 +267,19 @@ pub fn default_providers() -> Vec<ProviderConfig> {
 }
 
 impl Config {
+    /// The data directory: config, sessions, permissions, logs, plugins.
+    ///
+    /// `PARABLE_HOME` overrides it. On Windows `dirs::home_dir()` reads the
+    /// OS user profile and ignores `HOME`, so without this switch there is
+    /// no way to run a second instance against its own data — or to test
+    /// without touching the real profile.
     pub fn home_dir() -> PathBuf {
+        if let Some(dir) = std::env::var_os("PARABLE_HOME") {
+            let dir = PathBuf::from(dir);
+            if !dir.as_os_str().is_empty() {
+                return dir;
+            }
+        }
         dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join(".parable")
