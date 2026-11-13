@@ -750,6 +750,25 @@ When it is achieved, say so clearly in your reply.",
             system.push_str("\n\n## Plugin instructions\n");
             system.push_str(&plugin_prompt);
         }
+        // Memories: standing user context. Like the goal and team blocks these
+        // live outside `build_system_prompt`, so a `systemPromptRaw` override
+        // still carries what the user asked us to remember.
+        if let Some(mem) = crate::memory::MemoryStore::with_path(
+            crate::config::Config::home_dir().join("memory.json"),
+        )
+        .prompt_block()
+        .await
+        {
+            system.push_str("\n\n");
+            system.push_str(&mem);
+        }
+        // Skills: only the name + description menu. The body is pulled by the
+        // `read_skill` tool when the model decides the skill applies, so a big
+        // library does not cost context on every turn.
+        if let Some(sk) = crate::skills::prompt_block(workspace) {
+            system.push_str("\n\n");
+            system.push_str(&sk);
+        }
         // Agent Teams: the shared task board and the collaboration policy.
         // Must live here rather than in `build_system_prompt`, so it survives
         // a `systemPromptRaw` override — the same reason the goal block does.

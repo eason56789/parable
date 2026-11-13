@@ -21,6 +21,41 @@ pub struct ModelConfig {
     pub thinking: bool,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Max tokens the model may answer with (0 = provider default).
+    #[serde(default)]
+    pub max_output: u64,
+    /// Reasoning effort levels, low → high. The chat UI's thinking level maps
+    /// onto these names.
+    #[serde(default)]
+    pub levels: Vec<String>,
+    /// JSON template written into the request body; `{level}` is replaced with
+    /// the level name. Empty means "don't send a reasoning parameter".
+    #[serde(default)]
+    pub mapping: String,
+    /// Extra capabilities beyond vision/tools.
+    #[serde(default)]
+    pub structured: bool,
+    #[serde(default)]
+    pub native_search: bool,
+}
+
+impl Default for ModelConfig {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            context: 0,
+            vision: false,
+            tools: true,
+            thinking: false,
+            enabled: true,
+            max_output: 0,
+            levels: Vec::new(),
+            mapping: String::new(),
+            structured: false,
+            native_search: false,
+        }
+    }
 }
 
 fn default_true() -> bool {
@@ -251,6 +286,11 @@ pub fn default_providers() -> Vec<ProviderConfig> {
                 vision: false,
                 tools: true,
                 thinking: false,
+                max_output: 0,
+                levels: Vec::new(),
+                mapping: String::new(),
+                structured: false,
+                native_search: false,
                 enabled: true,
             },
             ModelConfig {
@@ -260,6 +300,11 @@ pub fn default_providers() -> Vec<ProviderConfig> {
                 vision: false,
                 tools: true,
                 thinking: true,
+                max_output: 0,
+                levels: Vec::new(),
+                mapping: String::new(),
+                structured: false,
+                native_search: false,
                 enabled: true,
             },
         ],

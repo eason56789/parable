@@ -31,6 +31,8 @@ pub struct AppState {
     pub subagents: crate::subagent::SharedSubagents,
     /// Persistent usage journal behind `GET /api/usage`.
     pub usage: Arc<crate::usage::UsageJournal>,
+    /// Long-lived memories injected into every system prompt.
+    pub memory: Arc<crate::memory::MemoryStore>,
     pub started_at: u64,
     /// Actual bound port (0 until `serve` resolves it); used by the Origin
     /// whitelist. Requests cannot arrive before it is set.
@@ -170,6 +172,14 @@ fn server_error(e: impl std::fmt::Display) -> Response {
         .into_response()
 }
 
+fn not_found(what: &str) -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(json!({"error": format!("not found: {what}")})),
+    )
+        .into_response()
+}
+
 // ------------------------------------------------------------------ router
 
 /// 上传上限:20MB 原始字节。
@@ -185,6 +195,8 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/config", get(get_config).patch(patch_config))
         .route("/providers", get(get_providers))
         .route("/providers/test", post(test_provider))
+        // 从上游拉模型目录（OpenAI/Anthropic/Ollama 各自的清单端点）
+        .route("/providers/{id}/models", get(list_provider_models))
         .route("/models", get(get_models))
         .route("/sessions", get(list_sessions))
         .route("/search/messages", get(search_messages))
@@ -209,6 +221,13 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/agents", get(list_agents))
         // 权限规则（permissions.toml）的读写，设置页用它编辑规则
         .route("/permissions", get(get_permissions).post(put_permissions))
+        // 记忆：长期偏好/事实，注入每一轮的 system prompt
+        .route("/memory", get(list_memory).post(save_memory).delete(clear_memory))
+        .route("/memory/{id}", patch(update_memory).delete(delete_memory))
+        // 技能：磁盘上的 SKILL.md，按 用户/项目 两个作用域
+        .route("/skills", get(list_skills).post(save_skill))
+        .route("/skills/{scope}/{id}", get(get_skill).delete(delete_skill))
+        .route("/skills/{scope}/{id}/enabled", post(toggle_skill))
         .route("/agents/{id}/interrupt", post(interrupt_agent))
         // 该会话当前是否还有 turn 在跑。前端用它核对"我以为在生成"的状态：
         // 如果服务端说没有在跑，前端就复位 busy（事件丢失时的自愈）。
@@ -806,6 +825,29 @@ async fn get_providers(State(state): State<SharedState>, headers: HeaderMap) -> 
 #[derive(Debug, Deserialize)]
 struct TestReq {
     provider_id: String,
+    /// Test this specific model instead of the provider's first enabled one.
+    #[serde(default)]
+    model: String,
+}
+
+/// GET /api/providers/{id}/models —— 从上游拉取该供应商的模型目录。
+async fn list_provider_models(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    let cfg = state.config.read().await;
+    let Some(p) = cfg.providers.iter().find(|p| p.id == id) else {
+        return bad_request("unknown provider");
+    };
+    // 用未打码的 key 去问上游（上游要的就是真 key）。
+    match crate::models::list_upstream(p).await {
+        Ok(models) => Json(json!({ "models": models })).into_response(),
+        Err(e) => bad_request(&e.to_string()),
+    }
 }
 
 async fn test_provider(
@@ -821,8 +863,14 @@ async fn test_provider(
         let Some(p) = cfg.providers.iter().find(|p| p.id == r.provider_id) else {
             return bad_request("unknown provider");
         };
-        let m = p.models.iter().find(|m| m.enabled).map(|m| m.id.clone()).unwrap_or_default();
-        let t = p.models.iter().find(|m| m.enabled).map(|m| m.thinking).unwrap_or(false);
+        // 指定模型就测它，否则测第一个启用的模型。
+        let chosen = if !r.model.is_empty() {
+            p.models.iter().find(|m| m.id == r.model)
+        } else {
+            p.models.iter().find(|m| m.enabled)
+        };
+        let m = chosen.map(|m| m.id.clone()).unwrap_or_default();
+        let t = chosen.map(|m| m.thinking).unwrap_or(false);
         (p.clone(), p.api.clone(), p.key.clone(), m, t)
     };
     let probe = crate::config::ProviderConfig {
@@ -1531,7 +1579,170 @@ async fn put_permissions(
     Json(json!({ "ok": true })).into_response()
 }
 
-/// List the members of one agent tree.
+// ------------------------------------------------------------------ memory
+
+async fn list_memory(State(state): State<SharedState>, headers: HeaderMap) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    let items = state.memory.list().await;
+    Json(json!({"memories": items})).into_response()
+}
+
+async fn save_memory(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(input): Json<crate::memory::MemoryInput>,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    match state.memory.upsert(input).await {
+        Ok(m) => Json(json!({"ok": true, "memory": m})).into_response(),
+        Err(e) => bad_request(&e.to_string()),
+    }
+}
+
+async fn update_memory(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<u64>,
+    Json(mut input): Json<crate::memory::MemoryInput>,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    input.id = Some(id);
+    match state.memory.upsert(input).await {
+        Ok(m) => Json(json!({"ok": true, "memory": m})).into_response(),
+        Err(e) => bad_request(&e.to_string()),
+    }
+}
+
+async fn delete_memory(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<u64>,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    match state.memory.remove(id).await {
+        Ok(removed) => Json(json!({"ok": true, "removed": removed})).into_response(),
+        Err(e) => server_error(e),
+    }
+}
+
+async fn clear_memory(State(state): State<SharedState>, headers: HeaderMap) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    match state.memory.clear().await {
+        Ok(n) => Json(json!({"ok": true, "cleared": n})).into_response(),
+        Err(e) => server_error(e),
+    }
+}
+
+// ------------------------------------------------------------------ skills
+
+/// `GET /api/skills?scope=user|project`
+async fn list_skills(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    let ws = workspace_of(&state).await;
+    let scope = q.get("scope").map(|s| s.as_str());
+    let listing = crate::skills::list(&ws, scope);
+    Json(json!({
+        "skills": listing.skills,
+        "problems": listing.problems,
+        "roots": {
+            "user": crate::skills::user_dir().display().to_string(),
+            "project": crate::skills::project_dir(&ws).display().to_string(),
+        }
+    }))
+    .into_response()
+}
+
+async fn get_skill(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    axum::extract::Path((scope, id)): axum::extract::Path<(String, String)>,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    let ws = workspace_of(&state).await;
+    match crate::skills::read_body(&ws, &scope, &id) {
+        Some(s) => Json(json!(s)).into_response(),
+        None => not_found(&format!("skill {id}")),
+    }
+}
+
+async fn save_skill(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(input): Json<crate::skills::SkillInput>,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    let ws = workspace_of(&state).await;
+    match crate::skills::save(&ws, &input) {
+        Ok(s) => Json(json!({"ok": true, "skill": s})).into_response(),
+        Err(e) => bad_request(&e.to_string()),
+    }
+}
+
+async fn delete_skill(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    axum::extract::Path((scope, id)): axum::extract::Path<(String, String)>,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    let ws = workspace_of(&state).await;
+    match crate::skills::remove(&ws, &scope, &id) {
+        Ok(removed) => Json(json!({"ok": true, "removed": removed})).into_response(),
+        Err(e) => bad_request(&e.to_string()),
+    }
+}
+
+async fn toggle_skill(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    axum::extract::Path((scope, id)): axum::extract::Path<(String, String)>,
+    Json(v): Json<Value>,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    let enabled = v.get("enabled").and_then(|x| x.as_bool()).unwrap_or(true);
+    let ws = workspace_of(&state).await;
+    match crate::skills::set_enabled(&ws, &scope, &id, enabled) {
+        Ok(ok) => Json(json!({"ok": ok})).into_response(),
+        Err(crate::HarnessError::NotFound(_)) => not_found(&format!("skill {id}")),
+        Err(e) => bad_request(&e.to_string()),
+    }
+}
+
+/// The workspace the agent is working in, resolved fresh each call so a
+/// workspace switch is picked up without a restart.
+async fn workspace_of(state: &SharedState) -> std::path::PathBuf {
+    let w = state.config.read().await.workspace.clone();
+    if w.trim().is_empty() {
+        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+    } else {
+        std::path::PathBuf::from(w)
+    }
+}
+
+
 ///
 /// `?session=<id>` scopes the listing to that session's tree. Without it the
 /// whole process-wide catalogue is returned — the old behaviour, which leaked
@@ -2207,6 +2418,10 @@ pub async fn serve_in(
         });
     }
 
+    let memory = Arc::new(crate::memory::MemoryStore::with_path(
+        crate::config::Config::home_dir().join("memory.json"),
+    ));
+
     let state: SharedState = Arc::new(AppState {
         token: token.clone(),
         hub,
@@ -2218,6 +2433,7 @@ pub async fn serve_in(
         schedule,
         subagents,
         usage,
+        memory,
         started_at: crate::event::now_ms(),
         port: std::sync::atomic::AtomicU16::new(0),
     });

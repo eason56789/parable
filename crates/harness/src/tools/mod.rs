@@ -189,6 +189,7 @@ impl ToolCtx {
             && !matches!(
                 tool,
                 "read_file" | "glob" | "grep" | "list_dir" | "todo_write" | "ask_user"
+                    | "read_skill"
             )
         {
             return Err(HarnessError::PermissionDenied(
@@ -576,6 +577,16 @@ impl Registry {
                 }), &["url"]),
             },
             ToolSpec {
+                name: "read_skill".into(),
+                description: "Load the full text of a skill (a reusable procedure the user installed). \
+The system prompt lists installed skills by id and description; call this with that id when a \
+skill matches the current request, then follow the steps it contains. Read-only.".into(),
+                input_schema: obj(json!({
+                    "id": str_prop("Skill id as listed in the Skills section of the system prompt"),
+                    "scope": str_prop("Optional: \"user\" or \"project\". Omit to search both."),
+                }), &["id"]),
+            },
+            ToolSpec {
                 name: "deepseek_search".into(),
                 // auto 模式下没配 key 就不把工具递给模型，免得模型空跑一次报错。
                 // 显式偏好 deepseek 但 key 缺失时仍然暴露——错误信息会提示去设置。
@@ -838,6 +849,7 @@ impl Registry {
             "todo_write" => self.todo_write(args, ctx).await,
             "ask_user" => self.ask_user(args, ctx).await,
             "web_fetch" => web::fetch(args, ctx).await,
+            "read_skill" => self.read_skill(args).await,
             "web_search" => web::multi_search(args, ctx).await,
             "deepseek_search" => web::deepseek_search(args, ctx).await,
             "computer_screenshot" => crate::computer::screenshot(args, ctx).await,
@@ -1014,6 +1026,59 @@ impl Registry {
             &ctx.call_id,
         )
         .await
+    }
+
+    /// Load a skill's SKILL.md body by id.
+    ///
+    /// The system prompt only carries the menu, so this is how the model reads
+    /// the actual steps. Read-only, so it is allowed in plan mode too.
+    async fn read_skill(&self, a: &Value) -> Result<ToolOutcome, HarnessError> {
+        let id = a["id"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| HarnessError::Tool("`id` is required".into()))?;
+        let wanted_scope = a["scope"].as_str().map(|s| s.trim()).unwrap_or("");
+        let scopes: Vec<&str> = match wanted_scope {
+            "user" => vec!["user"],
+            "project" => vec!["project"],
+            _ => vec!["user", "project"],
+        };
+        for scope in scopes {
+            if let Some(sk) = crate::skills::read_body(&self.workspace, scope, id) {
+                let mut out = format!(
+                    "# Skill: {}\nScope: {}\nPath: {}\n\n{}",
+                    sk.name, sk.scope, sk.path, sk.body
+                );
+                if !sk.warnings.is_empty() {
+                    out.push_str("\n\n(warnings: ");
+                    out.push_str(&sk.warnings.join("; "));
+                    out.push(')');
+                }
+                return Ok(ToolOutcome::text(
+                    true,
+                    format!("Loaded skill {}", sk.id),
+                    out,
+                ));
+            }
+        }
+        // Give the model the menu so it can correct a typo instead of retrying
+        // the same wrong id.
+        let listing = crate::skills::list(&self.workspace, None);
+        let available: Vec<String> = listing
+            .skills
+            .iter()
+            .filter(|s| s.enabled)
+            .map(|s| format!("{} — {}", s.id, s.description))
+            .collect();
+        Err(HarnessError::Tool(if available.is_empty() {
+            format!("no skill named `{id}`; no skills are installed")
+        } else {
+            format!(
+                "no skill named `{id}`. Installed skills:\n{}",
+                available.join("\n")
+            )
+        }))
     }
 
     async fn todo_write(&self, a: &Value, _ctx: &ToolCtx) -> Result<ToolOutcome, HarnessError> {
