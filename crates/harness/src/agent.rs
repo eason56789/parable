@@ -1351,6 +1351,18 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
                         json!({"turnId": turn_id, "role": "assistant"}));
                 }
                 saved.ok();
+            } else if !cancelled && stream_err.is_none() {
+                // 模型整步零产出（上游偶发 200 + 空 SSE）：文本/思考/工具调用
+                // 全空，没有任何东西落库。静默收尾的话前端只会留下一个空气泡，
+                // 用户点编辑/删除/重跑只看到「还没落库」，不知道发生了什么。
+                // 这里补一条非致命错误，把原因明说出来。
+                self.hub.publish(
+                    session_id,
+                    "error",
+                    json!({"turnId": turn_id,
+                           "message": "模型返回了空响应（无正文、无思考、无工具调用），本轮没有可保存的内容",
+                           "fatal": false}),
+                );
             }
 
             // 取消：已积累的 text/think 已在上面折叠进 history 并落库，

@@ -3311,8 +3311,34 @@ function stopSpin(a, ms) {
  */
 function persisted(n) {
   if (n && n.dataset.mi !== undefined) return true;
-  toast(S.lang === 'zh' ? '这条消息还没落库，等这一轮结束再试' : 'This message is not stored yet — try again once the turn ends');
+  toast(busy
+    ? (S.lang === 'zh' ? '这条消息还没落库，等这一轮结束再试' : 'This message is not stored yet — try again once the turn ends')
+    : (S.lang === 'zh' ? '这条消息不在存储里（本轮可能没有产出内容）' : 'This message has no stored copy (the turn may have produced nothing)'));
   return false;
+}
+
+/**
+ * 未落库的「尾部空泡」能推导出一个虚拟删除起点：它之前最近一个已打标
+ * 节点的 miEnd，且两者之间不得再夹已打标节点（否则不是纯空尾巴，返回
+ * null 走原有提示）。典型场景：模型返回空响应 / 中途失败留下的空气泡
+ * ——它们永远不会落库，但删除 / 重新生成仍应可用，范围就是「最后一条
+ * 已落库消息之后到末尾」。
+ */
+function tailVirtualFrom(el) {
+  if (!el || !conv || !conv.id || busy) return null;
+  let p = el.previousElementSibling;
+  while (p && !(p.dataset && p.dataset.mi != null)) p = p.previousElementSibling;
+  if (!p || p.dataset.miEnd == null || p.dataset.miEnd === 'null') return null;
+  for (let n = p.nextElementSibling; n && n !== el; n = n.nextElementSibling) {
+    if (n.dataset && n.dataset.mi != null) return null;
+  }
+  // el 之后也必须全部未打标：虚拟范围是「到末尾」，后面若还有已落库的
+  // 气泡，范围会吞掉它们在存储里的内容，DOM 却把节点留下——绝不允许。
+  for (let n = el.nextElementSibling; n; n = n.nextElementSibling) {
+    if (n.dataset && n.dataset.mi != null) return null;
+  }
+  const from = +p.dataset.miEnd;
+  return isFinite(from) ? from : null;
 }
 
 function setActs(a, on) {
@@ -4589,6 +4615,17 @@ function dispatch(ev) {
           // 渲染异常）都在这里兜底补齐，保证收尾视图与存储一致。
           reconcileTail();
         }
+        // 空轮次兜底：模型零产出且错误事件丢失（或还没带上后端修复）时，
+        // 气泡里什么都没有。补一行说明，别让用户对着一格空气猜。
+        const abEmpty = curA.querySelector('.ab');
+        if (abEmpty && !abEmpty.textContent.trim() && !abEmpty.querySelector('.ec,.th')) {
+          const p = document.createElement('p');
+          p.style.opacity = '.55';
+          p.textContent = S.lang === 'zh'
+            ? '（本轮模型没有返回内容——可能是上游异常，可点右下角重新生成重跑）'
+            : '(The model returned no content this turn — click regenerate to retry)';
+          abEmpty.append(p);
+        }
       }
       busy = false;
       // 本轮已结束：后续（定时投递、重试）的 turn.start 必须能补画用户气泡，
@@ -5256,12 +5293,24 @@ async function deleteMsg(el) {
   // 有一条“待发送的编辑”时，下标基线会变；先把它撤回，删除才落在真实下标上。
   if (pendingEdit) { restorePendingEdit(); ta.value = ''; fit(); sync(); }
   const idx = el.dataset.mi;
-  // 没有存储下标（还没落库）时只动本地，和旧行为一致。
-  if (!sid || idx == null || idx === 'null') { collapseGone(el, restamp); return; }
-  const from = +idx;
-  const to = el.dataset.miEnd != null && el.dataset.miEnd !== 'null' ? +el.dataset.miEnd : from + 1;
+  let from, to;
+  if (sid && idx != null && idx !== 'null') {
+    from = +idx;
+    to = el.dataset.miEnd != null && el.dataset.miEnd !== 'null' ? +el.dataset.miEnd : from + 1;
+  } else {
+    // 没有存储下标：未落库的尾部空泡按「最后一条已打标消息之后到末尾」删
+    // （to 缺省 = 截到末尾，服务端本就没有这些内容，等于对账）；其余情况
+    // （纯本地、会话未建立）保持只动本地，和旧行为一致。
+    const v = tailVirtualFrom(el);
+    if (!sid || v == null) { collapseGone(el, restamp); return; }
+    from = v;
+    to = null;
+  }
   try {
-    await api('/sessions/' + sid + '/messages', { method: 'DELETE', body: { from, to } });
+    await api('/sessions/' + sid + '/messages', {
+      method: 'DELETE',
+      body: to != null ? { from, to } : { from }
+    });
   } catch (e) {
     // 服务端没删成就别动 DOM：界面少一条、库里还在，之后每条下标都错一位，
     // 再点删除就会删到相邻的消息上。
@@ -5271,6 +5320,13 @@ async function deleteMsg(el) {
   }
   // await 之后可能已经切走：新会话的视图由 openSession 负责，这里不能再碰。
   if (gen !== convGen || !conv || conv.id !== sid) return;
+  if (to == null) {
+    // 虚拟尾巴：el 及其后全部是未落库的空气泡，一起折叠（范围是「到末尾」）。
+    const doomed = [];
+    for (let n = el; n; n = n.nextElementSibling) doomed.push(n);
+    doomed.forEach((x, i) => i === 0 ? collapseGone(x, restamp) : x.remove());
+    return;
+  }
   collapseGone(el, restamp);
 }
 
@@ -5400,8 +5456,16 @@ async function regenFrom(el) {
   // 有待发送的编辑时先撤回：否则重跑的 DELETE 与编辑的 DELETE 会各截各的。
   if (pendingEdit) { restorePendingEdit(); ta.value = ''; fit(); sync(); }
   const idx = el.dataset.mi;
-  if (idx == null || idx === 'null') { toast(t('toast')); return; }
-  const from = +idx;
+  let from;
+  if (idx == null || idx === 'null') {
+    // 未落库的尾部空气泡（模型零产出 / 失败）：按「最后一条已落库消息之后」
+    // 重跑——这正是重新生成的语义，不必对着「还没落库」干等。
+    const v = tailVirtualFrom(el);
+    if (v == null) { toast(t('toast')); return; }
+    from = v;
+  } else {
+    from = +idx;
+  }
   // 冻结会话和代际：DELETE 与 /chat 之间用户可能切走，绝不能把 retry 发到
   // 另一个会话（旧代码在 .then 里读全局 conv.id，等于把别人的最后一条回答重跑）。
   const sid = conv.id, gen = convGen;
