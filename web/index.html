@@ -265,6 +265,13 @@ body.chat #sbar{margin-top:10px;opacity:1;transform:none;pointer-events:auto}
 .sr>div:first-child{min-width:0}
 .sr small{display:block;color:var(--fg2);font-size:12.5px;margin-top:2px}
 .sr .ct{width:auto;max-width:340px;justify-self:start}
+/* 滑块行：滑块 + 右侧数值（数值不放在标签列，"字号16px" 会被拆成两行） */
+.sr .ct:has(input[type=range]){display:flex;align-items:center;gap:12px;max-width:300px}
+.sr .ct input[type=range]{flex:1;min-width:0}
+.sr .ct .rv{flex:none;min-width:44px;text-align:right;font:12px var(--mono);color:var(--fg2)}
+/* 搜索命中的设置项 */
+.hit{background:color-mix(in srgb,var(--accent) 9%,transparent);border-radius:8px;
+  box-shadow:0 0 0 5px color-mix(in srgb,var(--accent) 9%,transparent)}
 .sr.stk .ct{max-width:none}
 .seg{display:inline-flex;background:var(--hov);border-radius:9px;padding:3px}
 .seg button{flex:1;border:0;background:none;color:var(--fg2);border-radius:7px;padding:5px 12px;cursor:pointer;white-space:nowrap;transition:background-color calc(.3s * var(--animd)),color calc(.3s * var(--animd)),box-shadow calc(.3s * var(--animd))}
@@ -1021,7 +1028,7 @@ const L = {
     lvlT:'思考强度', modelT:'模型',
     l0:'关闭', l1:'低', l2:'中', l3:'高',
     s_g:'通用', s_s:'网络搜索', s_a:'外观', s_m:'模型设置', s_p:'权限与思考', s_n:'动画', s_base:'基础设置',
-    s_u:'使用统计', s_data:'数据与统计',
+    s_u:'使用统计', s_data:'数据与统计', s_agent:'Agent 能力',
     ug_title:'使用统计', ug_desc:'Parable 的 Token 用量、活跃天数与模型分布。',
     ug_total:'累计 Token 数', ug_peak:'峰值 Token 数', ug_longest:'最长聊天时长',
     ug_streak_now:'当前连续天数', ug_streak_max:'最长连续天数',
@@ -1117,7 +1124,7 @@ const L = {
     lvlT:'Thinking effort', modelT:'Model',
     l0:'Off', l1:'Low', l2:'Medium', l3:'High',
     s_g:'General', s_s:'Web search', s_a:'Appearance', s_m:'Model settings', s_p:'Permissions', s_n:'Animation', s_base:'Basics',
-    s_u:'Usage', s_data:'Data & stats',
+    s_u:'Usage', s_data:'Data & stats', s_agent:'Agent capabilities',
     ug_title:'Usage', ug_desc:'Token usage, active days and model breakdown in Parable.',
     ug_total:'Total tokens', ug_peak:'Peak tokens', ug_longest:'Longest chat',
     ug_streak_now:'Current streak', ug_streak_max:'Longest streak',
@@ -4748,7 +4755,8 @@ $('#mm').onclick = e => {
 const TAB = ['g', 's', 'a', 'm', 'p', 'n', 'u'];
 /** 导航分组：基础设置 / 数据与统计 */
 const TGRP = [
-  { k: 's_base', tabs: ['g', 's', 'a', 'm', 'p', 'n'] },
+  { k: 's_base', tabs: ['g', 'a', 'n', 's'] },
+  { k: 's_agent', tabs: ['m', 'p'] },
   { k: 's_data', tabs: ['u'] }
 ];
 const SW = ['#d97757', '#6a9bcc', '#788c5d', '#9b87f5', '#d4637a', '#c9a227'];
@@ -4804,9 +4812,30 @@ function nav() {
   const f = $('#sfind');
   if (f) {
     f.value = navQ;
-    f.oninput = () => { navQ = f.value; nav(); const n = $('#sfind'); if (n) { n.focus(); n.setSelectionRange(n.value.length, n.value.length); } };
+    // 搜索框不随输入重建：重建会打断中文输入法（IME）的 composition。
+    // 只更新列表，输入框本身保持同一个 DOM 节点。
+    let comp = false;
+    f.oninput = () => { if (comp) return; navQ = f.value; navFilter(); };
+    f.addEventListener('compositionstart', () => { comp = true; });
+    f.addEventListener('compositionend', () => { comp = false; navQ = f.value; navFilter(); });
   }
   navFilter();
+}
+
+/** 分类的搜索索引：名称 + 说明 + 关键词。 */
+const TAB_KW = {
+  g:'名字 语言 偏好 提示词 思考 思考强度 name prompt lang',
+  s:'搜索 密钥 key deepseek anysearch 供应商 搜索接口 pref',
+  a:'主题 深色 浅色 字体 字号 宽度 强调色 配色 侧栏 theme font size width accent',
+  m:'模型 供应商 api key base url provider anthropic deepseek ollama 智谱 model',
+  p:'权限 文件 工具 命令 规则 允许 禁止 permission mode',
+  n:'动画 流式 速度 模糊 animation stream blur',
+  u:'用量 统计 token 热力图 趋势 缓存 会话 活跃 usage'
+};
+/** 分类的可搜索文本（名称 + 说明 + 关键词），小写。 */
+function tabIndex(k) {
+  const items = (SC[k] || []).map(c => (t(c.l || '') + ' ' + (c.h ? t(c.h) : ''))).join(' ');
+  return (t('s_' + k) + ' ' + items + ' ' + (TAB_KW[k] || '')).toLowerCase();
 }
 
 /** 按导航搜索词过滤分类按钮。 */
@@ -4815,8 +4844,8 @@ function navFilter() {
   const q = (navQ || '').trim().toLowerCase();
   let shown = 0;
   $('#snav').querySelectorAll('button[data-t]').forEach(b => {
-    const label = (b.dataset.label || '').toLowerCase();
-    const hit = !q || label.includes(q);
+    // 只按分类名过滤会让「搜说明里的词」找不到；用完整索引。
+    const hit = !q || tabIndex(b.dataset.t).includes(q);
     b.style.display = hit ? '' : 'none';
     if (hit) shown++;
   });
@@ -4839,6 +4868,25 @@ function navFilter() {
       panel();
     }
   }
+  // 面板内的命中项高亮并滚到可见位置
+  markHits();
+}
+
+/** 面板内命中项高亮 + 滚动定位。 */
+function markHits() {
+  const p = $('#sp');
+  if (!p) return;
+  p.querySelectorAll('.sr,.card,.mp-field,.skr,.memc').forEach(e => e.classList.remove('hit'));
+  const q = (navQ || '').trim().toLowerCase();
+  if (!q) return;
+  let first = null;
+  p.querySelectorAll('.sr,.card,.mp-field,.skr,.memc').forEach(e => {
+    if ((e.textContent || '').toLowerCase().includes(q)) {
+      e.classList.add('hit');
+      first = first || e;
+    }
+  });
+  if (first) first.scrollIntoView({ block: 'center', behavior: 'smooth' });
 }
 
 $('#snav').onclick = async e => {
@@ -4878,8 +4926,10 @@ function panel() {
     const r = document.createElement('div');
     r.className = 'sr' + (['ta', 'th', 'pv', 'rl'].includes(c.t) ? ' stk' : '');
     r.style.setProperty('--i', i++);
+    // 滑块类（rg）的数值不放在标签列：标签列窄，"字号16px" 会被拆成两行。
+    // 数值随滑块一起放在内容列。
     r.innerHTML = '<div>' + (c.l ? t(c.l) : '') + (c.h ? '<small>' + t(c.h) + '</small>' : '') +
-      (c.t === 'rg' ? '<small></small>' : '') + '</div><div class="ct"></div>';
+      (c.t === 'rg' ? '' : '') + '</div><div class="ct"></div>';
     const ct = r.querySelector('.ct');
     const sm = r.querySelector('small:last-of-type');
     const f = () => {
@@ -4927,16 +4977,17 @@ function panel() {
           if (b) { S.accent = b.dataset.v; apply(); f(); }
         };
       } else if (c.t === 'rg') {
-        sm.textContent = v + c.u;
+        // 数值放在滑块右侧（内容列），标签列只留标题
         if (!ct.firstChild) {
-          ct.innerHTML = '<input type="range" min="' + c.min + '" max="' + c.max + '" step="' + c.step + '">';
-          ct.firstChild.oninput = e => {
+          ct.innerHTML = '<input type="range" min="' + c.min + '" max="' + c.max + '" step="' + c.step + '"><span class="rv"></span>';
+          ct.querySelector('input').oninput = e => {
             S[c.k] = +e.target.value;
             apply();
-            sm.textContent = S[c.k] + c.u;
+            ct.querySelector('.rv').textContent = S[c.k] + c.u;
           };
         }
         ct.firstChild.value = v;
+        ct.querySelector('.rv').textContent = v + c.u;
       } else if (c.t === 'tx' || c.t === 'ta') {
         if (!ct.firstChild) {
           ct.innerHTML = c.t === 'tx'
@@ -4989,6 +5040,8 @@ function panel() {
     f();
     body.append(r);
   });
+  // 搜索命中的设置项高亮（面板重渲染后要再标一次）
+  markHits();
 }
 
 function openSet() {
