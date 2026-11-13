@@ -1,5 +1,7 @@
 # Rust build
 /target
+# Alternate build dirs used by parallel agents
+/target-*
 
 # Vendored reference repos (opencode / zcode / deepseek-harness) — source of
 # design study only, not part of the project and not redistributable here.
