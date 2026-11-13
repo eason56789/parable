@@ -728,33 +728,55 @@ skill matches the current request, then follow the steps it contains. Read-only.
                     "owner": str_prop("Agent name of the root or any teammate for reassign; omit to unassign"),
                 }), &["task_id","expected_revision","action"]),
             },
-            // ---- computer use (reference: ZCode CUA — a11y first, vision fallback) ----
+            // ---- computer use (reference: ZCode CUA / Anthropic computer tool / Playwright ariaSnapshot) ----
+            // 观察主流：computer_snapshot 一次返回 a11y 树（带稳定 ref + 视口坐标）
+            // + 截图；动作优先按 ref（动作期实时解析，失效明确报错），坐标兜底。
+            ToolSpec {
+                name: "computer_snapshot".into(),
+                description: "PRIMARY observation: one call returns the page's accessibility tree (interactive elements carry stable [rN] refs + viewport coordinates, textbox values, focused mark) AND a screenshot AND url/title. ref coordinates align with screenshot pixels (DPR=1). Re-snapshot whenever the page changed (refs are only guaranteed against the latest snapshot).".into(),
+                input_schema: obj(json!({
+                    "full_page": json!({"type":"boolean","description":"Capture beyond the viewport too (default false)"})
+                }), &[]),
+            },
             ToolSpec {
                 name: "computer_axtree".into(),
-                description: "Read the browser's accessibility tree. Returns a compact tree where every interactive element carries an [ref] id. PREFERRED over computer_screenshot: act on elements by ref (computer_click ref=N) — semantic, precise, works without pixel guessing.".into(),
+                description: "Read ONLY the accessibility tree (no screenshot — cheaper). Elements carry [rN] refs + viewport coordinates. Prefer computer_snapshot which also attaches a screenshot; use this when you only need structure.".into(),
                 input_schema: obj(json!({}), &[]),
             },
             ToolSpec {
                 name: "computer_screenshot".into(),
-                description: "Capture a screenshot of the current browser page. The image is attached to the tool result so you can look at it. Use when the accessibility tree cannot describe what you need (canvas, visual layout). Act by coordinates afterwards.".into(),
+                description: "Capture ONLY a screenshot (no tree). Use for canvas, visual layout, or verifying how something looks. Act by coordinates afterwards, or take a snapshot to get refs. With x/y/width/height, captures that region magnified 2x (zoom — read small dense UI, verify tiny targets).".into(),
+                input_schema: obj(json!({
+                    "full_page": json!({"type":"boolean","description":"Capture beyond the viewport too (default false)"}),
+                    "x": int_prop("Zoom region left (with y/width/height)"),
+                    "y": int_prop("Zoom region top"),
+                    "width": int_prop("Zoom region width"),
+                    "height": int_prop("Zoom region height"),
+                }), &[]),
+            },
+            ToolSpec {
+                name: "computer_extract".into(),
+                description: "Read the page's url + title + visible text as plain text (cheapest way to read article/content; no screenshot).".into(),
                 input_schema: obj(json!({}), &[]),
             },
             ToolSpec {
                 name: "computer_click".into(),
-                description: "Click an element by accessibility ref (preferred) or at screen coordinates (x/y). Optionally choose button and click count.".into(),
+                description: "Click an element by ref from the latest snapshot (preferred) or at viewport coordinates. mouseMoved is sent first so hover menus open.".into(),
                 input_schema: obj(json!({
-                    "ref": int_prop("Element ref from computer_axtree (preferred)"),
+                    "ref": int_prop("Element ref rN from the latest computer_snapshot (preferred)"),
                     "x": int_prop("X coordinate (fallback when no ref)"),
                     "y": int_prop("Y coordinate"),
                     "button": str_prop("left | right | middle (default left)"),
-                    "clicks": int_prop("1 = single, 2 = double (default 1)"),
+                    "clicks": int_prop("1 = single, 2 = double, 3 = triple (default 1)"),
                 }), &[]),
             },
             ToolSpec {
                 name: "computer_type".into(),
-                description: "Type text into the focused element (unicode-safe, e.g. Chinese). Focus the field first (click its ref).".into(),
+                description: "Type text into the focused element (unicode-safe, e.g. Chinese). Pass ref to click the field first; clear=true empties it before typing (Ctrl+A, Delete).".into(),
                 input_schema: obj(json!({
                     "text": str_prop("Text to type"),
+                    "ref": int_prop("Click this ref first to focus the field"),
+                    "clear": json!({"type":"boolean","description":"Clear existing content first (default false)"}),
                 }), &["text"]),
             },
             ToolSpec {
@@ -766,20 +788,71 @@ skill matches the current request, then follow the steps it contains. Read-only.
             },
             ToolSpec {
                 name: "computer_scroll".into(),
-                description: "Scroll the page or an element. direction: up/down/left/right; pages: how many screens (default 1).".into(),
+                description: "Scroll the page or an element. direction: up/down/left/right; pages: how many screens (default 1). Wheel at x/y or at an element's ref position.".into(),
                 input_schema: obj(json!({
                     "direction": str_prop("up | down | left | right"),
                     "pages": int_prop("Screens to scroll (default 1)"),
+                    "ref": int_prop("Scroll at this element's position"),
                     "x": int_prop("Wheel X (default 400)"),
                     "y": int_prop("Wheel Y (default 400)"),
                 }), &["direction"]),
             },
             ToolSpec {
-                name: "computer_navigate".into(),
-                description: "Navigate the controlled browser to a URL, then observe the result.".into(),
+                name: "computer_hover".into(),
+                description: "Hover the mouse over an element (ref) or position — opens hover menus, shows tooltips.".into(),
                 input_schema: obj(json!({
-                    "url": str_prop("http(s) URL"),
-                }), &["url"]),
+                    "ref": int_prop("Element ref (preferred)"),
+                    "x": int_prop("X coordinate"),
+                    "y": int_prop("Y coordinate"),
+                }), &[]),
+            },
+            ToolSpec {
+                name: "computer_drag".into(),
+                description: "Press at one point, drag with interpolated mouse moves, release at the other (sliders, canvas drawing, sortable lists).".into(),
+                input_schema: obj(json!({
+                    "from": json!({"type":"object","description":"Start: {ref} or {x,y}"}),
+                    "to": json!({"type":"object","description":"End: {ref} or {x,y}"}),
+                    "from_ref": int_prop("Flat form: start ref (alternative to from)"),
+                    "to_ref": int_prop("Flat form: end ref (alternative to to)"),
+                    "x1": int_prop("Flat form: start X"),
+                    "y1": int_prop("Flat form: start Y"),
+                    "x2": int_prop("Flat form: end X"),
+                    "y2": int_prop("Flat form: end Y"),
+                }), &[]),
+            },
+            ToolSpec {
+                name: "computer_select".into(),
+                description: "Select an option on a native <select> element by ref (matches option text or value, substring fallback). For custom dropdowns built with divs, use computer_click instead.".into(),
+                input_schema: obj(json!({
+                    "ref": int_prop("ref of the <select> element"),
+                    "option": str_prop("Option text or value to select"),
+                }), &["ref", "option"]),
+            },
+            ToolSpec {
+                name: "computer_navigate".into(),
+                description: "Navigate the controlled browser: to a URL (waits for load to settle) or back/forward/reload in history. Returns url/title and a fresh screenshot.".into(),
+                input_schema: obj(json!({
+                    "url": str_prop("http(s) URL to open (action=open, the default)"),
+                    "action": str_prop("open | back | forward | reload"),
+                }), &[]),
+            },
+            ToolSpec {
+                name: "computer_tabs".into(),
+                description: "Manage browser tabs: list (numbered, current marked), new (url), switch (index or target_id prefix), close (index or target_id prefix).".into(),
+                input_schema: obj(json!({
+                    "action": str_prop("list | new | switch | close"),
+                    "url": str_prop("URL for action=new"),
+                    "index": int_prop("Tab index for switch/close (see action=list)"),
+                    "target_id": str_prop("Target id prefix for switch/close"),
+                }), &[]),
+            },
+            ToolSpec {
+                name: "computer_wait".into(),
+                description: "Wait for the page to settle (animations, lazy loading, redirects), optionally until `until_text` appears anywhere in the visible text, then observe.".into(),
+                input_schema: obj(json!({
+                    "seconds": int_prop("Seconds to wait, 0.1-10 (default 1)"),
+                    "until_text": str_prop("Keep waiting (within seconds) until this text appears"),
+                }), &[]),
             },
             // ---- plugin management & authoring (the agent maintains its own plugins) ----
             ToolSpec {
@@ -875,13 +948,20 @@ skill matches the current request, then follow the steps it contains. Read-only.
             "read_skill" => self.read_skill(args).await,
             "web_search" => web::multi_search(args, ctx).await,
             "deepseek_search" => web::deepseek_search(args, ctx).await,
+            "computer_snapshot" => crate::computer::snapshot(args, ctx).await,
             "computer_screenshot" => crate::computer::screenshot(args, ctx).await,
             "computer_axtree" => crate::computer::axtree(args, ctx).await,
+            "computer_extract" => crate::computer::extract(args, ctx).await,
             "computer_click" => crate::computer::click(args, ctx).await,
             "computer_type" => crate::computer::type_text(args, ctx).await,
             "computer_key" => crate::computer::key(args, ctx).await,
             "computer_scroll" => crate::computer::scroll(args, ctx).await,
+            "computer_hover" => crate::computer::hover(args, ctx).await,
+            "computer_drag" => crate::computer::drag(args, ctx).await,
+            "computer_select" => crate::computer::select_option(args, ctx).await,
             "computer_navigate" => crate::computer::navigate(args, ctx).await,
+            "computer_tabs" => crate::computer::tabs(args, ctx).await,
+            "computer_wait" => crate::computer::wait_ms(args, ctx).await,
             "plugin_list" | "plugin_create" | "plugin_edit" | "plugin_toggle" | "plugin_delete" => {
                 let r = crate::tools::plugin_admin(name, args, ctx).await;
                 if r.is_ok()
