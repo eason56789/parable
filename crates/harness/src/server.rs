@@ -871,7 +871,7 @@ async fn list_sessions(
     headers: HeaderMap,
     Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> Response {
-    if !check_auth(&headers, None, &state) {
+    if !check_auth(&headers, q.get("token").map(|s| s.as_str()), &state) {
         return unauthorized();
     }
     let query = q.get("q").cloned().unwrap_or_default();
@@ -895,7 +895,7 @@ async fn search_messages(
     headers: HeaderMap,
     Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> Response {
-    if !check_auth(&headers, None, &state) {
+    if !check_auth(&headers, q.get("token").map(|s| s.as_str()), &state) {
         return unauthorized();
     }
     let query = q.get("q").cloned().unwrap_or_default();
@@ -2032,14 +2032,27 @@ pub async fn serve(
     config: Arc<RwLock<Config>>,
     port: u16,
 ) -> anyhow::Result<(u16, SharedState, tokio::task::JoinHandle<()>)> {
+    serve_in(token, config, port, None).await
+}
+
+/// Like [`serve`], but optionally rooted at an explicit data home.
+///
+/// `home` overrides `Config::home_dir()` for the session store and the usage
+/// journal. Tests use it to run against a scratch directory instead of the
+/// user's real `~/.parable`.
+pub async fn serve_in(
+    token: String,
+    config: Arc<RwLock<Config>>,
+    port: u16,
+    home: Option<std::path::PathBuf>,
+) -> anyhow::Result<(u16, SharedState, tokio::task::JoinHandle<()>)> {
+    let home = home.unwrap_or_else(Config::home_dir);
     let hub = EventHub::new();
     let broker = Arc::new(PermissionBroker::new(hub.clone()));
     let questions = Arc::new(QuestionBroker::new());
-    let store: SharedStore = Arc::new(SessionStore::new());
+    let store: SharedStore = Arc::new(SessionStore::with_root(home.join("sessions")));
     // 用量日志：每轮一条记录，供「使用统计」页聚合。
-    let usage = Arc::new(crate::usage::UsageJournal::new(
-        Config::home_dir().join("usage"),
-    ));
+    let usage = Arc::new(crate::usage::UsageJournal::new(home.join("usage")));
     let sched_store = Arc::new(crate::schedule::ScheduleStore::new());
 
     // schedule 不依赖 runtime,先建;workspace 根取全局配置(定时任务建会话用),
@@ -2239,5 +2252,115 @@ mod tests {
         assert!(!is_image_name("notes.txt"));
         assert!(!is_image_name("noext"));
         assert!(!is_image_name("png")); // 无扩展名,只有名字
+    }
+}
+
+#[cfg(test)]
+mod regression {
+    //! 回归测试：曾经让桌面端永久卡在「思考中」的两个缺陷。
+    //!
+    //! 1. SSE 广播缓冲溢出后静默丢事件（`Lagged => continue`）——
+    //!    丢掉的可能是 `turn.end`，前端就再也复位不了。
+    //! 2. `/api/sessions` 一次性返回全部会话 —— 上千个会话时侧栏渲染
+    //!    要数秒，页面看起来就是卡死。
+
+    use super::*;
+    use crate::config::Config;
+    use std::sync::Arc as StdArc;
+
+    /// 起一个真实的服务器（随机端口），返回 (base, token)。
+    /// Start a server rooted at a scratch data home, so the test never
+    /// touches the user's real `~/.parable`.
+    ///
+    /// The home is passed per-server (`serve_in`) rather than through the
+    /// process-wide `PARABLE_HOME`, so tests stay independent of each other.
+    async fn spawn_server(tag: &str) -> (String, String) {
+        let token = "regression-token".to_string();
+        let cfg = Config::default();
+        let home = std::env::temp_dir().join(format!("parable-regression-{tag}"));
+        let _ = std::fs::remove_dir_all(&home);
+        let (port, _state, _handle) =
+            serve_in(token.clone(), StdArc::new(RwLock::new(cfg)), 0, Some(home))
+                .await
+                .unwrap();
+        (format!("http://127.0.0.1:{port}"), token)
+    }
+
+    #[tokio::test]
+    async fn turn_running_reports_idle_sessions() {
+        let (base, token) = spawn_server("basic").await;
+        // A session that never ran: not running.
+        let res = reqwest::get(format!("{base}/api/turn/running?session=s_none&token={token}"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        let v: Value = res.json().await.unwrap();
+        assert_eq!(v["running"], false, "an idle session is not running");
+    }
+
+    #[tokio::test]
+    async fn turn_running_requires_a_session() {
+        let (base, token) = spawn_server("basic").await;
+        let res = reqwest::get(format!("{base}/api/turn/running?token={token}"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        let v: Value = res.json().await.unwrap();
+        assert_eq!(v["running"], false, "no session id means nothing is running");
+    }
+
+    #[tokio::test]
+    async fn turn_running_rejects_a_bad_token() {
+        let (base, _token) = spawn_server("basic").await;
+        let res = reqwest::get(format!("{base}/api/turn/running?session=s_x&token=wrong"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 401);
+    }
+
+    #[tokio::test]
+    async fn sessions_list_is_paged() {
+        let (base, token) = spawn_server("list").await;
+        let res = reqwest::get(format!("{base}/api/sessions?token={token}"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        let v: Value = res.json().await.unwrap();
+        assert!(v.get("sessions").is_some(), "sessions array must be present");
+        assert!(v.get("total").is_some(), "total must be reported");
+        assert!(v.get("limited").is_some(), "limited flag must be reported");
+    }
+
+    #[tokio::test]
+    async fn sessions_limit_is_honoured() {
+        let (base, token) = spawn_server("limit").await;
+        let res = reqwest::get(format!("{base}/api/sessions?limit=1&token={token}"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        let v: Value = res.json().await.unwrap();
+        assert!(v["sessions"].as_array().unwrap().len() <= 1);
+    }
+
+    #[tokio::test]
+    async fn sse_stream_sends_events_and_does_not_silently_drop() {
+        // The stream must deliver events to a connected client, and the server
+        // must never drop them without telling the client.
+        let (base, token) = spawn_server("basic").await;
+        let res = reqwest::get(format!("{base}/api/events?token={token}")).await.unwrap();
+        assert_eq!(res.status(), 200);
+        let mut stream = res.bytes_stream();
+        // The handshake arrives immediately.
+        use futures::StreamExt;
+        let first = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
+            .await
+            .expect("handshake must arrive")
+            .expect("stream item")
+            .expect("bytes");
+        let text = String::from_utf8_lossy(&first);
+        assert!(
+            text.contains("hello"),
+            "expected a hello handshake, got: {text}"
+        );
     }
 }

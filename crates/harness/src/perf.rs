@@ -206,3 +206,77 @@ fn perf_search_full_scan() {    // End-to-end search cost over a realistic corpu
     assert!(hits > 0);
     report("search_scan_40x50msg", iters, dt);
 }
+
+#[test]
+fn perf_append_message_cost() {
+    // 每追加一条消息都要整份重写会话 —— 成本随历史线性增长（O(n²) IO）。
+    // 这里量一下"一轮对话追加多条消息"的累计代价。
+    let dir = std::env::temp_dir().join("parable-perf-append");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    for &n_msg in &[20usize, 100] {
+        let mut msgs: Vec<StoredMessage> = Vec::new();
+        let iters = 20u32;
+        let t0 = Instant::now();
+        for _ in 0..iters {
+            msgs.clear();
+            for i in 0..n_msg {
+                msgs.push(synth_message());
+                // 模拟 append_message 的落盘代价：序列化整份会话 + 原子写。
+                let payload = serde_json::to_string_pretty(&msgs).unwrap();
+                crate::atomic_write(&dir.join("s.json"), payload.as_bytes()).unwrap();
+                std::hint::black_box(i);
+            }
+        }
+        let dt = t0.elapsed();
+        report(
+            &format!("append_{n_msg}msg_total"),
+            iters * n_msg as u32,
+            dt,
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn perf_append_breakdown() {
+    // 拆解 append 的成本：克隆整个会话 vs 序列化 vs 落盘。
+    let msgs: Vec<StoredMessage> = (0..100).map(|_| synth_message()).collect();
+    let iters = 500u32;
+
+    let t0 = Instant::now();
+    for _ in 0..iters {
+        let c = msgs.clone();
+        std::hint::black_box(c.len());
+    }
+    report("clone_100msg", iters, t0.elapsed());
+
+    let t0 = Instant::now();
+    for _ in 0..iters {
+        let s = serde_json::to_string_pretty(&msgs).unwrap();
+        std::hint::black_box(s.len());
+    }
+    report("serialize_100msg", iters, t0.elapsed());
+}
+
+#[test]
+fn perf_serialize_compact_vs_pretty() {
+    // to_string_pretty vs to_string：缩进占多少。
+    let msgs: Vec<StoredMessage> = (0..100).map(|_| synth_message()).collect();
+    let iters = 500u32;
+
+    let t0 = Instant::now();
+    for _ in 0..iters {
+        let s = serde_json::to_string_pretty(&msgs).unwrap();
+        std::hint::black_box(s.len());
+    }
+    report("serialize_pretty_100msg", iters, t0.elapsed());
+
+    let t0 = Instant::now();
+    for _ in 0..iters {
+        let s = serde_json::to_string(&msgs).unwrap();
+        std::hint::black_box(s.len());
+    }
+    report("serialize_compact_100msg", iters, t0.elapsed());
+}

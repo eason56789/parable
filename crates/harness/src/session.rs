@@ -215,6 +215,17 @@ impl SessionStore {
         }
     }
 
+    /// Store rooted at an explicit directory (tests, alternate data homes).
+    pub fn with_root(root: PathBuf) -> Self {
+        let _ = std::fs::create_dir_all(&root);
+        Self {
+            root,
+            cache: Mutex::new(HashMap::new()),
+            meta_index: Mutex::new(HashMap::new()),
+            text_index: Mutex::new(HashMap::new()),
+        }
+    }
+
     fn path_for(&self, id: &str) -> PathBuf {
         self.root.join(format!("{id}.json"))
     }
