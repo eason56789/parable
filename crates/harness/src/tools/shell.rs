@@ -41,27 +41,58 @@ fn shell_pair() -> (String, Vec<String>) {
 /// 终止整个进程树。Windows 用 `taskkill /F /T`(递归杀掉孙进程);Unix 上
 /// 孩子在独立进程组里(spawn 前设置了 process_group(0)),对负 PID 发
 /// SIGKILL 整组清掉。外部工具失败时回退 start_kill,至少杀掉直接孩子。
+fn kill_tree_pid(pid: u32) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/T", "/PID"])
+            .arg(pid.to_string())
+            .creation_flags(CREATE_NO_WINDOW)
+            .status();
+    }
+    #[cfg(unix)]
+    {
+        // 负 PID 表示对整个进程组发信号
+        let _ = std::process::Command::new("kill")
+            .args(["-9", &format!("-{pid}")])
+            .status();
+    }
+}
+
 fn kill_tree(child: &mut tokio::process::Child) {
     if let Some(pid) = child.id() {
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            let _ = std::process::Command::new("taskkill")
-                .args(["/F", "/T", "/PID"])
-                .arg(pid.to_string())
-                .creation_flags(CREATE_NO_WINDOW)
-                .status();
-        }
-        #[cfg(unix)]
-        {
-            // 负 PID 表示对整个进程组发信号
-            let _ = std::process::Command::new("kill")
-                .args(["-9", &format!("-{pid}")])
-                .status();
-        }
+        kill_tree_pid(pid);
     }
     let _ = child.start_kill();
+}
+
+/// Drop 时收拾整棵进程树。
+///
+/// `kill_on_drop` 只杀直接孩子；Git Bash 跑 `sleep` 时会留下孙进程继续跑。
+/// 终止（future 被 drop）时必须由 guard 递归清理，否则 UI 显示“已终止”但
+/// 命令仍在后台改文件。正常退出/超时路径显式 disarm，避免误杀被复用的 PID。
+struct ProcessTreeGuard {
+    pid: u32,
+    armed: bool,
+}
+
+impl ProcessTreeGuard {
+    fn new(pid: Option<u32>) -> Self {
+        Self { pid: pid.unwrap_or(0), armed: pid.is_some() }
+    }
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ProcessTreeGuard {
+    fn drop(&mut self) {
+        if self.armed && self.pid != 0 {
+            kill_tree_pid(self.pid);
+        }
+    }
 }
 
 /// 把一行原始字节转成字符串,去掉行尾换行。
@@ -109,7 +140,11 @@ pub async fn bash(
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        // 后台终端靠 abort 任务来“杀掉”命令：没有这个开关，JoinHandle 被
+        // abort 后子进程会继续跑（还在往管道里写），用户看到“已终止”但进程
+        // 仍在。drop 即杀保证 UI 与真实状态一致。
+        .kill_on_drop(true);
     #[cfg(windows)]
     {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -122,6 +157,9 @@ pub async fn bash(
     let mut child = cmd
         .spawn()
         .map_err(|e| HarnessError::Tool(format!("failed to spawn {prog}: {e}")))?;
+    // 必须先于 child 声明：Rust 逆序 drop，取消时 guard 先 taskkill /T，
+    // 再让 child 的 kill_on_drop 收尾，孙进程不会残留。
+    let mut tree_guard = ProcessTreeGuard::new(child.id());
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -196,6 +234,7 @@ pub async fn bash(
             // 超时:整树击杀,再有限收尾
             kill_tree(&mut child);
             let _ = child.wait().await;
+            tree_guard.disarm();
             let _ = tokio::time::timeout(std::time::Duration::from_secs(3), async {
                 out_task.await.ok();
                 err_task.await.ok();
@@ -224,6 +263,10 @@ pub async fn bash(
             });
         }
     };
+
+    // 孩子已正常退出，树 guard 不再需要；提前 disarm，避免后续输出收尾
+    // 期间误杀同 PID 的新进程。
+    tree_guard.disarm();
 
     // 孩子已退出;管道 EOF 偶尔会被残留孙进程攥住,最多再等 3 秒,
     // 超时就以已有缓冲收尾,不让整条命令挂死。

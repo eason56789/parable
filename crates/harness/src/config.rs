@@ -138,6 +138,19 @@ pub struct Config {
     pub font: String,
     #[serde(default = "default_size")]
     pub size: u32,
+    /// 界面字号（侧栏、设置页、状态栏）。聊天正文字号是 `size`，两者分开，
+    /// 调界面字号不会连带把正文放大——ZCode 的 `--ui-font-size` 也是这个分工。
+    #[serde(default = "default_ui_size")]
+    pub ui_size: u32,
+    /// 中文正文的行距倍数（1.3–2.2）。写文章和读代码需要的手感不同。
+    #[serde(default = "default_line_height")]
+    pub line_height: f32,
+    /// 代码块 / diff / 终端字号。
+    #[serde(default = "default_code_size")]
+    pub code_size: u32,
+    /// 消息密度：`airy` | `cozy` | `compact`，控制段落与气泡之间的留白。
+    #[serde(default = "default_density")]
+    pub density: String,
     #[serde(default = "default_width")]
     pub width: u32,
     #[serde(default = "default_accent")]
@@ -188,10 +201,17 @@ pub struct Config {
     /// Steers tool exposure and what `web_search` queries.
     #[serde(default = "default_search_pref")]
     pub search_pref: String,
+    /// What Enter does while a turn is running: `queue` (deliver after the
+    /// current turn) or `steer` (inject at the next model-step boundary).
+    #[serde(default = "default_followup_mode")]
+    pub followup_mode: String,
 }
 
 fn default_search_pref() -> String {
     "auto".into()
+}
+fn default_followup_mode() -> String {
+    "queue".into()
 }
 
 fn default_lang() -> String {
@@ -205,6 +225,18 @@ fn default_font() -> String {
 }
 fn default_size() -> u32 {
     16
+}
+fn default_ui_size() -> u32 {
+    13
+}
+fn default_line_height() -> f32 {
+    1.5
+}
+fn default_code_size() -> u32 {
+    13
+}
+fn default_density() -> String {
+    "cozy".into()
 }
 fn default_width() -> u32 {
     760
@@ -242,6 +274,10 @@ impl Default for Config {
             theme: default_theme(),
             font: default_font(),
             size: default_size(),
+            ui_size: default_ui_size(),
+            line_height: default_line_height(),
+            code_size: default_code_size(),
+            density: default_density(),
             width: default_width(),
             accent: default_accent(),
             speed: default_speed(),
@@ -262,6 +298,7 @@ impl Default for Config {
             system_prompt_raw: String::new(),
             search_key: String::new(),
             search_pref: default_search_pref(),
+            followup_mode: default_followup_mode(),
         }
     }
 }

@@ -73,6 +73,16 @@ loop {
 需确认时 `oneshot` channel 挂起该 tool_call，HTTP `POST /api/permission` 唤醒。
 `始终允许` 写规则表；5 分钟超时按拒绝；每次决策进 `logs/audit-<date>.jsonl`。
 
+### `plugin.rs` — 自建工具 / 插件
+清单存放在 `~/.parable/plugins/<id>/plugin.json`：斜杠命令 `commands`、可调用工具
+`tools`、追加到 system prompt 的 `prompt`。`tools[]` 既可以给 shell `command` 模板
+（`{{args.x}}`），也可以给内联 `code` + `language`；后者由 `PluginStore::write_script`
+落到 `<plugin>/scripts/`，清单同时记录生成的 `command` 与 `script` 路径。运行时
+`run_plugin_tool` 对脚本走“解释器 + 独立 argv”，参数 JSON 放 `PARABLE_TOOL_ARGS`；
+`Registry.plugin_tools` 是 `RwLock`，`plugin_admin` 成功后调用 `reload_plugins()`
+并清 schema memo，因此 agent 新建的工具在同一 turn 的下一步就能调用。斜杠命令与
+prompt 段仍在下一 turn 生效。
+
 ---
 
 ## 3. 鉴权

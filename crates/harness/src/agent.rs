@@ -6,7 +6,7 @@ use crate::error::HarnessError;
 use crate::event::EventHub;
 use crate::permission::PermissionBroker;
 use crate::provider::{self, AsstPart, ChatRequest, Msg, StreamChunk, ToolSpec, UserPart};
-use crate::session::{StoredMessage, SharedStore};
+use crate::session::{PendingInput, SharedStore, StoredMessage};
 use crate::token::Usage;
 use crate::tools::{DisplayKind, Registry, ToolCtx};
 use futures::StreamExt;
@@ -80,7 +80,7 @@ impl QuestionBroker {
     }
 
     /// 清理全部 pending questions 并唤醒等待者（drop sender → 等待方立即
-    /// 收到 None，ask_user 以"(the user did not answer)"收尾）。
+    /// 收到 None，ask_user 以“未回答”收尾）。
     /// 会话 interrupt 时由 AgentRuntime 调用，防止取消后工具仍挂在等答案上。
     pub async fn cancel_all(&self) {
         self.pending.lock().await.clear();
@@ -236,7 +236,8 @@ impl crate::tools::TurnStarter for AgentRuntime {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct TurnOptions {
     pub model_sel: String,
     pub permission_mode: String,
@@ -291,6 +292,9 @@ impl AgentRuntime {
         // 先唤醒可能挂在 ask_user 上的等待者（drop sender → 等待方立即收到
         // None 并收尾），否则取消后该 turn 仍卡在等答案上出不来。
         self.questions.cancel_all().await;
+        // 工具权限面板同理：future 被 drop 后 pending 若还在，重连会弹出
+        // 一个已经无效的“允许/拒绝”面板。
+        self.broker.cancel_all().await;
         match self.running.lock().await.get(session_id) {
             Some(c) => {
                 c.cancel.cancel();
@@ -313,6 +317,195 @@ impl AgentRuntime {
             .await
             .get(session_id)
             .map(|c| c.opts.clone())
+    }
+
+
+    pub async fn pending_inputs(&self, session_id: &str) -> Vec<PendingInput> {
+        self.store.pending(session_id).await
+    }
+
+    pub async fn remove_pending_input(&self, session_id: &str, pending_id: &str) -> Option<PendingInput> {
+        let removed = self.store.remove_pending(session_id, pending_id).await;
+        if removed.is_some() {
+            self.publish_pending(session_id).await;
+        }
+        removed
+    }
+
+    pub async fn update_pending_input(
+        &self,
+        session_id: &str,
+        pending_id: &str,
+        text: &str,
+    ) -> Option<PendingInput> {
+        let updated = self.store.update_pending_text(session_id, pending_id, text).await;
+        if updated.is_some() {
+            self.publish_pending(session_id).await;
+        }
+        updated
+    }
+
+    /// Add a busy-time input. `steer` is only eligible while a turn is actually
+    /// running and has no attachments; everything else becomes next-turn queue
+    /// work, exactly like ZCode's prompt-admission fallback.
+    pub async fn enqueue_input(
+        &self,
+        session_id: &str,
+        text: &str,
+        attachments: Vec<Attachment>,
+        opts: TurnOptions,
+        requested: &str,
+    ) -> Result<PendingInput, HarnessError> {
+        let running = self.is_running(session_id).await;
+        let kind = if requested == "steer" && running && attachments.is_empty() {
+            "steer"
+        } else {
+            "queue"
+        };
+        let item = PendingInput {
+            id: format!("p_{}", &uuid::Uuid::new_v4().simple().to_string()[..10]),
+            kind: kind.to_string(),
+            text: text.to_string(),
+            attachments,
+            opts,
+            created_at: crate::event::now_ms(),
+        };
+        self.store.add_pending(session_id, item.clone()).await?;
+        self.publish_pending(session_id).await;
+        self.hub.publish(
+            session_id,
+            "pending.queued",
+            json!({"item": item, "mode": item.kind}),
+        );
+
+        // The turn may have ended between the running check and the write.
+        // Steering that can no longer be injected becomes queue work.
+        let mut actual = item;
+        if actual.kind == "steer" && !self.is_running(session_id).await {
+            let promoted = self.store.promote_steer_to_queue(session_id).await;
+            if !promoted.is_empty() {
+                actual.kind = "queue".into();
+                self.publish_pending(session_id).await;
+            }
+        }
+        if actual.kind == "queue" && !self.is_running(session_id).await {
+            self.drain_queue(session_id).await;
+        }
+        Ok(actual)
+    }
+
+    async fn publish_pending(&self, session_id: &str) {
+        let pending = self.store.pending(session_id).await;
+        self.hub
+            .publish(session_id, "pending.changed", json!({"pending": pending}));
+    }
+
+    /// Start the oldest queued prompt after a normal turn end. A goal that is
+    /// still active owns the next turn, so queue work waits behind it.
+    pub async fn drain_queue(&self, session_id: &str) {
+        if self.is_running(session_id).await || self.store.is_archived(session_id).await {
+            return;
+        }
+        if self
+            .store
+            .get_goal(session_id)
+            .await
+            .filter(|g| g.is_active())
+            .is_some()
+        {
+            return;
+        }
+        let items = self.store.take_pending(session_id, "queue", 1).await;
+        let Some(item) = items.into_iter().next() else {
+            return;
+        };
+        self.publish_pending(session_id).await;
+        let pending_id = item.id.clone();
+        match self
+            .start_turn(
+                session_id,
+                &item.text,
+                item.attachments.clone(),
+                item.opts.clone(),
+            )
+            .await
+        {
+            Ok(turn_id) => {
+                self.hub.publish(
+                    session_id,
+                    "queue.started",
+                    json!({"pendingId": pending_id, "turnId": turn_id}),
+                );
+            }
+            Err(e) => {
+                // Put it back at the head: a failure must not eat user input.
+                let _ = self.store.add_pending_front(session_id, item).await;
+                self.publish_pending(session_id).await;
+                self.hub.publish(
+                    session_id,
+                    "queue.error",
+                    json!({"pendingId": pending_id, "message": e.to_string()}),
+                );
+            }
+        }
+    }
+
+    /// Inject steering at a model-step boundary. The turn only reaches this
+    /// point after a full assistant/tool-result batch, so tools are never
+    /// interrupted mid-flight.
+    async fn drain_steering_into_history(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        history: &mut Vec<Msg>,
+    ) {
+        let items = self
+            .store
+            .take_pending(session_id, "steer", usize::MAX)
+            .await;
+        if items.is_empty() {
+            return;
+        }
+        for item in items {
+            if item.text.trim().is_empty() {
+                continue;
+            }
+            let parts = vec![UserPart::Text(item.text.clone())];
+            history.push(Msg::User(parts.clone()));
+            self.store
+                .append_message(
+                    session_id,
+                    StoredMessage {
+                        role: "user".into(),
+                        parts: serde_json::to_value(&Msg::User(parts)).unwrap_or(Value::Null),
+                        displays: Vec::new(),
+                        created_at: crate::event::now_ms(),
+                    },
+                )
+                .await
+                .ok();
+            self.hub.publish(
+                session_id,
+                "steer.drained",
+                json!({"turnId": turn_id, "pendingId": item.id, "text": item.text}),
+            );
+        }
+        self.publish_pending(session_id).await;
+    }
+
+    /// Steering that never reached another model step (text-only turn end,
+    /// cancellation, or a failed stream) falls back to next-turn queue.
+    async fn fallback_steering(&self, session_id: &str, turn_id: &str) {
+        let promoted = self.store.promote_steer_to_queue(session_id).await;
+        if promoted.is_empty() {
+            return;
+        }
+        self.hub.publish(
+            session_id,
+            "steer.fallback",
+            json!({"turnId": turn_id, "items": promoted}),
+        );
+        self.publish_pending(session_id).await;
     }
 
     /// Archive a session, mirroring dsh's `workspace/session-active` rule: a
@@ -455,12 +648,13 @@ impl AgentRuntime {
                 }
             }
             me.running.lock().await.remove(&sid);
+            let drain_ok = !cancelled && !panicked && res.is_ok();
             // /goal auto-continuation: 正常结束与出错路径都进入判定
             //（cancelled 在 goal_after_turn 内部单独处理为 paused）。run_turn
             // 一旦失败也进入，goal 状态机才不会被一次模型故障卡死。
             // Dispatched through a plain fn so the start_turn <-> goal_after_turn
             // future types don't tie themselves in a recursive knot.
-            spawn_goal_run(me, sid, opts, cancelled);
+            spawn_goal_run(me, sid, opts, cancelled, drain_ok);
         });
         Ok(turn_id)
     }
@@ -488,6 +682,13 @@ impl AgentRuntime {
         Ok((build_bound(p, &m.id, m.thinking), m.id.clone()))
     }
 
+    /// Fail fast when the selected/fallback model has no usable provider or key.
+    /// The HTTP layer uses this before creating an empty session, so a missing
+    /// API key is a visible request error instead of a silent one-second turn.
+    pub async fn validate_model(&self, model_sel: &str) -> Result<(), HarnessError> {
+        self.resolve_provider(model_sel).await.map(|_| ())
+    }
+
     /// `/compact`: fold the older messages of a session into one summary now,
     /// at the store level, so the effect survives reloads. Idle sessions only.
     pub async fn compact_now(
@@ -506,13 +707,16 @@ impl AgentRuntime {
         }
         const KEEP: usize = 6;
         let history = self.store.neutral_messages(session_id).await;
+        let before = history.len();
         if history.len() <= KEEP + 2 {
-            return Ok(json!({"folded": 0, "remaining": history.len()}));
+            return Ok(json!({"folded": 0, "remaining": history.len(),
+                "before": before, "after": before}));
         }
         // 切分点对齐：不能把 assistant(tool_use) 与其后续 tool_result 切开。
         let split = align_compact_split(&history, history.len() - KEEP);
         if split == 0 {
-            return Ok(json!({"folded": 0, "remaining": history.len()}));
+            return Ok(json!({"folded": 0, "remaining": history.len(),
+                "before": before, "after": before}));
         }
         let digest = format!(
             "BEGIN TRANSCRIPT\n{}\nEND TRANSCRIPT",
@@ -537,7 +741,8 @@ impl AgentRuntime {
             "compaction",
             json!({"turnId": "", "compacted": folded, "remaining": KEEP + 1, "manual": true}),
         );
-        Ok(json!({"folded": folded, "remaining": KEEP + 1}))
+        Ok(json!({"folded": folded, "remaining": KEEP + 1,
+            "before": before, "after": before - folded + 1}))
     }
 
     /// After a finished turn: judge the persistent goal and either finish it,
@@ -750,6 +955,18 @@ When it is achieved, say so clearly in your reply.",
             system.push_str("\n\n## Plugin instructions\n");
             system.push_str(&plugin_prompt);
         }
+        // 自建工具的可发现性:模型看得到 plugin_create，但未必知道它可以用来
+        // 现场补一个缺失能力。这里给一条简短的策略，避免它退回 bash 拼脚本。
+        system.push_str(
+            "\n\n## Extending your tools\n\
+If the task needs a capability that no current tool provides, you can build it yourself with \
+`plugin_create`: give the plugin one `tools[]` entry with a JSON-Schema `parameters` and inline \
+`code` + `language` (python / powershell / node), instead of hand-rolling shell snippets. The new \
+tool is reloaded immediately and is callable in your next step of the same turn; arguments arrive \
+as JSON in the `PARABLE_TOOL_ARGS` environment variable. Keep tools small and focused, give them \
+clear descriptions, and prefer built-in tools when one already fits. You can inspect and manage \
+your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_delete`.",
+        );
         // Memories: standing user context. Like the goal and team blocks these
         // live outside `build_system_prompt`, so a `systemPromptRaw` override
         // still carries what the user asked us to remember.
@@ -925,7 +1142,7 @@ When it is achieved, say so clearly in your reply.",
                 // 到顶提示作为 assistant 消息落库（此前只发 text.delta 不持久化）。
                 let notice_parts = vec![AsstPart::Text(notice.to_string())];
                 history.push(Msg::Assistant(notice_parts.clone()));
-                self.store
+                let saved = self.store
                     .append_message(session_id, StoredMessage {
                         role: "assistant".into(),
                         parts: serde_json::to_value(&Msg::Assistant(notice_parts))
@@ -933,17 +1150,38 @@ When it is achieved, say so clearly in your reply.",
                         displays: Vec::new(),
                         created_at: crate::event::now_ms(),
                     })
-                    .await
-                    .ok();
+                    .await;
+                if saved.is_ok() {
+                    self.hub.publish(session_id, "step.persisted",
+                        json!({"turnId": turn_id, "role": "assistant"}));
+                }
+                saved.ok();
                 break 'turn Ok("max_steps".to_string());
             }
+            // Steering is injected only at this boundary: the previous model
+            // step and all of its tool calls have finished, and another model
+            // step will actually run.
+            self.drain_steering_into_history(session_id, turn_id, &mut history)
+                .await;
             steps += 1;
 
             // Context guard: if the conversation is about to overflow, summarise
             // the older part before sending anything to the model.
             let tools = registry.specs();
             let fixed_tokens = estimate_fixed(&system, &tools);
-            match compact_history(&*provider, &mut history, &self.hub, session_id, ctx_limit, fixed_tokens).await {
+            let compact_result = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => break 'turn Ok("cancelled".to_string()),
+                r = compact_history(
+                    &*provider,
+                    &mut history,
+                    &self.hub,
+                    session_id,
+                    ctx_limit,
+                    fixed_tokens,
+                ) => r,
+            };
+            match compact_result {
                 Ok((n, summary)) => {
                     if n > 0 {
                         // 自动压缩同步落库，保持内存与 store 一致（压缩事件照发）。
@@ -968,7 +1206,7 @@ When it is achieved, say so clearly in your reply.",
             let req = ChatRequest {
                 model: model_id.clone(),
                 system: system.clone(),
-                messages: history.clone(),
+                messages: coalesce_user_messages(&history),
                 tools: tools.clone(),
                 max_tokens: 8192,
                 // thinking_level 语义：0=显式关闭，1=low，2=medium，3=high。
@@ -988,7 +1226,12 @@ When it is achieved, say so clearly in your reply.",
                 .await;
 
             let model_t0 = std::time::Instant::now();
-            let mut stream = match provider.stream_chat(req).await {
+            let stream_result = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => break 'turn Ok("cancelled".to_string()),
+                r = provider.stream_chat(req) => r,
+            };
+            let mut stream = match stream_result {
                 Ok(s) => s,
                 Err(e) => {
                     self.hub.publish(
@@ -1050,15 +1293,18 @@ When it is achieved, say so clearly in your reply.",
                                 StreamChunk::ReasoningDone { signature } => {
                                     think_sig = signature;
                                 }
-                                StreamChunk::ToolCallStart { id, name } => {
-                                    self.hub.publish(session_id, "tool.call",
-                                        json!({"turnId": turn_id, "callId": id, "tool": name, "title": name, "args": {}}));
+                                StreamChunk::ToolCallStart { id, name: _ } => {
                                     pending_args.insert(id.clone(), String::new());
                                 }
                                 StreamChunk::ToolCallArgsDelta { id, delta } => {
                                     if let Some(b) = pending_args.get_mut(&id) { b.push_str(&delta); }
                                 }
                                 StreamChunk::ToolCallDone { id, name, args } => {
+                                    // 参数收齐后再发事件：前端要用 args 生成
+                                    // 「正在运行 · 中文说明」，提前发只能拿到空对象。
+                                    self.hub.publish(session_id, "tool.call",
+                                        json!({"turnId": turn_id, "callId": id, "tool": name,
+                                               "title": name, "args": args.clone()}));
                                     calls.push((id, name, args));
                                 }
                                 StreamChunk::Done { usage, stop_reason: sr } => {
@@ -1089,15 +1335,22 @@ When it is achieved, say so clearly in your reply.",
             }
             if !parts.is_empty() {
                 history.push(Msg::Assistant(parts.clone()));
-                self.store
+                let saved = self.store
                     .append_message(session_id, StoredMessage {
                         role: "assistant".into(),
                         parts: serde_json::to_value(&Msg::Assistant(parts.clone())).unwrap_or(Value::Null),
                         displays: Vec::new(),
                         created_at: crate::event::now_ms(),
                     })
-                    .await
-                    .ok();
+                    .await;
+                if saved.is_ok() {
+                    // 这一步的 thinking / tool_use / text 已经落库：前端必须
+                    // 丢掉对应的流事件缓冲，否则切走再切回来会「存储重画一遍
+                    // + 影子事件再重放一遍」，同一张思考/工具卡出现两份。
+                    self.hub.publish(session_id, "step.persisted",
+                        json!({"turnId": turn_id, "role": "assistant"}));
+                }
+                saved.ok();
             }
 
             // 取消：已积累的 text/think 已在上面折叠进 history 并落库，
@@ -1127,8 +1380,19 @@ When it is achieved, say so clearly in your reply.",
             let mut outcomes: Vec<(String, String, bool, Value, Option<(String, String)>)> =
                 Vec::new(); // (id, text, ok, display, image)
 
+            // Cancellation must beat any in-flight tool: each tool races the
+            // turn's cancel token, and dropping the future kills the child
+            // process (`kill_on_drop` in shell::bash). Otherwise a slow shell
+            // command would keep the whole turn alive after 终止 was clicked.
+            if cancel.is_cancelled() {
+                break 'turn Ok("cancelled".to_string());
+            }
+
             let mut i = 0usize;
-            while i < calls.len() {
+            'tools: while i < calls.len() {
+                if cancel.is_cancelled() {
+                    break 'tools;
+                }
                 if is_readonly_tool(&calls[i].1) {
                     // 收集相邻连续的只读批，一批内并行。
                     let start = i;
@@ -1146,9 +1410,14 @@ When it is achieved, say so clearly in your reply.",
                     for (id, name, args) in batch {
                         let reg = Arc::clone(&registry);
                         let ctx = self.tool_ctx(&workspace, &opts, session_id, &id, &search_key, &search_pref).await;
+                        let cancel_tool = cancel.clone();
                         let t0 = std::time::Instant::now();
                         handles.push((id.clone(), name.clone(), tokio::spawn(async move {
-                            let r = reg.execute(&name, &args, &ctx).await;
+                            let r = tokio::select! {
+                                biased;
+                                _ = cancel_tool.cancelled() => Err(HarnessError::Tool("用户已终止本轮".into())),
+                                r = reg.execute(&name, &args, &ctx) => r,
+                            };
                             let dt = t0.elapsed().as_millis() as u64;
                             (id, name, r, dt)
                         })));
@@ -1171,16 +1440,50 @@ When it is achieved, say so clearly in your reply.",
                             }
                         }
                     }
+                    if cancel.is_cancelled() {
+                        break 'tools;
+                    }
                 } else {
-                    // 非只读：严格串行，就地执行。
+                    // 非只读：严格串行，就地执行；同样可被终止立即打断。
                     let (id, name, args) = calls[i].clone();
                     i += 1;
                     let reg = Arc::clone(&registry);
                     let ctx = self.tool_ctx(&workspace, &opts, session_id, &id, &search_key, &search_pref).await;
                     let t0 = std::time::Instant::now();
-                    let r = reg.execute(&name, &args, &ctx).await;
+                    let r = tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => Err(HarnessError::Tool("用户已终止本轮".into())),
+                        r = reg.execute(&name, &args, &ctx) => r,
+                    };
                     tool_ms += t0.elapsed().as_millis() as u64;
                     self.record_outcome(session_id, turn_id, &id, &name, r, &mut outcomes).await;
+                }
+            }
+
+            // Any tool call that never got to run (or was aborted mid-flight)
+            // still needs a tool_result, otherwise the next user message would
+            // carry a tool_use with no matching result. These are local and
+            // synchronous, so the turn can close immediately.
+            if cancel.is_cancelled() {
+                for (id, name, _) in &calls {
+                    if !outcomes.iter().any(|(oid, _, _, _, _)| oid == id) {
+                        let msg = "用户已终止本轮".to_string();
+                        self.emit_tool_error(
+                            session_id,
+                            turn_id,
+                            id,
+                            name,
+                            &HarnessError::Tool(msg.clone()),
+                        )
+                        .await;
+                        outcomes.push((
+                            id.clone(),
+                            msg.clone(),
+                            false,
+                            json!({"kind":"plain","text": msg}),
+                            None,
+                        ));
+                    }
                 }
             }
 
@@ -1200,18 +1503,26 @@ When it is achieved, say so clearly in your reply.",
             }
             if !results.is_empty() {
                 history.push(Msg::User(results.clone()));
-                self.store
+                let saved = self.store
                     .append_message(session_id, StoredMessage {
                         role: "user".into(),
                         parts: serde_json::to_value(&Msg::User(results)).unwrap_or(Value::Null),
                         displays,
                         created_at: crate::event::now_ms(),
                     })
-                    .await
-                    .ok();
+                    .await;
+                if saved.is_ok() {
+                    self.hub.publish(session_id, "step.persisted",
+                        json!({"turnId": turn_id, "role": "user"}));
+                }
+                saved.ok();
             }
             }
         }; // 'turn
+
+        // Steering that never reached another model step belongs to the next
+        // turn, not the void. This is ZCode's best-effort guide fallback.
+        self.fallback_steering(session_id, turn_id).await;
 
         // 统一收尾：所有出口（正常/取消/出错）都走这里记账并发布 turn.end。
         let final_stop = match &result {
@@ -1694,9 +2005,20 @@ fn render_for_summary(msgs: &[Msg]) -> String {
 /// Spawn the /goal follow-up check. A plain function (not an async method) so
 /// the future graph stays acyclic: goal_after_turn awaits start_turn, and
 /// start_turn would otherwise contain goal_after_turn's future type.
-fn spawn_goal_run(me: AgentRuntime, sid: String, opts: TurnOptions, cancelled: bool) {
+fn spawn_goal_run(
+    me: AgentRuntime,
+    sid: String,
+    opts: TurnOptions,
+    cancelled: bool,
+    drain_ok: bool,
+) {
     tokio::spawn(async move {
         me.goal_after_turn(&sid, &opts, cancelled).await;
+        // A goal continuation may have just started the next turn; drain_queue
+        // checks running and leaves the queue for that turn's own end.
+        if drain_ok {
+            me.drain_queue(&sid).await;
+        }
     });
 }
 
@@ -1709,6 +2031,25 @@ fn build_bound(cfg: &crate::config::ProviderConfig, model_id: &str, thinking: bo
         "openai" => Box::new(provider::openai::chat(cfg).with_model(model_id)),
         _ => Box::new(provider::openai::responses(cfg).with_model(model_id)),
     }
+}
+
+
+/// Consecutive user messages are legal in our neutral store (steering is
+/// appended after a tool-result batch), but Anthropic-style APIs need one user
+/// turn before the next assistant request. Merge them for the wire only; the
+/// stored transcript keeps its separate bubbles.
+fn coalesce_user_messages(history: &[Msg]) -> Vec<Msg> {
+    let mut out: Vec<Msg> = Vec::with_capacity(history.len());
+    for msg in history {
+        if let Msg::User(parts) = msg {
+            if let Some(Msg::User(prev)) = out.last_mut() {
+                prev.extend(parts.iter().cloned());
+                continue;
+            }
+        }
+        out.push(msg.clone());
+    }
+    out
 }
 
 /// Inline small text attachments so the model sees them without a tool call.
@@ -1848,6 +2189,20 @@ mod tests {
     use super::*;
     use crate::provider::{TestReport, ToolSpec};
     use async_trait::async_trait;
+
+    #[tokio::test]
+    async fn question_broker_roundtrip_is_single_use() {
+        let b = Arc::new(QuestionBroker::new());
+        let waiter = {
+            let b = b.clone();
+            tokio::spawn(async move { b.ask("call-1").await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(b.answer("call-1", "项目").await);
+        assert_eq!(waiter.await.unwrap().as_deref(), Some("项目"));
+        // The same call_id cannot be answered twice.
+        assert!(!b.answer("call-1", "again").await);
+    }
 
     /// Provider that replies with a canned summary and records the prompt it saw.
     struct FakeProvider {

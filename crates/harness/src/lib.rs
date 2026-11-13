@@ -17,6 +17,7 @@ pub mod session;
 pub mod skills;
 pub mod subagent;
 pub mod team;
+pub mod term;
 pub mod tools;
 pub mod token;
 pub mod usage;

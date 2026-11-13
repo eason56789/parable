@@ -399,24 +399,17 @@ pub async fn multi_search(a: &Value, ctx: &ToolCtx) -> Result<ToolOutcome, Harne
 
     ctx.authorize("web_search", &query, Risk::Network).await?;
 
-    // 用户在设置里挑的搜索来源裁剪查询集：
-    // anysearch → 只查 AnySearch；multi → 跳过 AnySearch 只跑引擎；其余 → 两者都查。
-    let pref = ctx.search_pref.as_str();
-    let anysearch_first = pref != "multi";
-    let engines_on = pref != "anysearch";
-
+    // 搜索来源只保留真实的引擎抓取。
+    // 原 AnySearch 聚合源实测返回的是裁判文书库（与网络搜索无关，任何关键词都返回判决书），
+    // 已整体移除；历史配置里的 "anysearch" 与 "multi" 现在等价，都走下面这组引擎。
     // (label, search url)
-    let engines: Vec<(&str, String)> = if engines_on {
-        vec![
-            ("必应 (Bing)", format!("https://www.bing.com/search?q={}", urlencode(&query))),
-            ("搜狗 (Sogou)", format!("https://www.sogou.com/web?query={}", urlencode(&query))),
-            ("360搜索", format!("https://www.so.com/s?q={}", urlencode(&query))),
-            ("DuckDuckGo", format!("https://html.duckduckgo.com/html/?q={}", urlencode(&query))),
-            ("百度 (Baidu)", format!("https://www.baidu.com/s?wd={}", urlencode(&query))),
-        ]
-    } else {
-        Vec::new()
-    };
+    let engines: Vec<(&str, String)> = vec![
+        ("必应 (Bing)", format!("https://www.bing.com/search?q={}", urlencode(&query))),
+        ("百度 (Baidu)", format!("https://www.baidu.com/s?wd={}", urlencode(&query))),
+        ("360搜索", format!("https://www.so.com/s?q={}", urlencode(&query))),
+        ("DuckDuckGo", format!("https://html.duckduckgo.com/html/?q={}", urlencode(&query))),
+        ("搜狗 (Sogou)", format!("https://www.sogou.com/web?query={}", urlencode(&query))),
+    ];
 
     let client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(12))
@@ -425,29 +418,12 @@ pub async fn multi_search(a: &Value, ctx: &ToolCtx) -> Result<ToolOutcome, Harne
         .redirect(reqwest::redirect::Policy::limited(5))
         .build()?;
 
-    // 分母按实际参与的平台数算:anysearch 关掉(multi 偏好)时不虚报 +1
-    let total_platforms = engines.len() + usize::from(anysearch_first);
+    let total_platforms = engines.len();
     let mut out = format!(
-        "=== {} === 关键词: {query} 搜索平台: {} 个\n",
-        if engines_on { "多平台搜索结果" } else { "AnySearch 搜索结果" },
+        "=== 多平台搜索结果 === 关键词: {query} 搜索平台: {} 个\n",
         total_platforms
     );
     let mut ok_count = 0usize;
-
-    // AnySearch 聚合源先行：POST JSON API，免 key（匿名按 IP 限流）。
-    // 失败不影响后面的平台抓取，按原样如实报告。
-    if anysearch_first {
-        out.push_str("\n【AnySearch】\n");
-        match anysearch_search(&client, &query).await {
-            Ok(text) if !text.trim().is_empty() => {
-                ok_count += 1;
-                out.push_str(&text);
-                out.push('\n');
-            }
-            Ok(_) => out.push_str("(无结果)\n"),
-            Err(e) => out.push_str(&format!("(请求失败: {e})\n")),
-        }
-    }
 
     for (label, url) in &engines {
         out.push_str(&format!("\n【{label}】\nURL: {url}\n"));
@@ -604,67 +580,6 @@ pub async fn deepseek_search(a: &Value, ctx: &ToolCtx) -> Result<ToolOutcome, Ha
     })
 }
 
-/// AnySearch aggregated search — POST JSON API, works without a key
-/// (anonymous calls are IP-rate-limited). Set `ANYSEARCH_API_KEY` to attach
-/// a bearer token; the API does NOT fall back to anonymous on a bad key,
-/// so the header is only sent when a non-empty key exists.
-async fn anysearch_search(client: &reqwest::Client, query: &str) -> Result<String, HarnessError> {
-    let body = serde_json::json!({
-        "query": query,
-        "max_results": 8,
-        "format": "json"
-    });
-    let mut req = client
-        .post("https://api.anysearch.com/v1/search")
-        .json(&body);
-    if let Ok(key) = std::env::var("ANYSEARCH_API_KEY") {
-        let key = key.trim().to_string();
-        if !key.is_empty() {
-            req = req.bearer_auth(key);
-        }
-    }
-    let resp = req.send().await?;
-    let status = resp.status();
-    let v: Value = resp
-        .json()
-        .await
-        .map_err(|e| HarnessError::Tool(format!("anysearch 响应不是 JSON (HTTP {status}): {e}")))?;
-    parse_anysearch(&v)
-}
-
-/// Render an AnySearch response envelope into readable text.
-fn parse_anysearch(v: &Value) -> Result<String, HarnessError> {
-    if v.get("code").and_then(|c| c.as_i64()) != Some(0) {
-        let msg = v
-            .get("message")
-            .and_then(|m| m.as_str())
-            .unwrap_or("unknown error");
-        return Err(HarnessError::Tool(format!("anysearch: {msg}")));
-    }
-    let mut out = String::new();
-    if let Some(results) = v.pointer("/data/results").and_then(|r| r.as_array()) {
-        for (i, r) in results.iter().enumerate() {
-            let title = r.get("title").and_then(|t| t.as_str()).unwrap_or("");
-            let url = r.get("url").and_then(|u| u.as_str()).unwrap_or("");
-            let snippet = r.get("snippet").and_then(|s| s.as_str()).unwrap_or("");
-            out.push_str(&format!("{}. {}\nURL: {}\n", i + 1, title, url));
-            if !snippet.is_empty() {
-                out.push_str(snippet);
-                out.push('\n');
-            }
-            if let Some(content) = r.get("content").and_then(|c| c.as_str()) {
-                let content = content.trim();
-                if !content.is_empty() {
-                    out.push_str(&clip(content, 800));
-                    out.push('\n');
-                }
-            }
-            out.push('\n');
-        }
-    }
-    Ok(out)
-}
-
 /// Anti-bot interstitials that carry no results.
 fn is_blocked(text: &str) -> bool {
     const MARKERS: [&str; 6] = [
@@ -740,25 +655,6 @@ mod tests {
         assert!(text.contains("Hello & world"));
         assert!(!text.contains("alert"));
         assert!(!text.contains("a{}"));
-    }
-
-    #[test]
-    fn parses_anysearch_envelope() {
-        let v = serde_json::json!({
-            "code": 0, "message": "success",
-            "data": {"results": [
-                {"title": "Go 1.26 Release Notes", "url": "https://go.dev/doc/go1.26",
-                 "snippet": "Intro.", "content": "Long content body"},
-                {"title": "No content result", "url": "https://example.com/x"}
-            ]}
-        });
-        let out = parse_anysearch(&v).unwrap();
-        assert!(out.contains("1. Go 1.26 Release Notes"));
-        assert!(out.contains("URL: https://go.dev/doc/go1.26"));
-        assert!(out.contains("Long content body"));
-        assert!(out.contains("2. No content result"));
-        let err = parse_anysearch(&serde_json::json!({"code": 429, "message": "rate limited"})).unwrap_err();
-        assert!(err.to_string().contains("rate limited"));
     }
 
     #[test]

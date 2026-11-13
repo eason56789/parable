@@ -75,11 +75,18 @@ cargo build --release
 ./target/release/parable -p "把这个仓库的测试补齐" --workspace .
 ```
 
-桌面壳：
+桌面壳（Tauri v2，进程内起本地服务，窗口加载固定桌面端口 7789 的 HTTP UI）：
 
 ```bash
 cargo run -p app
+
+# Windows NSIS 安装包（产物在 target/release/bundle/nsis/）
+npx --yes @tauri-apps/cli@2.12.4 build --config crates/app/tauri.conf.json --bundles nsis --ci --no-sign
 ```
+
+桌面壳首次启动且 `config.toml` 的 `workspace` 为空时，默认使用 `~/.parable/workspace`（自动创建），
+避免从安装目录启动时往 `Program Files` 写文件。页面优先读磁盘 `web/index.html`（开发热改），
+安装包运行时回退到编译期内置的同一份 HTML，因此不依赖源码目录。
 
 ### 配置模型
 
@@ -146,7 +153,9 @@ UI 里：设置 → 模型设置 → 添加供应商 → 填 Base URL / API Key 
    较早的历史交给模型做结构化摘要，保留最近 6 条原文；切分点对齐 tool_use/tool_result
    分组，不会把会话切成 provider 拒绝的孤儿 tool_result。压缩结果落盘，重载不回滚。
 
-3. **桌面壳目前是"启动服务 + 开系统默认 webview"**，Tauri v2 窗口封装未接。
+3. **桌面壳已接 Tauri v2**：`crates/app` 进程内启动 harness 服务，WebviewWindow 加载
+   `http://127.0.0.1:<port>/?token=…`，关闭最后一个窗口时中断运行中的 turn。NSIS 安装包
+   已构建并实测可启动；安装后无需源码目录即可显示页面（HTML 编译期内置兜底）。
 
 4. **MCP / Skills / Hooks 未实现（P4）；子代理与计划模式已实现**（含权限模式继承与
    完成判定修复），但子代理不能再嵌套 spawn 子代理。
@@ -163,7 +172,7 @@ cargo test -p harness
 SSE 分帧解析（字节级缓冲，含 CRLF 与跨 chunk 的多字节 UTF-8）、HTML 剥离（自闭合标签/
 引号状态/数字实体）、grep 匹配、Anthropic 请求体构造（tools + thinking 签名回放）、
 compaction 触发阈值 / 折叠保留 / 空摘要还原 / 切分对齐、bash 输出截断（头尾保留与字符边界）、
-二进制嗅探、SSRF 地址校验、浏览器指纹校验等。
+二进制嗅探、SSRF 地址校验、浏览器指纹校验等。当前全量：`185 passed`。
 
 集成测试用 `tests/mock-llm.mjs`（说真实 Anthropic SSE 协议的 mock，结构化判断
 tool_result），已在开发中验证「流式文本 → tool_use → tool_result 回填 → 第二轮」全链路；

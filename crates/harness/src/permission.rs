@@ -302,6 +302,12 @@ impl PermissionBroker {
         }
     }
 
+    /// 取消所有挂起的权限请求：turn 被终止时，等待用户点“允许/拒绝”的
+    /// 工具 future 已被 drop，但 pending 表若不清理，重连后仍会弹旧面板。
+    pub async fn cancel_all(&self) {
+        self.pending.lock().await.clear();
+    }
+
     /// Decide whether `tool` acting on `path` may run without asking.
     ///
     /// - 规则表(deny 优先)永远先行;Always 决策落成 exact 规则(shell 类存

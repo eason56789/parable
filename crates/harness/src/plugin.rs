@@ -38,9 +38,21 @@ pub struct PluginTool {
     #[serde(default)]
     pub parameters: Value,
     /// Shell command template; `{{args.<param>}}` placeholders are substituted.
-    /// Empty on dsh-extracted declarations (their execute half is JS).
+    /// Materialized from `code` when the plugin is created with inline source.
     #[serde(default)]
     pub command: String,
+    /// Inline source written to `<plugin>/scripts/` on create. Optional; a
+    /// manifest may instead ship a ready-made `command`.
+    #[serde(default)]
+    pub code: String,
+    /// Interpreter for `code`: python | powershell | node (default python).
+    #[serde(default)]
+    pub language: String,
+    /// Absolute path of the materialized script (set together with `code`).
+    /// When present, the runner invokes the interpreter directly instead of
+    /// going through `cmd /C`, which avoids Windows quote mangling.
+    #[serde(default)]
+    pub script: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -173,6 +185,57 @@ impl PluginStore {
         Ok(dir)
     }
 
+    /// Materialize an inline-code tool into `<plugin>/scripts/<tool>.<ext>` and
+    /// return the command that runs it. Arguments are delivered through the
+    /// `PARABLE_TOOL_ARGS` environment variable (JSON), so no shell quoting of
+    /// user data is involved.
+    pub fn write_script(
+        &self,
+        id: &str,
+        tool: &str,
+        language: &str,
+        code: &str,
+    ) -> Result<(String, String), HarnessError> {
+        Self::check_id(id)?;
+        let lang = if language.trim().is_empty() {
+            "python".to_string()
+        } else {
+            language.trim().to_ascii_lowercase()
+        };
+        let (ext, runner) = match lang.as_str() {
+            "python" => (
+                "py",
+                if cfg!(target_os = "windows") {
+                    "python".to_string()
+                } else {
+                    "python3".to_string()
+                },
+            ),
+            "powershell" | "pwsh" => (
+                "ps1",
+                if cfg!(target_os = "windows") {
+                    "powershell -NoProfile -ExecutionPolicy Bypass -File".to_string()
+                } else {
+                    "pwsh -NoProfile -File".to_string()
+                },
+            ),
+            "node" | "javascript" | "js" => ("js", "node".to_string()),
+            other => {
+                return Err(HarnessError::Tool(format!(
+                    "不支持的内联语言 `{other}`，可用 python / powershell / node"
+                )))
+            }
+        };
+        let dir = self.root.join(id).join("scripts");
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| HarnessError::Tool(format!("无法创建脚本目录 {}: {e}", dir.display())))?;
+        let path = dir.join(format!("{tool}.{ext}"));
+        std::fs::write(&path, code)
+            .map_err(|e| HarnessError::Tool(format!("写入脚本 {} 失败: {e}", path.display())))?;
+        let script_path = path.to_string_lossy().to_string();
+        Ok((format!("{runner} \"{}\"", path.display()), script_path))
+    }
+
     /// Remove a manifest plugin's directory and its enabled flag.
     pub fn delete(&self, id: &str) -> Result<(), HarnessError> {
         Self::check_id(id)?;
@@ -282,6 +345,9 @@ fn parse_dsh(id: &str, dir: &Path) -> Plugin {
             description: field_str(&b, "description").unwrap_or_default(),
             parameters: field_json(&b, "parameters"),
             command: String::new(),
+            code: String::new(),
+            language: String::new(),
+            script: String::new(),
         })
         .filter(|t| !t.name.is_empty())
         .collect();
@@ -391,26 +457,92 @@ pub async fn run_plugin_tool(
             cmd = cmd.replace(&format!("{{{{args.{k}}}}}"), &shell_quote(&s));
         }
     }
-    // Windows 限制:cmd.exe 在双引号内仍会展开 %VAR%,参数携带的 %VAR% 是一个
-    // 环境变量注入/泄露面。宁可拒绝也不悄悄展开(POSIX 半没有这个问题)。
-    if cfg!(target_os = "windows") && cmd.contains('%') {
-        return Err(HarnessError::Tool(
-            "plugin command contains `%`: Windows 会展开 %VAR%,存在注入/泄露风险,已拒绝执行(请改写命令避免 %)".into(),
-        ));
-    }
-    ctx.authorize_shell(&t.name, &t.description, crate::permission::Risk::Shell, &cmd)
+    if !t.script.is_empty() {
+        // 内联代码工具:权限面板展示真正会被执行的源码,而不是只有一句路径命令。
+        let lang = if t.language.trim().is_empty() {
+            "python"
+        } else {
+            t.language.trim()
+        };
+        ctx.authorize_with_reason(
+            &t.name,
+            &t.description,
+            crate::permission::Risk::Shell,
+            &format!("run inline {lang} tool script {}", t.script),
+            Some(&t.code),
+        )
         .await?;
-    let out = if cfg!(target_os = "windows") {
-        tokio::process::Command::new("cmd")
-            .args(["/C", &cmd])
-            .output()
-            .await
     } else {
-        tokio::process::Command::new("sh")
-            .arg("-c")
-            .arg(&cmd)
-            .output()
-            .await
+        // Windows 限制:cmd.exe 在双引号内仍会展开 %VAR%,参数携带的 %VAR% 是一个
+        // 环境变量注入/泄露面。宁可拒绝也不悄悄展开(POSIX 半没有这个问题)。
+        if cfg!(target_os = "windows") && cmd.contains('%') {
+            return Err(HarnessError::Tool(
+                "plugin command contains `%`: Windows 会展开 %VAR%,存在注入/泄露风险,已拒绝执行(请改写命令避免 %)".into(),
+            ));
+        }
+        ctx.authorize_shell(&t.name, &t.description, crate::permission::Risk::Shell, &cmd)
+            .await?;
+    }
+    // 参数同时以 JSON 环境变量交给脚本，避免内联代码工具在引号/转义上翻车；
+    // 传统 command 模板仍可用 {{args.x}}。
+    let args_json = serde_json::to_string(args).unwrap_or_else(|_| "{}".into());
+    let workspace = ctx.workspace.to_string_lossy().to_string();
+    let mut command = if !t.script.is_empty() {
+        // 内联代码工具:解释器直接拿脚本路径作为独立 argv,不经 cmd/sh 拼字符串,
+        // 避免 Windows `cmd /C` 在路径引号上二次转义。
+        let lang = t.language.trim().to_ascii_lowercase();
+        let c = if lang == "powershell" || lang == "pwsh" {
+            let exe = if cfg!(target_os = "windows") {
+                "powershell"
+            } else {
+                "pwsh"
+            };
+            let mut c = tokio::process::Command::new(exe);
+            if cfg!(target_os = "windows") {
+                c.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+                    .arg(&t.script);
+            } else {
+                c.args(["-NoProfile", "-File"]).arg(&t.script);
+            }
+            c
+        } else if lang == "node" || lang == "javascript" || lang == "js" {
+            let mut c = tokio::process::Command::new("node");
+            c.arg(&t.script);
+            c
+        } else {
+            let exe = if cfg!(target_os = "windows") {
+                "python"
+            } else {
+                "python3"
+            };
+            let mut c = tokio::process::Command::new(exe);
+            c.arg(&t.script);
+            c
+        };
+        c
+    } else if cfg!(target_os = "windows") {
+        let mut c = tokio::process::Command::new("cmd");
+        c.args(["/C", &cmd]);
+        c
+    } else {
+        let mut c = tokio::process::Command::new("sh");
+        c.arg("-c").arg(&cmd);
+        c
+    };
+    command
+        .env("PARABLE_TOOL_ARGS", &args_json)
+        .env("PARABLE_TOOL_NAME", &t.name)
+        .env("PARABLE_TOOL_WORKSPACE", &workspace)
+        .kill_on_drop(true);
+    let out = match tokio::time::timeout(std::time::Duration::from_secs(120), command.output()).await
+    {
+        Ok(r) => r,
+        Err(_) => {
+            return Err(HarnessError::Tool(format!(
+                "plugin tool `{}` timed out after 120s",
+                t.name
+            )))
+        }
     };
     let out =
         out.map_err(|e| HarnessError::Tool(format!("plugin tool failed to start: {e}")))?;
@@ -542,6 +674,28 @@ export function apply(ctx) {
         store.delete("tester").unwrap();
         assert!(store.scan().is_empty());
         assert!(store.enabled_map().get("tester").is_none());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn writes_inline_tool_script() {
+        let tmp = std::env::temp_dir().join(format!(
+            "parable-script-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let store = PluginStore { root: tmp.clone() };
+        let (cmd, script) = store
+            .write_script("agent-tools", "text_stats", "python", "print('ok')")
+            .unwrap();
+        assert!(Path::new(&script).exists(), "script not written: {script}");
+        assert!(script.ends_with("text_stats.py"));
+        assert!(cmd.contains("text_stats.py"));
+        assert_eq!(std::fs::read_to_string(&script).unwrap(), "print('ok')");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

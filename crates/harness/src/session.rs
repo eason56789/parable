@@ -28,6 +28,17 @@ pub struct StoredMessage {
     pub created_at: u64,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ToolEdit {
+    pub id: String,
+    /// 这条工具调用归属的消息下标（assistant 消息），新增时可以指定挂在哪一步。
+    pub step: Option<usize>,
+    pub name: Option<String>,
+    pub args: Option<Value>,
+    pub result: Option<String>,
+    pub is_error: Option<bool>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionSummary {
     pub id: String,
@@ -49,12 +60,36 @@ pub struct SessionSummary {
     pub thinking_level: u32,
 }
 
+/// A message the user sent while a turn was already running.
+///
+/// `queue` is delivered at the next turn boundary; `steer` is injected at the
+/// next model-step boundary of the turn that is currently running. Stored with
+/// the session so a reload (or a late turn end) cannot silently lose the user's
+/// text. This mirrors ZCode/dsh's inbox with two delivery modes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingInput {
+    pub id: String,
+    /// "queue" | "steer"
+    pub kind: String,
+    pub text: String,
+    #[serde(default)]
+    pub attachments: Vec<crate::agent::Attachment>,
+    #[serde(default)]
+    pub opts: crate::agent::TurnOptions,
+    #[serde(default)]
+    pub created_at: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Session {
     #[serde(flatten)]
     pub meta: SessionSummary,
     #[serde(default)]
     pub messages: Vec<StoredMessage>,
+    /// Inputs waiting for delivery: queued next turns and steering for the
+    /// active turn. Old session files simply load with an empty list.
+    #[serde(default)]
+    pub pending: Vec<PendingInput>,
     #[serde(default)]
     pub usage: UsageTotals,
     /// Persistent goal for this session (`/goal`). Lives and dies with the
@@ -245,6 +280,7 @@ impl SessionStore {
         let s = Session {
             meta,
             messages: Vec::new(),
+            pending: Vec::new(),
             usage: UsageTotals::default(),
             goal: None,
             team: None,
@@ -254,6 +290,23 @@ impl SessionStore {
         }
         self.cache.lock().await.insert(id.clone(), s.clone());
         s
+    }
+
+    /// 复制一个会话（侧聊/辅助对话用）：历史消息全部带过去，模型能当上下文用，
+    /// 但侧边面板只显示 fork 之后的新消息。返回 (新会话, 被复制的历史条数)。
+    pub async fn fork(&self, src: &str, workspace: &str, title: &str) -> Option<(Session, usize)> {
+        let from = self.load(src).await?;
+        let mut s = self.create(workspace, title).await;
+        let hist = from.messages.len();
+        s.messages = from.messages.clone();
+        s.meta.model = from.meta.model.clone();
+        s.meta.permission_mode = from.meta.permission_mode.clone();
+        s.meta.thinking_level = from.meta.thinking_level;
+        if let Err(e) = self.persist(&s).await {
+            tracing::error!("session {}: fork persist failed: {e}", s.meta.id);
+        }
+        self.cache.lock().await.insert(s.meta.id.clone(), s.clone());
+        Some((s, hist))
     }
 
     /// 原子落盘：临时文件 + rename（见 `crate::atomic_write`），失败返回错误由
@@ -441,6 +494,151 @@ impl SessionStore {
         Ok(())
     }
 
+    /// Inputs waiting for delivery in a session. Missing/never-opened sessions
+    /// resolve as an empty list, not an error: the queue dock can poll safely.
+    pub async fn pending(&self, id: &str) -> Vec<PendingInput> {
+        self.load(id)
+            .await
+            .map(|s| s.pending)
+            .unwrap_or_default()
+    }
+
+    pub async fn add_pending(&self, id: &str, item: PendingInput) -> Result<(), HarnessError> {
+        self.insert_pending(id, item, false).await
+    }
+
+    /// Put an item back at the front after a failed queue drain, preserving FIFO.
+    pub async fn add_pending_front(&self, id: &str, item: PendingInput) -> Result<(), HarnessError> {
+        self.insert_pending(id, item, true).await
+    }
+
+    async fn insert_pending(
+        &self,
+        id: &str,
+        item: PendingInput,
+        front: bool,
+    ) -> Result<(), HarnessError> {
+        if !self.cache.lock().await.contains_key(id) {
+            self.load(id)
+                .await
+                .ok_or_else(|| HarnessError::NotFound(format!("session {id}")))?;
+        }
+        let mut cache = self.cache.lock().await;
+        let s = cache
+            .get_mut(id)
+            .ok_or_else(|| HarnessError::NotFound(format!("session {id}")))?;
+        if front {
+            s.pending.insert(0, item);
+        } else {
+            s.pending.push(item);
+        }
+        s.meta.updated_at = crate::event::now_ms();
+        let snapshot = s.clone();
+        drop(cache);
+        self.persist(&snapshot).await?;
+        Ok(())
+    }
+
+    /// Atomically take up to `limit` pending items of one kind (FIFO).
+    pub async fn take_pending(&self, id: &str, kind: &str, limit: usize) -> Vec<PendingInput> {
+        if !self.cache.lock().await.contains_key(id) && self.load(id).await.is_none() {
+            return Vec::new();
+        }
+        let mut cache = self.cache.lock().await;
+        let Some(s) = cache.get_mut(id) else {
+            return Vec::new();
+        };
+        let mut taken = Vec::new();
+        s.pending.retain(|p| {
+            if p.kind == kind && taken.len() < limit {
+                taken.push(p.clone());
+                false
+            } else {
+                true
+            }
+        });
+        if taken.is_empty() {
+            return taken;
+        }
+        s.meta.updated_at = crate::event::now_ms();
+        let snapshot = s.clone();
+        drop(cache);
+        if let Err(e) = self.persist(&snapshot).await {
+            tracing::error!("session {id}: persist pending take failed: {e}");
+        }
+        taken
+    }
+
+    pub async fn remove_pending(&self, id: &str, pending_id: &str) -> Option<PendingInput> {
+        if !self.cache.lock().await.contains_key(id) && self.load(id).await.is_none() {
+            return None;
+        }
+        let mut cache = self.cache.lock().await;
+        let s = cache.get_mut(id)?;
+        let pos = s.pending.iter().position(|p| p.id == pending_id)?;
+        let item = s.pending.remove(pos);
+        s.meta.updated_at = crate::event::now_ms();
+        let snapshot = s.clone();
+        drop(cache);
+        if let Err(e) = self.persist(&snapshot).await {
+            tracing::error!("session {id}: persist pending removal failed: {e}");
+        }
+        Some(item)
+    }
+
+    pub async fn update_pending_text(
+        &self,
+        id: &str,
+        pending_id: &str,
+        text: &str,
+    ) -> Option<PendingInput> {
+        if !self.cache.lock().await.contains_key(id) && self.load(id).await.is_none() {
+            return None;
+        }
+        let mut cache = self.cache.lock().await;
+        let s = cache.get_mut(id)?;
+        let item = s.pending.iter_mut().find(|p| p.id == pending_id)?;
+        item.text = text.to_string();
+        let updated = item.clone();
+        s.meta.updated_at = crate::event::now_ms();
+        let snapshot = s.clone();
+        drop(cache);
+        if let Err(e) = self.persist(&snapshot).await {
+            tracing::error!("session {id}: persist pending edit failed: {e}");
+        }
+        Some(updated)
+    }
+
+    /// Turn any steering that was never injected into next-turn queue work.
+    /// This is the fallback ZCode calls when a text-only turn ends before the
+    /// next step boundary: the guidance must not be dropped.
+    pub async fn promote_steer_to_queue(&self, id: &str) -> Vec<PendingInput> {
+        if !self.cache.lock().await.contains_key(id) && self.load(id).await.is_none() {
+            return Vec::new();
+        }
+        let mut cache = self.cache.lock().await;
+        let Some(s) = cache.get_mut(id) else {
+            return Vec::new();
+        };
+        let mut changed = Vec::new();
+        for p in &mut s.pending {
+            if p.kind == "steer" {
+                p.kind = "queue".into();
+                changed.push(p.clone());
+            }
+        }
+        if changed.is_empty() {
+            return changed;
+        }
+        s.meta.updated_at = crate::event::now_ms();
+        let snapshot = s.clone();
+        drop(cache);
+        if let Err(e) = self.persist(&snapshot).await {
+            tracing::error!("session {id}: persist steer fallback failed: {e}");
+        }
+        changed
+    }
+
     pub async fn update_meta(&self, id: &str, f: impl FnOnce(&mut SessionSummary)) -> Result<(), HarnessError> {
         // The cache is populated lazily (load on demand); a session that has
         // never been opened since process start must still be patchable, so
@@ -542,7 +740,9 @@ impl SessionStore {
                 .cloned()
                 .unwrap_or_default();
             let kept = keep_non_text(arr);
-            m.parts = serde_json::json!({ key: kept });
+            let mut obj = serde_json::Map::new();
+            obj.insert(key.to_string(), serde_json::Value::Array(kept));
+            m.parts = serde_json::Value::Object(obj);
             if m.role == "assistant" {
                 target = i;
             }
@@ -552,9 +752,176 @@ impl SessionStore {
         if let Some(arr) = m.parts.get_mut(key).and_then(|v| v.as_array_mut()) {
             arr.push(serde_json::json!({ "Text": text }));
         } else {
-            m.parts = serde_json::json!({ key: [{ "Text": text }] });
+            let mut obj = serde_json::Map::new();
+            obj.insert(
+                key.to_string(),
+                serde_json::Value::Array(vec![serde_json::json!({ "Text": text })]),
+            );
+            m.parts = serde_json::Value::Object(obj);
         }
         // `displays` stays: the tool cards keep their rendered content.
+        s.meta.updated_at = crate::event::now_ms();
+        let snapshot = s.clone();
+        drop(cache);
+        if let Err(e) = self.persist(&snapshot).await {
+            tracing::error!("session {id}: persist failed: {e}");
+        }
+        Ok(())
+    }
+
+    /// 重建一段 Agent 气泡的工具调用结构：按 `step` 分组写回 ToolUse，
+    /// 紧跟一条 ToolResult 消息；Thinking / 图片原样保留，正文折叠到最后一条
+    /// assistant。没出现在 `tools` 里的调用即被删除，`step` 上也允许新增。
+    pub async fn edit_message_parts(
+        &self,
+        id: &str,
+        idx: usize,
+        to: Option<usize>,
+        text: Option<&str>,
+        tools: &[ToolEdit],
+    ) -> Result<(), HarnessError> {
+        if !self.cache.lock().await.contains_key(id) {
+            self.load(id)
+                .await
+                .ok_or_else(|| HarnessError::NotFound(format!("session {id}")))?;
+        }
+        let mut cache = self.cache.lock().await;
+        let s = cache
+            .get_mut(id)
+            .ok_or_else(|| HarnessError::NotFound(format!("session {id}")))?;
+        if idx >= s.messages.len() {
+            return Err(HarnessError::NotFound(format!("message {idx}")));
+        }
+        let end = to.unwrap_or(idx + 1).clamp(idx + 1, s.messages.len());
+        let last_asst = (idx..end)
+            .filter(|i| s.messages[*i].role == "assistant")
+            .last()
+            .unwrap_or(idx);
+
+        let mut groups: HashMap<usize, Vec<&ToolEdit>> = HashMap::new();
+        for t in tools {
+            let step = t.step.unwrap_or(last_asst).clamp(idx, end - 1);
+            groups.entry(step).or_default().push(t);
+        }
+
+        let mut rebuilt: Vec<StoredMessage> = Vec::new();
+        let mut pending_images: Vec<Value> = Vec::new();
+        for old in idx..end {
+            let m = &s.messages[old];
+            let key = if m.role == "user" { "User" } else { "Assistant" };
+            let parts = m
+                .parts
+                .get(key)
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let created_at = m.created_at;
+            if m.role == "assistant" {
+                let kept: Vec<Value> = parts
+                    .iter()
+                    .filter(|p| p.get("Thinking").is_some())
+                    .cloned()
+                    .collect();
+                let mut arr = kept;
+                if let Some(list) = groups.get(&old) {
+                    for t in list {
+                        arr.push(serde_json::json!({"ToolUse": {
+                            "id": t.id,
+                            "name": t.name.clone().unwrap_or_else(|| "tool".to_string()),
+                            "args": t.args.clone().unwrap_or_else(|| serde_json::json!({})),
+                        }}));
+                    }
+                }
+                let mut obj = serde_json::Map::new();
+                obj.insert("Assistant".to_string(), Value::Array(arr));
+                rebuilt.push(StoredMessage {
+                    role: "assistant".into(),
+                    parts: Value::Object(obj),
+                    displays: Vec::new(),
+                    created_at,
+                });
+                if let Some(list) = groups.get(&old) {
+                    let mut rp: Vec<Value> = list
+                        .iter()
+                        .map(|t| {
+                            serde_json::json!({"ToolResult": {
+                                "id": t.id,
+                                "content": t.result.clone().unwrap_or_default(),
+                                "is_error": t.is_error.unwrap_or(false),
+                            }})
+                        })
+                        .collect();
+                    if !pending_images.is_empty() {
+                        rp.append(&mut pending_images);
+                    }
+                    let d: Vec<Value> = list
+                        .iter()
+                        .map(|t| {
+                            serde_json::json!({
+                                "kind": "plain",
+                                "text": t.result.clone().unwrap_or_default(),
+                            })
+                        })
+                        .collect();
+                    let mut obj = serde_json::Map::new();
+                    obj.insert("User".to_string(), Value::Array(rp));
+                    rebuilt.push(StoredMessage {
+                        role: "user".into(),
+                        parts: Value::Object(obj),
+                        displays: d,
+                        created_at,
+                    });
+                }
+            } else {
+                let imgs: Vec<Value> = parts
+                    .iter()
+                    .filter(|p| p.get("Image").is_some())
+                    .cloned()
+                    .collect();
+                if imgs.is_empty() {
+                    continue;
+                }
+                // 图片并进最近一条工具结果消息，避免留下一条空 user 消息。
+                if let Some(last) = rebuilt.last_mut() {
+                    if last.role == "user" {
+                        if let Some(a) = last.parts.get_mut("User").and_then(|v| v.as_array_mut()) {
+                            a.extend(imgs);
+                            continue;
+                        }
+                    }
+                }
+                pending_images = imgs;
+            }
+        }
+
+        if let Some(txt) = text {
+            if let Some(last) = rebuilt.iter_mut().rev().find(|m| m.role == "assistant") {
+                let txt_json = serde_json::json!({ "Text": txt });
+                if let Some(arr) = last
+                    .parts
+                    .get_mut("Assistant")
+                    .and_then(|v| v.as_array_mut())
+                {
+                    arr.push(txt_json);
+                } else {
+                    let mut obj = serde_json::Map::new();
+                    obj.insert("Assistant".to_string(), Value::Array(vec![txt_json]));
+                    last.parts = Value::Object(obj);
+                }
+            }
+        }
+        if !pending_images.is_empty() {
+            let mut obj = serde_json::Map::new();
+            obj.insert("User".to_string(), Value::Array(pending_images));
+            rebuilt.push(StoredMessage {
+                role: "user".into(),
+                parts: Value::Object(obj),
+                displays: Vec::new(),
+                created_at: crate::event::now_ms(),
+            });
+        }
+
+        s.messages.splice(idx..end, rebuilt);
         s.meta.updated_at = crate::event::now_ms();
         let snapshot = s.clone();
         drop(cache);
@@ -1077,6 +1444,7 @@ mod tests {
                 thinking_level: 2,
             },
             messages: Vec::new(),
+            pending: Vec::new(),
             usage: UsageTotals::default(),
             goal: None,
             team: Some(team),
@@ -1091,5 +1459,37 @@ mod tests {
         assert_eq!(t.tasks[0].blocked_by, vec!["task-0".to_string()]);
         assert_eq!(t.tasks[0].write_scopes, vec!["docs".to_string()]);
         assert_eq!(t.tasks[0].status, crate::team::TaskStatus::InProgress);
+    }
+
+    #[tokio::test]
+    async fn pending_inputs_are_stored_in_fifo_order_and_can_be_edited() {
+        let root = std::env::temp_dir().join(format!(
+            "parable-pending-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let store = SessionStore::with_root(root.clone());
+        let s = store.create("w", "t").await;
+        let item = |id: &str, kind: &str, text: &str| PendingInput {
+            id: id.into(),
+            kind: kind.into(),
+            text: text.into(),
+            attachments: Vec::new(),
+            opts: crate::agent::TurnOptions::default(),
+            created_at: 1,
+        };
+        store.add_pending(&s.meta.id, item("p1", "queue", "first")).await.unwrap();
+        store.add_pending(&s.meta.id, item("p2", "queue", "second")).await.unwrap();
+        store.add_pending(&s.meta.id, item("p3", "steer", "guide")).await.unwrap();
+        assert_eq!(store.pending(&s.meta.id).await.len(), 3);
+
+        let taken = store.take_pending(&s.meta.id, "queue", 1).await;
+        assert_eq!(taken[0].id, "p1");
+        assert_eq!(store.pending(&s.meta.id).await.len(), 2);
+        assert!(store.update_pending_text(&s.meta.id, "p2", "edited").await.is_some());
+        let promoted = store.promote_steer_to_queue(&s.meta.id).await;
+        assert_eq!(promoted[0].id, "p3");
+        assert_eq!(store.pending(&s.meta.id).await[1].kind, "queue");
+        assert!(store.remove_pending(&s.meta.id, "p2").await.is_some());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

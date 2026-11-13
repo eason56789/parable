@@ -28,10 +28,11 @@ fn main() {
             let _ = Config::ensure_home();
             let mut cfg = Config::load();
             if cfg.workspace.is_empty() {
-                cfg.workspace = std::env::current_dir()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string();
+                // 安装后的工作目录通常是 Program Files/安装目录，不可写；
+                // 桌面端默认给用户一个可写、可见的 workspace。
+                let workspace = Config::home_dir().join("workspace");
+                let _ = std::fs::create_dir_all(&workspace);
+                cfg.workspace = workspace.to_string_lossy().to_string();
             }
             let config = Arc::new(RwLock::new(cfg));
             let token = {
@@ -41,7 +42,12 @@ fn main() {
 
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                match server::serve(token.clone(), config, 0).await {
+                // Fixed desktop port, not 0: the webview origin must stay stable
+                // across launches so the UI's localStorage (theme/settings/
+                // toolThink …) survives a restart. 7788 is left to the dev
+                // browser server; 7789 is the desktop shell's own origin.
+                const DESKTOP_PORT: u16 = 7789;
+                match server::serve(token.clone(), config, DESKTOP_PORT).await {
                     Ok((port, state, _server_task)) => {
                         // Stash the state so window-close can stop running turns.
                         handle.manage::<SharedState>(state);

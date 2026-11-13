@@ -57,6 +57,9 @@ pub enum DisplayKind {
     Ask {
         question: String,
         options: Vec<String>,
+        /// `None` means the question was never answered (timeout/interrupt);
+        /// `Some("")` is a real but empty response, which is still "answered".
+        answer: Option<String>,
     },
     Todo(Vec<TodoItem>),
     /// Screenshot / computer-use image, base64 inline.
@@ -82,8 +85,9 @@ impl DisplayKind {
             DisplayKind::Shell { command, stdout, stderr, exit } => json!({
                 "kind":"shell","command": command,"stdout": stdout,"stderr": stderr,"exit": exit
             }),
-            DisplayKind::Ask { question, options } => json!({
-                "kind":"ask","question": question,"options": options
+            DisplayKind::Ask { question, options, answer } => json!({
+                "kind":"ask","question": question,"options": options,
+                "answered": answer.is_some(),"answer": answer
             }),
             DisplayKind::Todo(items) => json!({
                 "kind":"todo","todos": items
@@ -409,8 +413,9 @@ fn specs_cache() -> &'static std::sync::Mutex<
 
 pub struct Registry {
     pub workspace: PathBuf,
-    /// External-command tools contributed by enabled plugins.
-    pub plugin_tools: Vec<crate::plugin::PluginTool>,
+    /// External-command tools contributed by enabled plugins. Interior mutability
+    /// lets a `plugin_create` in the middle of a turn reload them immediately.
+    pub plugin_tools: std::sync::RwLock<Vec<crate::plugin::PluginTool>>,
     /// User's preferred search source: "auto" | "deepseek" | "anysearch" | "multi".
     /// Empty string behaves like "auto".
     pub search_pref: String,
@@ -423,10 +428,22 @@ impl Registry {
         let plugin_tools = crate::plugin::PluginStore::new().runnable_tools();
         Self {
             workspace,
-            plugin_tools,
+            plugin_tools: std::sync::RwLock::new(plugin_tools),
             search_pref: String::new(),
             search_key: String::new(),
         }
+    }
+
+    /// Re-read enabled plugins from disk and drop the schema memo. Called after
+    /// any plugin mutation so an agent-authored tool becomes callable in the
+    /// same turn instead of waiting for the next one.
+    pub fn reload_plugins(&self) {
+        let fresh = crate::plugin::PluginStore::new().runnable_tools();
+        if let Ok(mut guard) = self.plugin_tools.write() {
+            *guard = fresh;
+        }
+        let mut cache = specs_cache().lock().unwrap_or_else(|e| e.into_inner());
+        *cache = None;
     }
 
     /// Attach the search preference + key so `specs()` can tailor the search
@@ -449,7 +466,10 @@ impl Registry {
         let cache_key = (
             self.search_pref.clone(),
             !self.search_key.trim().is_empty(),
-            self.plugin_tools.len(),
+            self.plugin_tools
+                .read()
+                .map(|g| g.len())
+                .unwrap_or(0),
         );
         {
             let cache = specs_cache().lock().unwrap_or_else(|e| e.into_inner());
@@ -546,18 +566,16 @@ impl Registry {
             },
             ToolSpec {
                 name: "ask_user".into(),
-                description: "Ask the user a question and wait for the answer. Use when you are blocked on a decision only the user can make.".into(),
+                description: "Ask the user a question and wait for the answer. Use when you are blocked on a decision only the user can make. Provide 2-8 short options when the choice is bounded; the user can also type a custom answer.".into(),
                 input_schema: obj(json!({
-                    "question": str_prop("The question"),
-                    "options": json!({"type":"array","items": str_prop("A choice"),"description":"Optional suggested answers"}),
+                    "question": str_prop("One clear question"),
+                    "options": json!({"type":"array","items": str_prop("Suggested answer"),"description":"Optional suggested answers (2-8 short choices)"}),
                 }), &["question"]),
             },
             ToolSpec {
                 name: "web_search".into(),
                 description: if self.search_pref == "deepseek" {
                     "Search the web across several engines at once (Bing, Sogou, 360, DuckDuckGo, Baidu). FALLBACK ONLY — the user prefers deepseek_search; use that first and reach for this only when it errors or is unavailable.".into()
-                } else if self.search_pref == "anysearch" {
-                    "Search the web via the AnySearch aggregated API. The user prefers AnySearch — this tool queries it exclusively.".into()
                 } else if self.search_pref == "multi" {
                     "Search the web across several engines at once (Bing, Sogou, 360, DuckDuckGo, Baidu) and return each platform's results. The user prefers the multi-engine comparison view — use this for web searches.".into()
                 } else {
@@ -771,44 +789,49 @@ skill matches the current request, then follow the steps it contains. Read-only.
             },
             ToolSpec {
                 name: "plugin_create".into(),
-                description: "Create a declarative plugin from JSON. A plugin can have: (a) slash `commands` — each with a prompt `template` containing {{input}}; (b) `tools` — each backed by a shell `command` with {{args.<param>}} placeholders and a JSON-Schema `parameters`; (c) a `prompt` section appended to the system prompt while enabled. Takes effect on the next turn.".into(),
+                description: "Create a plugin that extends your own capabilities. Three parts, all optional but at least one required: (a) `commands` — slash commands with a prompt `template` containing {{input}}; (b) `tools` — callable model tools. Each tool needs a JSON-Schema `parameters` and either a shell `command` template with {{args.<param>}} placeholders, or inline `code` + `language` (python/powershell/node). Inline code is written to the plugin's scripts/ dir and run with the arguments JSON in the PARABLE_TOOL_ARGS env var; it receives PARABLE_TOOL_WORKSPACE too. (c) `prompt` — text appended to the system prompt while enabled. Saved plugins reload immediately, so a tool you create can be called in your next step of the SAME turn.".into(),
                 input_schema: obj(json!({
                     "id": str_prop("Plugin id: 1-64 chars, lowercase a-z0-9_- , must start with a letter"),
                     "name": str_prop("Display name (optional, defaults to id)"),
                     "description": str_prop("What the plugin is for"),
                     "prompt": str_prop("System-prompt section text while the plugin is enabled (optional)"),
                     "commands": json!({"type":"array","description":"Slash commands","items":{"type":"object","properties":{"name":{"type":"string"},"description":{"type":"string"},"template":{"type":"string"}},"required":["name","template"]}}),
-                    "tools": json!({"type":"array","description":"Model tools backed by shell commands","items":{"type":"object","properties":{"name":{"type":"string"},"description":{"type":"string"},"command":{"type":"string"},"parameters":{"type":"object"}},"required":["name","command"]}})
+                    "tools": json!({"type":"array","description":"Callable tools: shell command template, or inline code script","items":{"type":"object","properties":{"name":{"type":"string","description":"lowercase a-z0-9_"},"description":{"type":"string"},"parameters":{"type":"object","description":"JSON Schema for arguments"},"command":{"type":"string","description":"Shell template with {{args.<param>}} placeholders (alternative to code)"},"code":{"type":"string","description":"Inline script source (alternative to command)"},"language":{"type":"string","enum":["python","powershell","node"],"description":"Interpreter for code; default python"}},"required":["name"]}})
                 }), &["id"]),
             },
             ToolSpec {
                 name: "plugin_edit".into(),
-                description: "Replace an existing plugin's manifest with the given fields (same shape as plugin_create; omitted arrays are cleared).".into(),
+                description: "Replace an existing plugin's manifest with the given fields (same shape as plugin_create; omitted arrays are cleared). Inline `code` tools are re-materialized immediately.".into(),
                 input_schema: obj(json!({
                     "id": str_prop("Existing plugin id"),
                     "name": str_prop("Display name"),
                     "description": str_prop("Description"),
                     "prompt": str_prop("System-prompt section text"),
                     "commands": json!({"type":"array","items":{"type":"object","properties":{"name":{"type":"string"},"description":{"type":"string"},"template":{"type":"string"}}}}),
-                    "tools": json!({"type":"array","items":{"type":"object","properties":{"name":{"type":"string"},"description":{"type":"string"},"command":{"type":"string"},"parameters":{"type":"object"}}}})
+                    "tools": json!({"type":"array","items":{"type":"object","properties":{"name":{"type":"string"},"description":{"type":"string"},"parameters":{"type":"object"},"command":{"type":"string"},"code":{"type":"string"},"language":{"type":"string","enum":["python","powershell","node"]}}}})
                 }), &["id"]),
             },
             ToolSpec {
                 name: "plugin_toggle".into(),
-                description: "Enable or disable a plugin (toggles current state). Takes effect next turn.".into(),
+                description: "Enable or disable a plugin (toggles current state). Reloads the tool list immediately.".into(),
                 input_schema: obj(json!({
                     "id": str_prop("Plugin id"),
                 }), &["id"]),
             },
             ToolSpec {
                 name: "plugin_delete".into(),
-                description: "Permanently delete a manifest plugin (removes its directory). dsh packages can be deleted too.".into(),
+                description: "Permanently delete a plugin (removes its directory and generated scripts). Reloads the tool list immediately.".into(),
                 input_schema: obj(json!({
                     "id": str_prop("Plugin id"),
                 }), &["id"]),
             },
         ];
-        for t in &self.plugin_tools {
+        let plugin_tools = self
+            .plugin_tools
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_default();
+        for t in &plugin_tools {
             specs.push(ToolSpec {
                 name: t.name.clone(),
                 description: if t.description.is_empty() {
@@ -860,7 +883,16 @@ skill matches the current request, then follow the steps it contains. Read-only.
             "computer_scroll" => crate::computer::scroll(args, ctx).await,
             "computer_navigate" => crate::computer::navigate(args, ctx).await,
             "plugin_list" | "plugin_create" | "plugin_edit" | "plugin_toggle" | "plugin_delete" => {
-                crate::tools::plugin_admin(name, args, ctx).await
+                let r = crate::tools::plugin_admin(name, args, ctx).await;
+                if r.is_ok()
+                    && matches!(
+                        name,
+                        "plugin_create" | "plugin_edit" | "plugin_toggle" | "plugin_delete"
+                    )
+                {
+                    self.reload_plugins();
+                }
+                r
             }
             "schedule_create" | "schedule_list" | "schedule_view" | "schedule_edit" => {
                 self.schedule_tool(name, args, ctx).await
@@ -871,10 +903,17 @@ skill matches the current request, then follow the steps it contains. Read-only.
             "team_task_create" | "team_task_list" | "team_task_get" | "team_task_update" => {
                 self.team_tool(name, args, ctx).await
             }
-            other => match self.plugin_tools.iter().find(|t| t.name == other) {
-                Some(pt) => crate::plugin::run_plugin_tool(pt, args, ctx).await,
-                None => Err(HarnessError::Tool(format!("unknown tool: {other}"))),
-            },
+            other => {
+                let hit = self
+                    .plugin_tools
+                    .read()
+                    .ok()
+                    .and_then(|g| g.iter().find(|t| t.name == other).cloned());
+                match hit {
+                    Some(pt) => crate::plugin::run_plugin_tool(&pt, args, ctx).await,
+                    None => Err(HarnessError::Tool(format!("unknown tool: {other}"))),
+                }
+            }
         };
         // 执行审计:无论成败都记一条(tool、判定来源 auto/requested、耗时)。
         let source = ctx.broker.decision_of(&ctx.call_id).await;
@@ -1118,29 +1157,56 @@ impl Registry {
     }
 
     async fn ask_user(&self, a: &Value, ctx: &ToolCtx) -> Result<ToolOutcome, HarnessError> {
-        let question = a["question"].as_str().unwrap_or("").to_string();
-        let options: Vec<String> = a["options"]
-            .as_array()
-            .map(|v| v.iter().filter_map(|x| x.as_str().map(String::from)).collect())
-            .unwrap_or_default();
+        let question = a["question"].as_str().unwrap_or("").trim().to_string();
+        if question.is_empty() {
+            return Err(HarnessError::Tool("question must not be empty".into()));
+        }
+        // Keep the UI bounded and deterministic: trim, drop blanks/duplicates,
+        // and cap the number of suggested choices.
+        let mut options: Vec<String> = Vec::new();
+        if let Some(raw) = a["options"].as_array() {
+            for o in raw.iter().filter_map(|x| x.as_str()) {
+                let v = o.trim();
+                if v.is_empty() || options.iter().any(|x| x == v) {
+                    continue;
+                }
+                options.push(v.to_string());
+                if options.len() >= 8 {
+                    break;
+                }
+            }
+        }
 
         ctx.hub.publish(
             &ctx.session_id,
             "question",
-            json!({"callId": ctx.call_id, "question": question, "options": options}),
+            json!({"callId": ctx.call_id, "question": question, "options": options.clone()}),
         );
 
         let answer = ctx.questions.ask(&ctx.call_id).await;
-        let answer = answer.unwrap_or_else(|| "(the user did not answer)".to_string());
+        // `None` = timed out / interrupted; `Some("")` = the user submitted
+        // an empty answer, which is still an explicit answer.
+        let answered = answer.is_some();
+        let answer = answer.map(|s| s.trim().to_string());
+        let for_model = match &answer {
+            Some(a) if !a.is_empty() => format!("The user answered: {a}"),
+            Some(_) => "The user answered with an empty response.".to_string(),
+            None => "The user did not answer the question (it timed out or the turn was interrupted).".to_string(),
+        };
 
         Ok(ToolOutcome {
             ok: true,
-            title: format!("Asked the user: {}", truncate(&question, 60)),
-            display: DisplayKind::Ask {
-                question: question.clone(),
-                options,
+            title: if answered {
+                format!("Asked the user: {}", truncate(&question, 60))
+            } else {
+                format!("Asked the user (no answer): {}", truncate(&question, 60))
             },
-            for_model: format!("The user answered: {answer}"),
+            display: DisplayKind::Ask {
+                question,
+                options,
+                answer,
+            },
+            for_model,
         })
     }
 
@@ -1861,9 +1927,23 @@ pub async fn plugin_admin(
                     .unwrap_or("")
                     .trim()
                     .to_string();
-                if tname.is_empty() || command.is_empty() {
+                let code = t
+                    .get("code")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let language = t
+                    .get("language")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("python")
+                    .trim()
+                    .to_ascii_lowercase();
+                if tname.is_empty() {
+                    return Err(HarnessError::Tool("tool `name` 不能为空".into()));
+                }
+                if command.is_empty() && code.trim().is_empty() {
                     return Err(HarnessError::Tool(format!(
-                        "tool `{tname}` 缺少 name 或 command"
+                        "tool `{tname}` 需要 `command` 或 `code` 之一"
                     )));
                 }
                 if !tname
@@ -1883,6 +1963,9 @@ pub async fn plugin_admin(
                         .into(),
                     parameters: t.get("parameters").cloned().unwrap_or(json!({})),
                     command,
+                    code,
+                    language,
+                    script: String::new(),
                 });
             }
             let prompt = args
@@ -1895,7 +1978,7 @@ pub async fn plugin_admin(
                     "插件至少要有 commands、tools 或 prompt 之一".into(),
                 ));
             }
-            let m = PluginManifest {
+            let mut m = PluginManifest {
                 name: args
                     .get("name")
                     .and_then(|v| v.as_str())
@@ -1942,12 +2025,27 @@ pub async fn plugin_admin(
                 Some(&manifest_json),
             )
             .await?;
+            let mut scripted = 0usize;
+            for t in &mut m.tools {
+                if !t.code.trim().is_empty() {
+                    let (cmd, script) =
+                        store.write_script(&id, &t.name, &t.language, &t.code)?;
+                    t.command = cmd;
+                    t.script = script;
+                    scripted += 1;
+                }
+            }
             store.save_manifest(&id, &m)?;
             let mut note = format!(
-                "插件 `{}` ({} 个命令, {} 个工具) 已{}。下一次 turn 生效。",
+                "插件 `{}` ({} 个命令, {} 个工具{}) 已{}。工具表已重载，本 turn 下一步即可调用；新增命令与提示词段下一次 turn 生效。",
                 id,
                 m.commands.len(),
-                tools.len(),
+                m.tools.len(),
+                if scripted > 0 {
+                    format!("，其中 {scripted} 个由内联代码生成")
+                } else {
+                    String::new()
+                },
                 if name == "plugin_create" { "创建" } else { "更新" }
             );
             if !shadowed.is_empty() {
@@ -1987,7 +2085,7 @@ pub async fn plugin_admin(
                 true,
                 format!("{} {}", id, if enabled { "enabled" } else { "disabled" }),
                 format!(
-                    "插件 `{}` 已{}。下一次 turn 生效。",
+                    "插件 `{}` 已{}。工具表已重载，立即生效。",
                     id,
                     if enabled { "启用" } else { "禁用" }
                 ),
@@ -2008,7 +2106,7 @@ pub async fn plugin_admin(
             Ok(ToolOutcome::text(
                 true,
                 format!("Deleted {}", id),
-                format!("插件 `{}` 已删除（目录与启用标记一并移除）。下一次 turn 生效。", id),
+                format!("插件 `{}` 已删除（目录、脚本与启用标记一并移除）。工具表已重载。", id),
             ))
         }
         _ => Err(HarnessError::Tool(format!(

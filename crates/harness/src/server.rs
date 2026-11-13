@@ -33,6 +33,8 @@ pub struct AppState {
     pub usage: Arc<crate::usage::UsageJournal>,
     /// Long-lived memories injected into every system prompt.
     pub memory: Arc<crate::memory::MemoryStore>,
+    /// 后台终端会话表（右上角悬浮窗的「后台终端」分区）。
+    pub terms: crate::term::TerminalRegistry,
     pub started_at: u64,
     /// Actual bound port (0 until `serve` resolves it); used by the Origin
     /// whitelist. Requests cannot arrive before it is set.
@@ -201,8 +203,14 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/sessions", get(list_sessions))
         .route("/search/messages", get(search_messages))
         .route("/session/new", post(new_session))
+        .route("/session/fork", post(fork_session))
         .route("/sessions/{id}", patch(patch_session).delete(delete_session))
         .route("/sessions/{id}/messages", get(session_messages).delete(truncate_messages))
+        .route("/sessions/{id}/pending", get(list_pending))
+        .route(
+            "/sessions/{id}/pending/{pid}",
+            patch(edit_pending).delete(delete_pending),
+        )
         .route("/sessions/{id}/compact", post(compact_session))
         .route("/sessions/{id}/archive", post(archive_session))
         .route("/sessions/{id}/unarchive", post(unarchive_session))
@@ -239,6 +247,7 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/team/tasks/{id}", patch(update_team_task))
         .route("/plugins", get(list_plugins))
         .route("/plugins/{id}/toggle", post(toggle_plugin))
+        .route("/plugins/{id}", axum::routing::delete(delete_plugin))
         // 断线重连后恢复权限面板;聊天附件上传
         .route("/pending", get(pending_permissions))
         .route("/attachments", post(upload_attachment))
@@ -251,6 +260,12 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/browser/state", get(browser_state))
         .route("/browser/navigate", post(browser_navigate))
         .route("/term/exec", post(term_exec))
+        // 后台终端（右上角悬浮窗）：/term/exec 是单次同步命令，这一组是常驻
+        // 会话——启动即返回、可看输出、可终止、刷新后能重新列出来。
+        .route("/term/start", post(term_start))
+        .route("/term/list", get(term_list))
+        .route("/term/kill", post(term_kill))
+        .route("/term/clear", post(term_clear))
         .route("/health", get(health))
         .with_state(state.clone());
 
@@ -286,10 +301,24 @@ async fn index(State(state): State<SharedState>) -> Response {
         "<head>",
         &format!("<head><script>window.__PARABLE_TOKEN={:?};</script>", state.token),
     );
-    Html(html).into_response()
+    // 页面每次请求都是现读盘，绝不能被浏览器启发式缓存：
+    // 一旦拿到旧 JS，刷新也还是旧行为（侧聊逐段叠行就是这么来的）。
+    let mut resp = Html(html).into_response();
+    resp.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store, must-revalidate"),
+    );
+    resp.headers_mut().insert(
+        axum::http::header::PRAGMA,
+        axum::http::HeaderValue::from_static("no-cache"),
+    );
+    resp
 }
 
 fn load_index() -> std::io::Result<String> {
+    // 桌面安装包不能依赖项目和 web/ 目录一定还在磁盘上；编译期嵌入一份
+    // 兜底页面，开发时仍然优先读磁盘，改 HTML 刷新即可生效。
+    const EMBEDDED: &str = include_str!("../../../web/index.html");
     let candidates = [
         std::path::PathBuf::from("web/index.html"),
         std::path::PathBuf::from("index.html"),
@@ -301,30 +330,68 @@ fn load_index() -> std::io::Result<String> {
             return std::fs::read_to_string(c);
         }
     }
-    Err(std::io::Error::new(
-        std::io::ErrorKind::NotFound,
-        "web/index.html not found next to the executable or in ./web",
-    ))
+    // 安装后的桌面壳没有源码目录，使用内置页面；这样 exe 是自包含的。
+    Ok(EMBEDDED.to_string())
 }
 
 // ------------------------------------------------------------------ sse
 
+#[derive(Debug, Deserialize)]
+struct EventsQuery {
+    token: Option<String>,
+    /// 客户端已收到的最大 `seq`。带上它表示「断线重连」：先把缓冲里
+    /// `seq > since` 的事件补发一遍，再进入实时流。缺省 = 首次连接，不回放。
+    #[serde(default)]
+    since: Option<u64>,
+}
+
 async fn sse_events(
     State(state): State<SharedState>,
     headers: HeaderMap,
-    Query(q): Query<TokenQuery>,
+    Query(q): Query<EventsQuery>,
 ) -> Response {
     if !check_auth(&headers, q.token.as_deref(), &state) {
         return unauthorized();
     }
-    let mut rx = state.hub.subscribe();
+    // 先订阅再取快照：两步之间发布的事件会同时躺在 backlog 和 channel 里，
+    // 客户端按 seq 去重，宁可重复不可丢失。
+    let (mut rx, backlog) = match q.since {
+        Some(since) if since > 0 => {
+            let (b, r) = state.hub.subscribe_since(since);
+            (r, b)
+        }
+        _ => (state.hub.subscribe(), Vec::new()),
+    };
     let sid = String::new();
     let state2 = state.clone();
+    let replay = backlog.len();
+    // 请求的 since 比环形缓冲里最老的一条还旧：中间那段已经蒸发了，光补发
+    // 剩下的会让前端以为「没丢」。单独发一条 events.lost，前端收到后会以
+    // 存储为准校正尾部（reconcileTail），而不是干等一个不会来的 turn.end。
+    let gap = match (q.since, backlog.first()) {
+        (Some(since), Some(first)) => since + 1 < first.seq,
+        (Some(since), None) => since < state.hub.latest_seq(),
+        _ => false,
+    };
     let stream = async_stream::stream! {
         // Handshake so the frontend knows the pipe is live.
-        let hello = json!({"type":"hello","sessionId": sid, "seq": 0, "ts": crate::event::now_ms()});
+        let hello = json!({"type":"hello","sessionId": sid, "seq": 0, "ts": crate::event::now_ms(),
+            "replay": replay, "latest": state.hub.latest_seq()});
         if let Ok(ev) = Event::default().json_data(&hello) {
             yield Ok::<_, Infallible>(ev);
+        }
+        if gap {
+            let lost = json!({"type":"events.lost","sessionId": sid, "ts": crate::event::now_ms()});
+            if let Ok(ev) = Event::default().json_data(&lost) {
+                yield Ok::<_, Infallible>(ev);
+            }
+        }
+        // 断线期间错过的事件：按原顺序补发。这一步让丢失的 `turn.end` /
+        // 思考尾段还能回来，而不是永久停在「思考中」。
+        for ev in backlog {
+            if let Ok(sse) = Event::default().json_data(&ev) {
+                yield Ok::<_, Infallible>(sse);
+            }
         }
         loop {
             tokio::select! {
@@ -391,6 +458,10 @@ struct ChatReq {
     thinking_level: u32,
     #[serde(default)]
     plan_mode: bool,
+    /// Explicit mode for this message while busy: "queue" | "steer". Empty
+    /// falls back to the persisted followup_mode setting.
+    #[serde(default)]
+    delivery: String,
     /// Re-run the model on the current history without appending a new user
     /// message — the "regenerate" path after the client truncated the old
     /// assistant reply.
@@ -420,6 +491,13 @@ async fn chat(
         return bad_request("permission_mode must be ask|ws|full");
     }
 
+    // 在创建会话之前先确认模型可用：没有 provider/API Key 时直接 409，
+    // 前端能在发送请求的 catch 里立刻显示原因，不会留下空会话和停在
+    // 「工作中」的假运行状态。
+    if let Err(e) = state.agent.validate_model(&req.model).await {
+        return (StatusCode::CONFLICT, Json(json!({"error": e.to_string()}))).into_response();
+    }
+
     let sid = if req.session_id.is_empty() {
         let cfg = state.config.read().await;
         let ws = cfg.workspace.clone();
@@ -447,13 +525,126 @@ async fn chat(
         plan_mode: req.plan_mode,
     };
 
+    // Regenerate never enqueues: it is meaningless without the running history
+    // that the truncate path just wrote.
+    if req.retry {
+        return match state
+            .agent
+            .start_turn(&sid, "", req.attachments.clone(), opts.clone())
+            .await
+        {
+            Ok(turn_id) => Json(json!({"sessionId": sid, "turnId": turn_id})).into_response(),
+            Err(e) => (StatusCode::CONFLICT, Json(json!({"error": e.to_string()}))).into_response(),
+        };
+    }
+
+    let default_mode = state.config.read().await.followup_mode.clone();
+    let requested = match req.delivery.as_str() {
+        "queue" | "steer" => req.delivery.clone(),
+        _ => default_mode,
+    };
+
+    if state.agent.is_running(&sid).await {
+        return enqueue_busy(&state, &sid, &req, opts, &requested).await;
+    }
+
     match state
         .agent
-        .start_turn(&sid, &req.text, req.attachments, opts)
+        .start_turn(&sid, &req.text, req.attachments.clone(), opts.clone())
         .await
     {
         Ok(turn_id) => Json(json!({"sessionId": sid, "turnId": turn_id})).into_response(),
+        Err(e) => {
+            // A turn may have started between the check and start_turn. In that
+            // case the correct behavior is the configured busy path, not a 409.
+            if state.agent.is_running(&sid).await {
+                enqueue_busy(&state, &sid, &req, opts, &requested).await
+            } else {
+                (StatusCode::CONFLICT, Json(json!({"error": e.to_string()}))).into_response()
+            }
+        }
+    }
+}
+
+async fn enqueue_busy(
+    state: &SharedState,
+    sid: &str,
+    req: &ChatReq,
+    opts: TurnOptions,
+    requested: &str,
+) -> Response {
+    match state
+        .agent
+        .enqueue_input(
+            sid,
+            &req.text,
+            req.attachments.clone(),
+            opts,
+            requested,
+        )
+        .await
+    {
+        Ok(item) => Json(json!({
+            "sessionId": sid,
+            "queued": true,
+            "pendingId": item.id,
+            "mode": item.kind,
+        }))
+        .into_response(),
         Err(e) => (StatusCode::CONFLICT, Json(json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct PendingEditReq {
+    #[serde(default)]
+    text: String,
+}
+
+async fn list_pending(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    Json(json!({"pending": state.agent.pending_inputs(&id).await})).into_response()
+}
+
+async fn edit_pending(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path((id, pending_id)): Path<(String, String)>,
+    Json(req): Json<PendingEditReq>,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    if req.text.trim().is_empty() {
+        return bad_request("pending text is required");
+    }
+    match state
+        .agent
+        .update_pending_input(&id, &pending_id, &req.text)
+        .await
+    {
+        Some(item) => Json(json!({"ok": true, "pending": item})).into_response(),
+        None => not_found("pending message"),
+    }
+}
+
+async fn delete_pending(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path((id, pending_id)): Path<(String, String)>,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    match state.agent.remove_pending_input(&id, &pending_id).await {
+        Some(item) => Json(json!({"ok": true, "pending": item})).into_response(),
+        None => not_found("pending message"),
     }
 }
 
@@ -681,6 +872,23 @@ fn merge_config(cfg: &mut Config, v: &Value) {
                 "theme" => cfg.theme = val.as_str().unwrap_or("auto").to_string(),
                 "font" => cfg.font = val.as_str().unwrap_or("serif").to_string(),
                 "size" => cfg.size = val.as_u64().unwrap_or(16) as u32,
+                // 排版个性化：字号 / 行距 / 代码字号 / 密度。范围在此收口，
+                // 前端滑块再离谱也写不进一份没法看的配置。
+                "ui_size" | "uiSize" => {
+                    cfg.ui_size = val.as_u64().unwrap_or(13).clamp(11, 18) as u32
+                }
+                "line_height" | "lineHeight" => {
+                    cfg.line_height = (val.as_f64().unwrap_or(1.5) as f32).clamp(1.2, 2.4)
+                }
+                "code_size" | "codeSize" => {
+                    cfg.code_size = val.as_u64().unwrap_or(13).clamp(10, 20) as u32
+                }
+                "density" => {
+                    let s = val.as_str().unwrap_or("cozy").to_string();
+                    if ["airy", "cozy", "compact"].contains(&s.as_str()) {
+                        cfg.density = s;
+                    }
+                }
                 "width" => cfg.width = val.as_u64().unwrap_or(760) as u32,
                 "accent" => cfg.accent = val.as_str().unwrap_or("#d97757").to_string(),
                 "speed" => cfg.speed = val.as_u64().unwrap_or(22) as u32,
@@ -716,6 +924,12 @@ fn merge_config(cfg: &mut Config, v: &Value) {
                     let s = val.as_str().unwrap_or("auto");
                     if matches!(s, "auto" | "deepseek" | "anysearch" | "multi") {
                         cfg.search_pref = s.to_string();
+                    }
+                }
+                "followupMode" | "followup_mode" => {
+                    let s = val.as_str().unwrap_or("queue");
+                    if matches!(s, "queue" | "steer") {
+                        cfg.followup_mode = s.to_string();
                     }
                 }
                 "systemPrompt" | "system_prompt" => {
@@ -777,26 +991,70 @@ fn merge_provider(cfg: &mut Config, v: &Value) {
                 let Some(mid) = m.get("id").and_then(|x| x.as_str()) else {
                     continue;
                 };
-                if let Some(mc) = p.models.iter_mut().find(|m| m.id == mid) {
+                // 删除标记已经由 apply_patch_deletions 处理过了：这里必须跳过，
+                // 否则被删掉的模型会以一份默认字段重新追加回来——表现就是
+                // 「删了 / 改完之后又冒出一个同名条目」。
+                if m.get("deleted").and_then(|x| x.as_bool()) == Some(true) {
+                    continue;
+                }
+                // 改名：编辑器会把旧 id 放在 oldId 里。先把旧条目摘掉，再按新 id 落库，
+                // 否则 upsert 只认 id，旧的那条会原样留着，看起来像「没生效 + 复制了一份」。
+                if let Some(old) = m.get("oldId").and_then(|x| x.as_str()) {
+                    if !old.is_empty() && old != mid {
+                        p.models.retain(|x| x.id != old);
+                    }
+                }
+                if let Some(mc) = p.models.iter_mut().find(|x| x.id == mid) {
                     if let Some(n) = m.get("name").and_then(|x| x.as_str()) {
                         mc.name = n.to_string();
                     }
                     if let Some(c) = m.get("context").and_then(|x| x.as_u64()) {
                         mc.context = c;
                     }
+                    if let Some(c) = m.get("max_output").and_then(|x| x.as_u64()) {
+                        mc.max_output = c;
+                    }
                     if let Some(t) = m.get("vision").and_then(|x| x.as_bool()) {
                         mc.vision = t;
+                    }
+                    if let Some(t) = m.get("tools").and_then(|x| x.as_bool()) {
+                        mc.tools = t;
                     }
                     if let Some(t) = m.get("thinking").and_then(|x| x.as_bool()) {
                         mc.thinking = t;
                     }
-                    if let Some(e) = m.get("enabled").and_then(|x| x.as_bool()) {
-                        mc.enabled = e;
+                    if let Some(t) = m.get("structured").and_then(|x| x.as_bool()) {
+                        mc.structured = t;
+                    }
+                    if let Some(t) = m.get("native_search").and_then(|x| x.as_bool()) {
+                        mc.native_search = t;
+                    }
+                    if let Some(t) = m.get("enabled").and_then(|x| x.as_bool()) {
+                        mc.enabled = t;
+                    }
+                    if let Some(l) = m.get("levels").and_then(|x| x.as_array()) {
+                        mc.levels = l
+                            .iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect();
+                    }
+                    if let Some(x) = m.get("mapping").and_then(|x| x.as_str()) {
+                        mc.mapping = x.to_string();
                     }
                 } else if let Ok(mc) = serde_json::from_value::<crate::config::ModelConfig>(m.clone()) {
                     p.models.push(mc);
                 }
             }
+            // 同一个 id 只保留最后一条：历史 PATCH 已经可能写进重复项，顺手清掉。
+            let mut seen = std::collections::HashSet::new();
+            let mut kept: Vec<crate::config::ModelConfig> = Vec::new();
+            for mc in p.models.drain(..).rev() {
+                if seen.insert(mc.id.clone()) {
+                    kept.push(mc);
+                }
+            }
+            kept.reverse();
+            p.models = kept;
         }
     } else if let Ok(p) = serde_json::from_value::<ProviderConfig>(v.clone()) {
         cfg.providers.push(p);
@@ -962,6 +1220,9 @@ struct NewSessionReq {
     workspace: String,
     #[serde(default)]
     title: String,
+    /// 侧聊（辅助对话）专用会话：只服务右侧面板，主对话区不得认领它。
+    #[serde(default)]
+    side: bool,
 }
 
 async fn new_session(
@@ -982,13 +1243,71 @@ async fn new_session(
         "sessionId": s.meta.id,
         "title": s.meta.title,
         "workspace": s.meta.workspace,
+        "side": r.side,
     }));
     Json(json!({"session": s.meta})).into_response()
 }
 
 #[derive(Debug, Deserialize)]
+struct ForkSessionReq {
+    /// 源会话（通常是主对话当前那个）。
+    session_id: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    side: bool,
+}
+
+/// POST /session/fork —— 复制一个会话给侧聊用：历史全带走，主对话不受影响。
+async fn fork_session(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(r): Json<ForkSessionReq>,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    let ws = state.config.read().await.workspace.clone();
+    let title = if r.title.is_empty() { "Side chat".to_string() } else { r.title };
+    let (s, forked_at) = match state.store.fork(&r.session_id, &ws, &title).await {
+        Some(v) => v,
+        None => return server_error(format!("fork: source session {} not found", r.session_id)),
+    };
+    state.hub.publish(&s.meta.id, "session.start", json!({
+        "sessionId": s.meta.id,
+        "title": s.meta.title,
+        "workspace": s.meta.workspace,
+        "side": r.side,
+        "forkedFrom": r.session_id,
+    }));
+    Json(json!({
+        "session": s.meta,
+        "forked_at": forked_at,
+    })).into_response()
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct ToolEditReq {
+    id: String,
+    #[serde(default)]
+    step: Option<usize>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    args: Option<serde_json::Value>,
+    #[serde(default)]
+    result: Option<String>,
+    #[serde(default)]
+    is_error: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, Default)]
 struct EditMessageReq {
-    text: String,
+    #[serde(default)]
+    text: Option<String>,
+    /// 结构化编辑：一次气泡里的工具调用 / 工具返回。缺省表示只改正文。
+    #[serde(default)]
+    tools: Option<Vec<ToolEditReq>>,
     /// Exclusive end of the edited range. Omitted = single message. The
     /// frontend sends the whole assistant-bubble group so its concatenated
     /// text folds into one blob (thinking / tool parts are preserved).
@@ -1005,7 +1324,32 @@ async fn edit_message(
     if !check_auth(&headers, None, &state) {
         return unauthorized();
     }
-    match state.store.edit_message_text(&id, idx, r.to, &r.text).await {
+    let res = match r.tools {
+        None => {
+            state
+                .store
+                .edit_message_text(&id, idx, r.to, r.text.as_deref().unwrap_or(""))
+                .await
+        }
+        Some(list) => {
+            let tools: Vec<crate::session::ToolEdit> = list
+                .into_iter()
+                .map(|t| crate::session::ToolEdit {
+                    id: t.id,
+                    step: t.step,
+                    name: t.name,
+                    args: t.args,
+                    result: t.result,
+                    is_error: t.is_error,
+                })
+                .collect();
+            state
+                .store
+                .edit_message_parts(&id, idx, r.to, r.text.as_deref(), &tools)
+                .await
+        }
+    };
+    match res {
         Ok(()) => Json(json!({"ok": true})).into_response(),
         Err(e) => bad_request(&e.to_string()),
     }
@@ -1199,6 +1543,21 @@ async fn toggle_plugin(
     let store = crate::plugin::PluginStore::new();
     match store.toggle(&id) {
         Ok(enabled) => Json(json!({"ok": true, "enabled": enabled})).into_response(),
+        Err(e) => bad_request(&e.to_string()),
+    }
+}
+
+async fn delete_plugin(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    let store = crate::plugin::PluginStore::new();
+    match store.delete(&id) {
+        Ok(()) => Json(json!({"ok": true})).into_response(),
         Err(e) => bad_request(&e.to_string()),
     }
 }
@@ -2224,6 +2583,90 @@ async fn term_exec(
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct TermStartReq {
+    command: String,
+    #[serde(default)]
+    cwd: String,
+}
+
+/// POST /api/term/start — 启动一个后台终端会话，立刻返回。
+///
+/// 与 `/term/exec` 的区别：exec 会一直等到命令结束才响应，悬浮窗需要的是
+/// 「启动即可见、输出边跑边看、随时能杀」的常驻会话。
+async fn term_start(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+    Json(r): Json<TermStartReq>,
+) -> Response {
+    if !check_auth(&headers, q.token.as_deref(), &state) {
+        return unauthorized();
+    }
+    let command = r.command.trim().to_string();
+    if command.is_empty() {
+        return bad_request("command is required");
+    }
+    let root = workspace_root(&state).await;
+    let cwd = if r.cwd.trim().is_empty() {
+        root.clone()
+    } else {
+        match crate::tools::fs::resolve_within(&root, &r.cwd) {
+            Ok(p) if p.is_dir() => p,
+            Ok(_) => return bad_request("cwd is not a directory"),
+            Err(e) => return bad_request(&e.to_string()),
+        }
+    };
+    let job = state.terms.start(state.hub.clone(), cwd, command).await;
+    Json(json!({ "job": job })).into_response()
+}
+
+/// GET /api/term/list — 列出全部后台终端（含已结束的尾部输出）。
+async fn term_list(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+) -> Response {
+    if !check_auth(&headers, q.token.as_deref(), &state) {
+        return unauthorized();
+    }
+    let jobs = state.terms.list().await;
+    Json(json!({ "jobs": jobs, "running": jobs.iter().filter(|j| j.status == "running").count() }))
+        .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct TermKillReq {
+    id: String,
+}
+
+/// POST /api/term/kill — 终止一个正在跑的后台终端。
+async fn term_kill(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+    Json(r): Json<TermKillReq>,
+) -> Response {
+    if !check_auth(&headers, q.token.as_deref(), &state) {
+        return unauthorized();
+    }
+    let killed = state.terms.kill(&state.hub, r.id.trim()).await;
+    Json(json!({ "killed": killed })).into_response()
+}
+
+/// POST /api/term/clear — 清掉已结束的后台终端，运行中的保留。
+async fn term_clear(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+) -> Response {
+    if !check_auth(&headers, q.token.as_deref(), &state) {
+        return unauthorized();
+    }
+    state.terms.clear().await;
+    Json(json!({ "ok": true })).into_response()
+}
+
 async fn status(State(state): State<SharedState>, headers: HeaderMap) -> Response {
     if !check_auth(&headers, None, &state) {
         return unauthorized();
@@ -2434,6 +2877,7 @@ pub async fn serve_in(
         subagents,
         usage,
         memory,
+        terms: crate::term::TerminalRegistry::new(),
         started_at: crate::event::now_ms(),
         port: std::sync::atomic::AtomicU16::new(0),
     });
@@ -2604,6 +3048,61 @@ mod regression {
         assert!(v.get("sessions").is_some(), "sessions array must be present");
         assert!(v.get("total").is_some(), "total must be reported");
         assert!(v.get("limited").is_some(), "limited flag must be reported");
+    }
+
+    #[tokio::test]
+    async fn term_list_is_empty_for_a_fresh_server() {
+        let (base, token) = spawn_server("term-empty").await;
+        let res = reqwest::get(format!("{base}/api/term/list?token=wrong")).await.unwrap();
+        assert_eq!(res.status(), 401, "term list must require the token");
+        let res = reqwest::get(format!("{base}/api/term/list?token={token}")).await.unwrap();
+        assert_eq!(res.status(), 200);
+        let v: Value = res.json().await.unwrap();
+        assert_eq!(v["jobs"].as_array().map(|a| a.len()), Some(0));
+        assert_eq!(v["running"], 0);
+    }
+
+    #[tokio::test]
+    async fn term_start_rejects_bad_input_and_escaping_cwd() {
+        let (base, token) = spawn_server("term-bad").await;
+        let cli = reqwest::Client::new();
+        let res = cli.post(format!("{base}/api/term/start?token={token}"))
+            .json(&json!({"command": "   "}))
+            .send().await.unwrap();
+        assert_eq!(res.status(), 400, "an empty command is rejected");
+        // cwd 必须落在工作区内：`..` 要拒绝，否则后台终端能越界跑命令。
+        let res = cli.post(format!("{base}/api/term/start?token={token}"))
+            .json(&json!({"command": "echo hi", "cwd": ".."}))
+            .send().await.unwrap();
+        assert_eq!(res.status(), 400, "a cwd outside the workspace is rejected");
+    }
+
+    #[tokio::test]
+    async fn term_start_runs_and_reports_exit() {
+        let (base, token) = spawn_server("term-run").await;
+        let cli = reqwest::Client::new();
+        let res = cli.post(format!("{base}/api/term/start?token={token}"))
+            .json(&json!({"command": "echo parable-term"}))
+            .send().await.unwrap();
+        assert_eq!(res.status(), 200);
+        let v: Value = res.json().await.unwrap();
+        assert!(v["job"]["id"].as_str().unwrap_or("").starts_with("term_"));
+        assert_eq!(v["job"]["status"], "running");
+
+        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+        let v: Value = cli.get(format!("{base}/api/term/list?token={token}"))
+            .send().await.unwrap().json().await.unwrap();
+        let jobs = v["jobs"].as_array().unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0]["status"], "exited", "the job must leave running state");
+        assert!(jobs[0]["output"].as_str().unwrap_or("").contains("parable-term"));
+
+        let res = cli.post(format!("{base}/api/term/clear?token={token}"))
+            .json(&json!({})).send().await.unwrap();
+        assert_eq!(res.status(), 200);
+        let v: Value = cli.get(format!("{base}/api/term/list?token={token}"))
+            .send().await.unwrap().json().await.unwrap();
+        assert_eq!(v["jobs"].as_array().map(|a| a.len()), Some(0));
     }
 
     #[tokio::test]
