@@ -280,3 +280,55 @@ fn perf_serialize_compact_vs_pretty() {
     }
     report("serialize_compact_100msg", iters, t0.elapsed());
 }
+
+#[test]
+fn perf_serialize_typed_vs_value() {
+    // 存储用的是 Value（JSON 树），序列化要递归遍历；强类型 enum 直接写出。
+    // 这是 append 成本 92% 的来源。
+    use crate::provider::Msg;
+
+    let n = 100usize;
+    let value_msgs: Vec<serde_json::Value> = (0..n)
+        .map(|i| {
+            serde_json::json!({
+                "Assistant": [
+                    { "Text": format!("第 {i} 段消息：这是一段用于性能测试的中文文本，长度适中，包含若干可搜索的关键词。") },
+                    { "Thinking": { "text": "hmm", "signature": "sig" } },
+                    { "ToolUse": { "id": "c1", "name": "read_file", "args": { "path": "x" } } },
+                ]
+            })
+        })
+        .collect();
+    let typed: Vec<Msg> = (0..n)
+        .map(|i| {
+            Msg::Assistant(vec![crate::provider::AsstPart::Text(format!(
+                "第 {i} 段消息：这是一段用于性能测试的中文文本，长度适中，包含若干可搜索的关键词。"
+            ))])
+        })
+        .collect();
+
+    let iters = 500u32;
+    let t0 = Instant::now();
+    for _ in 0..iters {
+        let s = serde_json::to_string(&value_msgs).unwrap();
+        std::hint::black_box(s.len());
+    }
+    report("serialize_value_100msg", iters, t0.elapsed());
+
+    let t0 = Instant::now();
+    for _ in 0..iters {
+        let s = serde_json::to_string(&typed).unwrap();
+        std::hint::black_box(s.len());
+    }
+    report("serialize_typed_100msg", iters, t0.elapsed());
+
+    // Value -> Msg 的转换成本（现在每次落盘/读盘都要走一遍）
+    let t0 = Instant::now();
+    for _ in 0..iters {
+        for v in &value_msgs {
+            let m: Msg = serde_json::from_value(v.clone()).unwrap();
+            std::hint::black_box(m);
+        }
+    }
+    report("value_to_typed_100msg", iters, t0.elapsed());
+}
