@@ -1552,7 +1552,8 @@ const IC = {
 };
 const ic = n => '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">' + (IC[n] || IC.file) + '</svg>';
 const esc = s => String(s == null ? '' : s)
-  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
 /**
  * 去掉 emoji（彩色表情与部分图形符号）。
@@ -1561,17 +1562,12 @@ const esc = s => String(s == null ? '' : s)
  * emoji，它们与界面的字形体系格格不入。这里只影响**显示**，不改动存储
  * 的原文 —— 数据仍按原样保留。
  *
- * 覆盖：U+1F000–1FAFF（主要 emoji 区）、U+2600–27BF（杂项符号与 dingbat，
- * 含 ⚠ ✓ ✗ ★ 等）、U+2B00–2BFF、U+FE0F（emoji 变体选择符）、
- * U+1F1E6–1F1FF（区域指示符，国旗由两个组成）、U+E000–F8FF（私用区，
- * 部分 emoji 字体的补充平面）。
+ * 只删真正的 emoji 区段。U+2600–27BF（含 ✓ ✗ ★ ⚠）、U+2B00–2BFF 和私用区
+ * 里既有状态符号也有 Nerd Font 图标，删掉会让工具输出和正文缺字；行首空白、
+ * 连续空格也不能动——否则缩进代码、ASCII 表格、粘贴的代码都会被压平。
  */
-const EMOJI_RE = /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{FE0F}\u{E000}-\u{F8FF}\u{200D}]/gu;
-const noEmoji = s => String(s == null ? '' : s)
-  .replace(EMOJI_RE, '')
-  // 去掉 emoji 后留下的空档：收敛连续空格，并去掉行首/行尾空白
-  .replace(/[ \t]{2,}/g, ' ')
-  .replace(/^\s+|\s+$/gm, '');
+const EMOJI_RE = /[\u{1F000}-\u{1FAFF}\u{1F1E6}-\u{1F1FF}\u{FE0F}\u{200D}]/gu;
+const noEmoji = s => String(s == null ? '' : s).replace(EMOJI_RE, '');
 
 /** 递归去掉对象里所有字符串的 emoji（用于工具卡片的 display 结构）。 */
 function stripEmojiDeep(v) {
@@ -1685,7 +1681,7 @@ const L = {
     cm_pin:'置顶', cm_unpin:'取消置顶', cm_rename:'重命名', cm_cpid:'复制对话 ID', cm_delete:'删除', cm_renamed:'已重命名',
     cm_archive:'归档', cm_unarchive:'取消归档', archd:'已归档', arch_done:'已归档', unarch_done:'已取消归档',
     wrap:'自动换行', noresult:'没有匹配结果', in_msgs:'消息内容', kbd:'键盘快捷键', kbd_h:'这些快捷键在任何时候都能使用。',
-    actions:'操作', cmdk:'命令面板', att:'附件', ctx:'上下文', editmsg:'编辑这条消息', delmsg:'删除这条消息', regen:'重新生成', clear:'已清空当前对话', close:'关闭',
+    actions:'操作', cmdk:'命令面板', att:'附件', ctx:'上下文', edit:'编辑', editmsg:'编辑这条消息', delmsg:'删除这条消息', regen:'重新生成', clear:'已清空当前对话', close:'关闭',
     mp_title:'模型设置', mp_desc:'管理自定义模型供应商，配置后可在聊天时选择使用。',
     mp_addp:'添加供应商', mp_sample:'示例供应商', mp_api:'API 格式', mp_getkey:'获取 API Key',
     mp_name:'名称', mp_models:'模型列表', mp_addm:'添加模型', mp_newp:'新供应商',
@@ -1854,7 +1850,7 @@ const L = {
     wrap:'Wrap lines', noresult:'No matching results', in_msgs:'Messages', kbd:'Keyboard shortcuts',
     kbd_h:'These shortcuts work anywhere in the app.', actions:'Actions', cmdk:'Command palette',
     att:'Attachments', ctx:'Context', editmsg:'Edit this message', delmsg:'Delete this message', regen:'Regenerate',
-    clear:'Conversation cleared', close:'Close',
+    clear:'Conversation cleared', edit:'Edit', close:'Close',
     mp_title:'Model settings', mp_desc:'Manage custom model providers and use them in chat once configured.',
     mp_addp:'Add provider', mp_sample:'Sample provider', mp_api:'API format', mp_getkey:'Get API key',
     mp_name:'Name', mp_models:'Models', mp_addm:'Add model', mp_newp:'New provider',
@@ -1977,19 +1973,33 @@ async function api(path, opts) {
     headers['Content-Type'] = 'application/json';
     body = JSON.stringify(body);
   }
-  const res = await fetch('/api' + path, {
-    method: opts.method || 'GET',
-    headers,
-    body
-  });
-  const text = await res.text();
-  let data = null;
-  try { data = text ? JSON.parse(text) : null; } catch (e) { data = { raw: text }; }
-  if (!res.ok) {
-    const msg = (data && data.error) ? data.error : (res.status + ' ' + res.statusText);
-    throw new Error(msg);
+  // 没有超时的话，一个挂死的请求会让保存按钮、用量页、会话加载永久转圈。
+  const ac = typeof AbortController === 'function' ? new AbortController() : null;
+  const ms = opts.timeout || 180000;
+  const timer = ac ? setTimeout(() => { try { ac.abort(); } catch (e) {} }, ms) : null;
+  try {
+    const res = await fetch('/api' + path, {
+      method: opts.method || 'GET',
+      headers,
+      body,
+      signal: ac ? ac.signal : undefined
+    });
+    const text = await res.text();
+    let data = null;
+    try { data = text ? JSON.parse(text) : null; } catch (e) { data = { raw: text }; }
+    if (!res.ok) {
+      const msg = (data && data.error) ? data.error : (res.status + ' ' + res.statusText);
+      throw new Error(msg);
+    }
+    return data;
+  } catch (e) {
+    if (e && e.name === 'AbortError') {
+      throw new Error(document.documentElement.lang === 'zh-CN' ? '请求超时' : 'Request timed out');
+    }
+    throw e;
+  } finally {
+    if (timer) clearTimeout(timer);
   }
-  return data;
 }
 
 let saveTimer = null;
@@ -2094,6 +2104,7 @@ function confirmBox(message, opts) {
       if (done) return;
       done = true;
       wrap.classList.remove('open');
+      document.body.classList.remove('modal-open');
       document.removeEventListener('keydown', onKey, true);
       okBtn.onclick = null;
       cancelBtn.onclick = null;
@@ -2102,13 +2113,19 @@ function confirmBox(message, opts) {
     };
     const onKey = e => {
       if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); finish(false); }
-      else if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); finish(true); }
+      // 只有焦点在“确定”上时回车才确认；Tab 到“取消”后回车必须是取消，
+      // 否则强迫症式连按回车很容易误删。
+      else if (e.key === 'Enter') {
+        e.preventDefault(); e.stopPropagation();
+        finish(document.activeElement === okBtn ? true : document.activeElement === cancelBtn ? false : false);
+      }
     };
     okBtn.onclick = () => finish(true);
     cancelBtn.onclick = () => finish(false);
     // 点背景 = 取消
     wrap.onclick = e => { if (e.target === wrap) finish(false); };
     document.addEventListener('keydown', onKey, true);
+    document.body.classList.add('modal-open');
     wrap.classList.add('open');
     // 焦点落在确认按钮上，回车直接确认
     setTimeout(() => okBtn.focus(), 60);
@@ -3204,6 +3221,8 @@ function uMsg(q, idx, atts, ts) {
     b.append(row);
   }
   if (q) {
+    // 保存原文：显示层会去 emoji、Markdown 会丢格式，复制必须给用户原样内容。
+    d.dataset.raw = q;
     const tx = document.createElement('div');
     tx.textContent = noEmoji(q);
     b.append(tx);
@@ -3818,7 +3837,19 @@ function showPermPanel(e, callId, info) {
 let conv = null;          // active session {id, title, ...}
 let busy = false;         // a turn is in flight
 let sig = null;           // cancellation token for the current turn
+// 会话代际：openSession / newChat 时 +1。所有 await 之后的 DOM 写入都必须
+// 先确认「还是同一个会话」，否则旧请求的响应会画进新会话。
+let convGen = 0;
+// 首条消息在途：POST /chat 已发出，但 session id 还没绑定。只有这个窗口
+// 允许 session.start / turn.start 认领会话，欢迎页的后台任务不能劫持。
+let awaitingSession = false;
+let pendingSid = null;    // 复用已有会话发送时，本轮已知的目标 session id
+// 编辑用户消息时先不删服务端历史：发送那一刻才真正截断，取消/切走不丢数据。
+let pendingEdit = null;   // {sid, gen, from, nodes, parent, anchor}
 let ATTS = [];
+// 本页创建的 blob URL。附件缩略图用 URL.createObjectURL，不回收就会在
+// 切会话/新建对话时永久占住文件内存（图片大时尤其明显）。
+const OBJ_URLS = new Set();
 const ta = $('#ta'), sd = $('#sd');
 let CONVS = [];           // sidebar entries
 
@@ -3882,7 +3913,9 @@ function qRender() {
 
 function qEditRow(pid) {
   const p = PENDING.find(x => x.id === pid);
-  const row = document.querySelector('.qrow[data-pid="' + pid + '"]');
+  // 用 dataset 精确比较，别把 id 拼进 CSS 选择器：id 里带引号/反斜杠会让
+  // querySelector 直接抛 SyntaxError，整行编辑按钮就失灵。
+  const row = [...document.querySelectorAll('.qrow')].find(el => el.dataset.pid === pid);
   if (!p || !row) return;
   const z = S.lang === 'zh';
   const kind = p.kind === 'steer' ? 'steer' : 'queue';
@@ -3980,6 +4013,9 @@ function resetTurn() {
   curText = '';
   toolEls = {};
   turnSawTool = false;
+  // 关键：停止令牌必须跟着这一轮一起结束。否则用户点过一次停止后，下一轮
+  // 服务端发起的 turn 会继承 stop=true，iwrite 把整段正文直接丢掉。
+  sig = null;
   // Without this the thinking timer accumulates across the whole session and
   // reports nonsense like "thought for 1042s".
   thinkStart = 0;
@@ -4223,21 +4259,7 @@ function dispatch(ev) {
     if (conv && conv.id === ev.sessionId) delete SHADOW[ev.sessionId];
     else if (SHADOW[ev.sessionId]) SHADOW[ev.sessionId].ended = true;
   }
-  // Only handle events for the active session (or the initial one).
-  // 定时任务等在别的会话里开的 turn（含新建会话、欢迎页 conv 为空的情况）：
-  // 静默刷新会话列表，让「⏱ 任务名」对话直接出现在侧边栏，不必手动刷新页面。3 秒去抖。
-  // conv.id 为空且 expectBubble（首条消息在途）时放行：turn.start 分支会兜底
-  // 绑定会话 id，避免 session.start 丢失后整轮事件被过滤器吃掉。
-  if (ev.sessionId && (!conv || (conv.id ? ev.sessionId !== conv.id : !expectBubble)) &&
-      (ev.type === 'turn.start' || ev.type === 'turn.end')) {
-    if (ev.type === 'turn.start') INFLIGHT[ev.sessionId] = true;
-    const now = Date.now();
-    if (now - sessRefreshAt >= 3000) {
-      sessRefreshAt = now;
-      loadSessions(true);
-    }
-    return;
-  }
+  // 在途记录必须先于会话过滤：后台会话的增量也要进 SHADOW，切回去才能重放。
   if (ev.type === 'text.delta') {
     (SHADOW[ev.sessionId] ||= { text: '', events: [] }).text += (ev.text || '');
   } else if (ev.type === 'reasoning.delta' || ev.type === 'tool.call' ||
@@ -4246,9 +4268,29 @@ function dispatch(ev) {
     // 记下在途事件序列：切走再切回来时按序重放，思考块与工具卡片才不会被截断。
     shadowPush(ev.sessionId, ev);
   }
-  // conv.id 为 null（新会话首条消息在途、POST /chat 响应未返回）时不能丢事件：
-  // session.start 事件会先到并绑定 id，这里只对「已绑定且不匹配」的会话过滤。
-  if (conv && conv.id && ev.sessionId && ev.sessionId !== conv.id) return;
+
+  // 会话归属守卫：没有绑定会话时，只放行能“认领”的控制事件（session.start /
+  // turn.start），正文、思考、工具事件必须先有确定的会话。以前 conv 为 null
+  // 时整段过滤器是失效的，后台任务会在欢迎页凭空画出助手气泡。
+  const sid = conv && conv.id;
+  if (ev.sessionId && ev.sessionId !== sid) {
+    if (!sid) {
+      const claimable = ev.type === 'session.start' || ev.type === 'turn.start';
+      const known = expectBubble && pendingSid && ev.sessionId === pendingSid;
+      if (!claimable && !known) {
+        if (ev.type === 'turn.end') INFLIGHT[ev.sessionId] = false;
+        return;
+      }
+    } else {
+      // 别的会话：turn.start/end 只用于刷新侧边栏，不能碰当前 DOM。
+      if (ev.type === 'turn.start' || ev.type === 'turn.end') {
+        if (ev.type === 'turn.start') INFLIGHT[ev.sessionId] = true;
+        const now = Date.now();
+        if (now - sessRefreshAt >= 3000) { sessRefreshAt = now; loadSessions(true); }
+      }
+      return;
+    }
+  }
 
   // 悬浮窗：后台终端的事件不带 sessionId，单独放行；其余只认当前会话。
   if (ev.type === 'term.start' || ev.type === 'term.end') dkEvent(ev);
@@ -4261,27 +4303,35 @@ function dispatch(ev) {
       if (ev.latest != null && ev.latest < lastSeq) lastSeq = 0;
       break;
 
-    case 'session.start':
+    case 'session.start': {
       // 侧聊（辅助对话）自己开的会话：只让它出现在列表里，主对话区必须原样不动，
       // 否则点开侧聊就会把主对话顶成那个侧聊会话。
       if (ev.side) { loadSessions(true); break; }
-      // conv.id 为 null（首条消息在途）时也要认领：服务端在 POST /chat 响应
-      // 返回前就会广播 session.start，错过它后续事件会全部被过滤器丢掉。
-      if (!conv || conv.id === ev.sessionId || !conv.id) {
-        if (conv && !conv.id && ev.sessionId === ignoreSid) break;   // 已标记为他人会话
-        const wasNew = !conv || !conv.id;
-        const prevT = conv && conv.title;
-        conv = { id: ev.sessionId, title: prevT || ev.title || '', workspace: (conv && conv.workspace) || ev.workspace || '' };
-        ignoreSid = '';
-        $('#ttl').textContent = noEmoji(conv.title || ev.title || '');
-        if (wasNew) {
-          addRc({ id: conv.id, t: conv.title || ev.title || '', ts: Date.now() });
-          loadSessions(true);
+      // 已是当前会话：只补标题，不重置 DOM。
+      if (conv && conv.id === ev.sessionId) {
+        if (!conv.title && ev.title) {
+          conv.title = ev.title;
+          $('#ttl').textContent = noEmoji(conv.title);
         }
-        document.body.classList.add('chat');
-        apply();
+        break;
       }
+      // 只有本端刚发出首条消息、还在等会话绑定时才认领。欢迎页/空闲时后台
+      // 定时任务开的会话只刷新侧栏，绝不能把主对话切走（旧代码无条件认领）。
+      const mine = awaitingSession && !(conv && conv.id) &&
+        (!pendingSid || ev.sessionId === pendingSid) && ev.sessionId !== ignoreSid;
+      if (!mine) { loadSessions(true); break; }
+      const prevT = conv && conv.title;
+      conv = { id: ev.sessionId, title: prevT || ev.title || '', workspace: (conv && conv.workspace) || ev.workspace || '' };
+      ignoreSid = '';
+      awaitingSession = false;
+      pendingSid = null;
+      $('#ttl').textContent = noEmoji(conv.title || ev.title || '');
+      addRc({ id: conv.id, t: conv.title || ev.title || '', ts: Date.now() });
+      document.body.classList.add('chat');
+      loadSessions(true);
+      apply();
       break;
+    }
 
     case 'turn.start':
       INFLIGHT[ev.sessionId] = true;
@@ -4289,22 +4339,37 @@ function dispatch(ev) {
         turnSawTool = false;
         busy = true;
         if (!sig) sig = { stop: false };
+        // 新的一轮开始，上一轮遗留的停止标记必须失效。
+        sig.stop = false;
         sync();
         qLoad();
-      }
-      // 新会话兜底绑定：session.start 丢失（断线重连、乱序）时在此认领 id。
-      // 只认领文本与在途请求一致的 turn，防止并发定时任务被误绑；认领失败
-      // 的一律标记 ignoreSid 丢弃其后续事件。
-      if (conv && !conv.id) {
-        if ((ev.text || '') === (conv.pendingText || '')) {
+      } else if (!conv || !conv.id) {
+        // 新会话兜底绑定：session.start 丢失（断线重连、乱序）时在此认领 id。
+        // 只认领文本与在途请求一致的 turn，防止并发定时任务被误绑；认领失败
+        // 的一律标记 ignoreSid 丢弃其后续事件。
+        const mine = awaitingSession && conv && !conv.id &&
+          !!(ev.text || '').trim() && (ev.text || '') === (conv.pendingText || '');
+        if (mine) {
           conv.id = ev.sessionId;
           ignoreSid = '';
+          awaitingSession = false;
+          pendingSid = null;
+          busy = true;
+          sig = { stop: false };
           addRc({ id: conv.id, t: conv.title || '', ts: Date.now() });
           loadSessions(true);
+          sync();
         } else {
-          ignoreSid = ev.sessionId;
+          // 还在等本端会话绑定时不能标 ignoreSid：这条很可能就是本端的 turn
+          // （文本被模板/注入改写过，所以没匹配上）。标了之后它后面的事件会
+          // 被整体丢弃，正文和收尾全没了。
+          if (!awaitingSession) ignoreSid = ev.sessionId;
+          const now = Date.now();
+          if (now - sessRefreshAt >= 3000) { sessRefreshAt = now; loadSessions(true); }
           return;
         }
+      } else {
+        return;
       }
       // 非本端发起的 turn（定时投递、重试）靠事件里的 text 补用户气泡；
       // 重试的 text 为空，不画气泡。必须在 .a 之前画，顺序才是「问→答」。
@@ -4526,6 +4591,9 @@ function dispatch(ev) {
         }
       }
       busy = false;
+      // 本轮已结束：后续（定时投递、重试）的 turn.start 必须能补画用户气泡，
+      // 否则“后台任务在本会话跑”时会直接冒出没有提问的回答。
+      expectBubble = false;
       sync();
       // 问答等待中若本轮被中断/结束，立即收回底部问答面板。
       if (QBOX.active && !QBOX.closing) qsReset(true);
@@ -4557,7 +4625,7 @@ function dispatch(ev) {
           if (curA) curA.querySelector('.ab').append(p);
         }
       }
-      if (ev.fatal) { stopSpin(curA); busy = false; sync(); }
+      if (ev.fatal) { stopSpin(curA); busy = false; expectBubble = false; sync(); }
       break;
   }
 }
@@ -4653,8 +4721,21 @@ function sync() {
 // 首条消息尚无会话 id 时点停止：先记标记，拿到 sessionId 后补发 interrupt
 let pendingInterrupt = false;
 
+let runStarting = false;
+
+/** 把编辑时暂时摘下的消息节点原样插回去（服务端从未截断）。 */
+function restorePendingEdit() {
+  const pe = pendingEdit;
+  if (!pe) return;
+  pendingEdit = null;
+  const parent = pe.parent;
+  if (!parent || !pe.nodes || !pe.nodes.length) return;
+  const ref = pe.anchor && pe.anchor.parentNode === parent ? pe.anchor.nextSibling : parent.firstChild;
+  pe.nodes.forEach(n => { try { parent.insertBefore(n, ref); } catch (e) {} });
+}
+
 async function run(q) {
-  if (busy) return;
+  if (busy || runStarting) return;
   if (!modelOk()) {
     toast(t('select_model'));
     document.querySelectorAll('.pop.open').forEach(p => p.classList.remove('open'));
@@ -4663,6 +4744,32 @@ async function run(q) {
     return;
   }
   if (ATTS.some(a => a.loading)) { toast(t('att_uploading')); return; }
+
+  // 编辑用户消息时只在本地藏起尾部；真正 DELETE 放到发送这一刻。删除失败
+  // 就把节点和草稿都还回去，历史不会因为“点了编辑又取消”而永久截断。
+  if (pendingEdit) {
+    const pe = pendingEdit;
+    if (!conv || !conv.id || pe.sid !== conv.id || pe.gen !== convGen) {
+      // 会话已经不是当初编辑的那个：节点还原，别让消息凭空消失。
+      restorePendingEdit();
+    } else {
+      runStarting = true;
+      try {
+        await api('/sessions/' + pe.sid + '/messages', { method: 'DELETE', body: { from: pe.from } });
+        pendingEdit = null;
+      } catch (e) {
+        restorePendingEdit();
+        ta.value = q;
+        fit();
+        sync();
+        toast(e.message);
+        runStarting = false;
+        return;
+      }
+      runStarting = false;
+    }
+  }
+
   const atts = ATTS.slice();
   ATTS = [];
   renderAtts();
@@ -4679,7 +4786,12 @@ async function run(q) {
     conv.pendingText = q || '';
   }
 
-  uMsg(q, null, atts);
+  const userNode = uMsg(q, null, atts);
+  const gen = convGen;
+  const mySid = conv.id || null;
+  // 只有这个窗口允许 session.start / turn.start 认领会话 id。
+  awaitingSession = true;
+  pendingSid = mySid;
   expectBubble = true;
   busy = true;
   sig = { stop: false };
@@ -4691,7 +4803,7 @@ async function run(q) {
     const res = await api('/chat', {
       method: 'POST',
       body: {
-        session_id: conv.id || '',
+        session_id: mySid || '',
         text: q,
         attachments: atts.filter(a => a.path).map(a => ({ path: a.path, name: a.name, size: a.size })),
         model: S.model,
@@ -4701,6 +4813,8 @@ async function run(q) {
         plan_mode: !!S.plan
       }
     });
+    // 等待期间用户切走/新建会话：这个响应不属于当前界面。
+    if (gen !== convGen || !conv) return;
     if (res && res.sessionId) {
       if (!conv.id) {
         conv.id = res.sessionId;
@@ -4709,28 +4823,87 @@ async function run(q) {
         addRc({ id: conv.id, t: title, ts: Date.now() });
         loadSessions(true);
         refreshGoalBadge();
+        // 绑定之前到达的增量被归属守卫挡在 DOM 外，只进了 SHADOW。这里补一次
+        // 重放，否则开头的思考块 / 工具卡 / 正文会整段缺失。只在本轮还没画过
+        // 任何内容时才做，避免和已经渲染的部分重复。
+        const sh = SHADOW[conv.id];
+        if (!curA && sh && ((sh.events || []).length || (sh.text || '').trim())) {
+          startTurnUI();
+          (sh.events || []).forEach(replayEvent);
+          if ((sh.text || '').trim()) {
+            curStream = null;
+            renderBlocks(curA.querySelector('.ab'), sh.text);
+            curText = (curText || '') + sh.text;
+            follow();
+          }
+          delete SHADOW[conv.id];
+        }
+      } else if (conv.id !== res.sessionId) {
+        // 迟到的 session.start 曾把界面绑到上一次失败尝试的会话上。POST 响应
+        // 才是本轮真正的会话，强制改绑，否则本轮回答的事件会被归属守卫全丢。
+        conv.id = res.sessionId;
+        ignoreSid = '';
+        addRc({ id: conv.id, t: conv.title || title, ts: Date.now() });
+        loadSessions(true);
+        refreshGoalBadge();
       }
-      // 首条消息期间按了停止：现在才有会话 id，补发 interrupt
+      // 上一次失败尝试可能把本会话标成了 ignoreSid，这里自愈。
+      if (ignoreSid && ignoreSid === conv.id) ignoreSid = '';
+      // 首条消息期间按了停止：现在才有会话 id，补发 interrupt。用本轮冻结的
+      // 目标 id，不能用“当前” conv.id，否则切走后会中断别的会话。
       if (pendingInterrupt) {
         pendingInterrupt = false;
-        api('/interrupt', { method: 'POST', body: { session_id: conv.id } }).catch(() => {});
+        api('/interrupt', { method: 'POST', body: { session_id: mySid || conv.id } }).catch(() => {});
       }
+      // turn.start 若在断线时丢了，这里补一次轮询。
+      startTurnProbe();
     }
   } catch (e) {
+    if (gen !== convGen || !conv) return;   // 会话已切走，别把错误画进新会话
     busy = false;
     expectBubble = false;
     stopSpin(curA);
     sync();
-    toast(e.message);
-    // 预检失败时 turn.start 还没到，curA 还是空的。必须自己补一个错误气泡，
-    // 否则用户只看到自己那条消息，既没有回答也没有任何原因。
-    if (!curA) curA = aMsg(null, false, Date.now());
-    const p = document.createElement('p');
-    p.style.color = '#f87171';
-    p.dataset.err = '1';
-    p.textContent = '⚠ ' + e.message;
-    if (curA) curA.querySelector('.ab').append(p);
-    follow();
+    // 服务端还没接住这条消息（没有 turn.start / curA）时整体回滚到发送前：
+    // 撤掉乐观气泡，把文字和附件还给输入框。已经开始的轮次保留气泡。
+    const started = !!curA || !!(conv.id && INFLIGHT[conv.id]);
+    if (!started) {
+      if (userNode && userNode.isConnected) userNode.remove();
+      ATTS = atts;
+      renderAtts();
+      if (!ta.value.trim()) { ta.value = q; fit(); }
+      resetTurn();
+      // 这次尝试被整体回滚 = 服务端不会为它建会话。立刻关掉认领窗口，否则
+      // 15 秒内迟到的 session.start 会把界面绑到一个已经丢弃的会话上。
+      awaitingSession = false;
+      pendingSid = null;
+      toast(e.message);
+      follow();
+    } else {
+      toast(e.message);
+      if (!curA) curA = aMsg(null, false, Date.now());
+      const p = document.createElement('p');
+      p.style.color = '#f87171';
+      p.dataset.err = '1';
+      p.textContent = '⚠ ' + e.message;
+      if (curA) curA.querySelector('.ab').append(p);
+      follow();
+    }
+  } finally {
+    if (conv && conv.id) {
+      awaitingSession = false;
+      pendingSid = null;
+    } else {
+      // 新会话的 id 可能晚于响应到达：留一个短窗口给 session.start，不能
+      // 立刻关死，否则事件会被归属守卫全部丢掉。带 !busy 门控：15 秒内用户
+      // 可能已经重发了一轮，那个新窗口有自己的清理逻辑，别被旧定时器掐掉。
+      setTimeout(() => {
+        if (gen === convGen && !busy && (!conv || !conv.id)) {
+          awaitingSession = false;
+          pendingSid = null;
+        }
+      }, 15000);
+    }
   }
 }
 
@@ -4793,12 +4966,22 @@ async function runCompact() {
  * body {from: 0}（TruncateReq.from=0，to 缺省 = 截到末尾）。
  */
 async function clearConv() {
+  // 生成中清空会让 curA 指向被删掉的节点，这一轮的输出既看不见也存不下。
+  if (busy) { toast(S.lang === 'zh' ? '生成中无法清空对话' : 'Cannot clear while a turn is running'); return; }
   try {
     if (conv && conv.id) {
       await api('/sessions/' + conv.id + '/messages', { method: 'DELETE', body: { from: 0 } });
     }
+    releaseFeedBlobs();
     feed.innerHTML = '';
     resetTurn();
+    // 服务端已从 0 截断：之前暂存的编辑下标全部失效，别再拿它去 DELETE。
+    pendingEdit = null;
+    // 会话本身还在，但这一轮的在途标记全部作废。
+    expectBubble = false;
+    awaitingSession = false;
+    pendingSid = null;
+    stopTurnProbe();
     toast(t('clear'));
   } catch (e) { toast(e.message); }
 }
@@ -4866,8 +5049,11 @@ async function refreshGoalBadge() {
   const el = $('#goalbar');
   if (!el) return;
   if (!conv || !conv.id) { el.className = ''; el.innerHTML = ''; return; }
+  const sid = conv.id, gen = convGen;
   try {
-    const r = await api('/sessions/' + conv.id + '/goal');
+    const r = await api('/sessions/' + sid + '/goal');
+    // 旧会话的 goal 不能画进新会话，按钮更不能拿新 conv.id 去暂停/清除。
+    if (gen !== convGen || !conv || conv.id !== sid) return;
     if (!r.goal) { el.className = ''; el.innerHTML = ''; return; }
     const g = r.goal;
     const z = S.lang === 'zh';
@@ -4880,7 +5066,10 @@ async function refreshGoalBadge() {
     el.querySelector('.gt').textContent = g.objective +
       (g.max_rounds ? ' · 第 ' + (g.rounds + 1) + '/' + g.max_rounds + ' 轮' : '');
     el.querySelectorAll('button').forEach(b => {
-      b.onclick = () => runGoal(b.dataset.g);
+      b.onclick = () => {
+        if (gen !== convGen || !conv || conv.id !== sid) return;
+        runGoal(b.dataset.g);
+      };
     });
   } catch (e) { /* 会话未建立等场景静默 */ }
 }
@@ -4894,6 +5083,12 @@ function stopTurn() {
 
 function send(force) {
   const q = ta.value.trim();
+  // run() 正在提交「编辑消息」的截断请求：此时 busy 还是 false，若放行会
+  // 先清空输入框再被 runStarting 挡下，用户刚打的字就凭空消失了。
+  if (runStarting) {
+    toast(S.lang === 'zh' ? '正在提交上一条编辑，请稍候' : 'Committing your previous edit…');
+    return;
+  }
   if (busy) {
     if (!q && !ATTS.length) { stopTurn(); return; }
     if (!conv || !conv.id) {
@@ -4959,6 +5154,14 @@ ta.addEventListener('keydown', e => {
     }
     if (e.key === 'Escape') { e.preventDefault(); slClose(); return; }
   }
+  if (e.key === 'Escape' && pendingEdit) {
+    e.preventDefault();
+    restorePendingEdit();
+    ta.value = '';
+    fit();
+    sync();
+    return;
+  }
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
     e.preventDefault();
     send((e.ctrlKey || e.metaKey) ? 'toggle' : '');
@@ -4973,7 +5176,8 @@ feed.addEventListener('click', e => {
   const uc = e.target.closest('[data-uc]');
   if (uc) {
     const m = uc.closest('.u');
-    copyText(m ? m.querySelector('.ub').innerText : '');
+    // 优先复制存储的原文（未被 emoji 过滤、未丢 Markdown 空白）。
+    copyText(m ? (m.dataset.raw != null ? m.dataset.raw : m.querySelector('.ub').innerText) : '');
     return;
   }
   const ud = e.target.closest('[data-ud]');
@@ -4985,7 +5189,7 @@ feed.addEventListener('click', e => {
   const a = b.closest('.a'), k = b.dataset.a;
   if (k !== 'copy' && !persisted(a)) return;
   if (k === 'copy') {
-    copyText(a.querySelector('.ab').innerText);
+    copyText(a.dataset.raw != null ? a.dataset.raw : a.querySelector('.ab').innerText);
   } else if (k === 're' && !busy && conv && conv.id) {
     regenFrom(a);
   } else if (k === 'edit') {
@@ -5044,40 +5248,55 @@ async function deleteMsg(el) {
   if (!el || busy) return;   // 生成中不动消息，避免与在途下标错位
   const z = S.lang === 'zh';
   // 删除不可恢复，确认一下
-  if (!(await confirmBox(z ? '确定删除这条消息？' : 'Delete this message?', { danger: false }))) return;
+  if (!(await confirmBox(z ? '确定删除这条消息？' : 'Delete this message?'))) return;
+  // 确认框是异步的：期间可能切走会话、也可能有新一轮开跑。先冻结目标会话与
+  // 代际，绝不拿旧下标去删另一个会话的消息。
+  const sid = conv && conv.id, gen = convGen;
+  if (busy || gen !== convGen) return;
+  // 有一条“待发送的编辑”时，下标基线会变；先把它撤回，删除才落在真实下标上。
+  if (pendingEdit) { restorePendingEdit(); ta.value = ''; fit(); sync(); }
   const idx = el.dataset.mi;
-  collapseGone(el, restamp);
-  if (conv && conv.id && idx != null && idx !== 'null') {
-    const from = +idx;
-    const to = el.dataset.miEnd != null && el.dataset.miEnd !== 'null' ? +el.dataset.miEnd : from + 1;
-    api('/sessions/' + conv.id + '/messages', {
-      method: 'DELETE', body: { from, to }
-    }).catch(() => {});
+  // 没有存储下标（还没落库）时只动本地，和旧行为一致。
+  if (!sid || idx == null || idx === 'null') { collapseGone(el, restamp); return; }
+  const from = +idx;
+  const to = el.dataset.miEnd != null && el.dataset.miEnd !== 'null' ? +el.dataset.miEnd : from + 1;
+  try {
+    await api('/sessions/' + sid + '/messages', { method: 'DELETE', body: { from, to } });
+  } catch (e) {
+    // 服务端没删成就别动 DOM：界面少一条、库里还在，之后每条下标都错一位，
+    // 再点删除就会删到相邻的消息上。
+    toast(e.message);
+    restamp();
+    return;
   }
+  // await 之后可能已经切走：新会话的视图由 openSession 负责，这里不能再碰。
+  if (gen !== convGen || !conv || conv.id !== sid) return;
+  collapseGone(el, restamp);
 }
 
 /**
- * Edit a user message in place. The text is pushed back into the composer and
- * the message — plus everything after it — is dropped from thread and store,
- * so the next send starts a clean branch from here.
+ * Edit a user message in place. The text goes back into the composer and the
+ * tail is hidden locally only: the server history is truncated when the edited
+ * message is actually sent, so canceling / switching away never loses messages.
  */
 function editUser(el) {
   if (!el || busy) return;
+  if (pendingEdit) restorePendingEdit();
+  const idx = el.dataset.mi;
+  if (!conv || !conv.id || idx == null || idx === 'null') { toast(t('toast')); return; }
   const c = el.querySelector('.ub').cloneNode(true);
   c.querySelectorAll('.uatt').forEach(n => n.remove());
   ta.value = c.innerText;
   fit();
   sync();
   ta.focus();
-  const idx = el.dataset.mi;
-  if (conv && conv.id && idx != null && idx !== 'null') {
-    api('/sessions/' + conv.id + '/messages', {
-      method: 'DELETE', body: { from: +idx }
-    }).catch(() => {});
-  }
-  collapseGone(el, restamp);
+  // 记住原始位置，DELETE 失败或用户按 Esc 时按原顺序插回。
+  const nodes = [el];
   let n = el.nextElementSibling;
-  while (n) { const nx = n.nextElementSibling; n.remove(); n = nx; }
+  while (n) { const nx = n.nextElementSibling; nodes.push(n); n = nx; }
+  const parent = el.parentNode, anchor = el.previousElementSibling;
+  nodes.forEach(x => x.remove());
+  pendingEdit = { sid: conv.id, gen: convGen, from: +idx, nodes, parent, anchor };
   toast(t('editmsg'));
 }
 
@@ -5132,16 +5351,34 @@ function editAgent(el) {
     keep.forEach(k => body.append(k));
     renderBlocks(body, text);
   };
-  const save = () => {
+  let saving = false;
+  const save = async () => {
+    if (saving) return;
     const v = box.value;
+    // 快照会话：保存期间可能用命令面板切走，不能把 PATCH 打到新会话上。
+    const sid = conv && conv.id;
+    const btn = bar.querySelector('[data-save]');
+    if (sid && idx != null && idx !== 'null') {
+      saving = true;
+      btn.disabled = true;
+      try {
+        await api('/sessions/' + sid + '/messages/' + idx, {
+          method: 'PATCH',
+          body: { text: v, ...(miEnd != null && miEnd !== 'null' ? { to: +miEnd } : {}) }
+        });
+      } catch (err) {
+        saving = false;
+        btn.disabled = false;
+        toast(err.message);
+        return;
+      }
+      saving = false;
+      btn.disabled = false;
+      if (!conv || conv.id !== sid) return;   // 已切走，别再改旧 DOM
+    }
+    // 只有确认落库后才更新界面与原始文本，否则用户会以为改成功了。
     el.dataset.raw = v;
     rebuild(v);
-    if (conv && conv.id && idx != null && idx !== 'null') {
-      api('/sessions/' + conv.id + '/messages/' + idx, {
-        method: 'PATCH',
-        body: { text: v, ...(miEnd != null && miEnd !== 'null' ? { to: +miEnd } : {}) }
-      }).catch(err => toast(err.message));
-    }
     toast(t('saved'));
   };
   bar.querySelector('[data-save]').onclick = save;
@@ -5158,36 +5395,67 @@ function editAgent(el) {
  * history then ends with the user's question again and the reply is a fresh
  * generation (POST /chat with retry: nothing new is appended).
  */
-function regenFrom(el) {
+async function regenFrom(el) {
   if (!el || busy || !conv || !conv.id) return;
+  // 有待发送的编辑时先撤回：否则重跑的 DELETE 与编辑的 DELETE 会各截各的。
+  if (pendingEdit) { restorePendingEdit(); ta.value = ''; fit(); sync(); }
   const idx = el.dataset.mi;
   if (idx == null || idx === 'null') { toast(t('toast')); return; }
   const from = +idx;
+  // 冻结会话和代际：DELETE 与 /chat 之间用户可能切走，绝不能把 retry 发到
+  // 另一个会话（旧代码在 .then 里读全局 conv.id，等于把别人的最后一条回答重跑）。
+  const sid = conv.id, gen = convGen;
+  // 摘除前记住原位置：失败时按原顺序插回。直接 append 会把旧尾巴排到
+  // 期间新增的气泡之后，问答顺序整个颠倒。
+  const anchor = el.previousElementSibling;
+  const nodes = [];
   let n = el;
-  while (n) { const nx = n.nextElementSibling; n.remove(); n = nx; }
+  while (n) { const nx = n.nextElementSibling; nodes.push(n); n = nx; }
+  nodes.forEach(x => x.remove());
   resetTurn();
   busy = true;
   sig = { stop: false };
   sync();
-  api('/sessions/' + conv.id + '/messages', {
-    method: 'DELETE', body: { from }
-  }).then(() => api('/chat', {
-    method: 'POST',
-    body: {
-      session_id: conv.id,
-      text: '',
-      retry: true,
-      model: S.model,
-      permission_mode: S.perm,
-      thinking_level: S.lvl
-    }
-  })).then(() => {
+  let deleted = false;
+  try {
+    await api('/sessions/' + sid + '/messages', {
+      method: 'DELETE', body: { from }
+    });
+    deleted = true;
+    if (gen !== convGen || !conv || conv.id !== sid) return;
+    await api('/chat', {
+      method: 'POST',
+      body: {
+        session_id: sid,
+        text: '',
+        retry: true,
+        model: S.model,
+        permission_mode: S.perm,
+        thinking_level: Math.max(0, Math.min(3, +S.lvl || 0))
+      }
+    });
+    if (gen !== convGen || !conv || conv.id !== sid) return;
+    // POST 成功后再开轮询：DELETE/POST 之间服务端没有 turn 在跑，过早轮询
+    // 会被 /turn/running 的 false 误判成“已经收尾”。
+    startTurnProbe();
     restamp();
-  }).catch(err => {
+  } catch (err) {
+    if (gen !== convGen || !conv || conv.id !== sid) return;
     busy = false;
+    stopTurnProbe();
     sync();
-    toast(err.message);
-  });
+    if (deleted) {
+      // 截断已经成功、只是重跑失败：按服务端状态重放，不能把已删除的旧气泡
+      // 塞回来（否则下一次编辑/删除会按旧下标改错消息）。
+      toast(err.message);
+      await openSession(sid);
+    } else {
+      // 删除失败时把刚摘下的气泡按原位置插回，避免“点重新生成失败后对话少了一半”。
+      const ref = (anchor && anchor.parentNode === feed) ? anchor.nextSibling : null;
+      nodes.forEach(x => { try { feed.insertBefore(x, ref); } catch (e) {} });
+      toast(err.message);
+    }
+  }
 }
 
 
@@ -5198,12 +5466,15 @@ async function openAgentEditor(el) {
   if (idx == null || idx === 'null') { toast(t('toast')); return; }
   const from = +idx;
   const to = el.dataset.miEnd != null && el.dataset.miEnd !== 'null' ? +el.dataset.miEnd : from + 1;
+  // 快照会话：编辑器打开期间用户可能用命令面板切走，保存必须回到原会话。
+  const sid = conv.id, gen = convGen;
 
   let stored = [];
   try {
-    const res = await api('/sessions/' + conv.id + '/messages');
+    const res = await api('/sessions/' + sid + '/messages');
     stored = res.messages || [];
   } catch (e) { toast(e.message); return; }
+  if (gen !== convGen || !conv || conv.id !== sid) return;
 
   const tools = [];
   const byId = {};
@@ -5241,7 +5512,10 @@ async function openAgentEditor(el) {
     });
   }
 
-  const close = () => box.classList.remove('open');
+  const close = () => {
+    box.classList.remove('open');
+    if (box._esc) { document.removeEventListener('keydown', box._esc, true); box._esc = null; }
+  };
   const body = box.querySelector('.mbd');
   body.innerHTML = '';
 
@@ -5314,15 +5588,19 @@ async function openAgentEditor(el) {
       });
     }
     const save = box.querySelector('[data-save]');
+    if (gen !== convGen || !conv || conv.id !== sid) {
+      toast(S.lang === 'zh' ? '会话已切换，请重新打开编辑' : 'Session changed; reopen the editor');
+      return;
+    }
     save.disabled = true;
     try {
-      await api('/sessions/' + conv.id + '/messages/' + from, {
+      await api('/sessions/' + sid + '/messages/' + from, {
         method: 'PATCH',
         body: { to, text: secText.querySelector('.mtx').value, tools: payloadTools }
       });
       close();
       toast(t('saved'));
-      await openSession(conv.id);
+      await openSession(sid);
     } catch (e) {
       toast(e.message);
     } finally { save.disabled = false; }
@@ -5330,6 +5608,11 @@ async function openAgentEditor(el) {
 
   box.classList.add('open');
   box.querySelector('.mtx').focus();
+  if (box._esc) document.removeEventListener('keydown', box._esc, true);
+  box._esc = ev => {
+    if (ev.key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); close(); }
+  };
+  document.addEventListener('keydown', box._esc, true);
 }
 
 /* ---------------------------------------------------------------- attachments */
@@ -5367,6 +5650,7 @@ async function addFiles(list) {
       // 图片附件本地预览：objectURL 只在浏览器内存里，刷新前有效
       if (att.kind === 'image' && typeof URL.createObjectURL === 'function') {
         att.url = URL.createObjectURL(f);
+        OBJ_URLS.add(att.url);
       }
     } catch (e) {
       const i = ATTS.indexOf(att);
@@ -5379,6 +5663,20 @@ async function addFiles(list) {
     renderAtts();
     sync();
   }
+}
+
+/**
+ * 释放即将被移除的消息气泡里的 blob 图片。
+ * 流式消息的缩略图挂在 <img src="blob:..."> 上，节点删掉后浏览器不会自动
+ * 回收，切一次会话就漏一批；这里在清空 feed 之前统一 revoke。
+ */
+function releaseFeedBlobs() {
+  feed.querySelectorAll('img[src^="blob:"]').forEach(im => {
+    const u = im.getAttribute('src');
+    if (!u) return;
+    try { URL.revokeObjectURL(u); } catch (e) {}
+    OBJ_URLS.delete(u);
+  });
 }
 
 function renderAtts() {
@@ -5400,7 +5698,10 @@ $('#atts').onclick = e => {
   const x = e.target.closest('[data-ax]');
   if (x) {
     const gone = ATTS.splice(+x.dataset.ax, 1)[0];
-    if (gone && gone.url) { try { URL.revokeObjectURL(gone.url); } catch (err) {} }
+    if (gone && gone.url) {
+      try { URL.revokeObjectURL(gone.url); } catch (err) {}
+      OBJ_URLS.delete(gone.url);
+    }
     renderAtts();
     sync();
   }
@@ -5763,7 +6064,12 @@ function dropPersistedShadow(msgs, sh) {
 }
 async function openSession(id, focusMsg) {
   const my = ++openTok;
+  // 代际立刻递增：所有还在路上的旧会话请求从这一刻起都不能再写 DOM。
+  const gen = convGen;
+  convGen++;
   qsReset(true);
+  stopTurnProbe();   // 上一个会话的轮询不能再对新会话下结论
+  expectBubble = false;
   try {
     const res = await api('/sessions/' + id + '/messages');
     if (my !== openTok) return;
@@ -5781,12 +6087,15 @@ async function openSession(id, focusMsg) {
     }
     conv = { id, title: (CONVS.find(c => c.id === id) || {}).t || '' };
     ignoreSid = '';
+    // 加载成功才丢弃「待发送的编辑」：失败时还得留在原视图里（见 catch）。
+    pendingEdit = null;
+    releaseFeedBlobs();
     feed.innerHTML = '';
     resetTurn();
     document.body.classList.add('chat');
     $('#ttl').textContent = noEmoji(conv.title);
     document.querySelectorAll('.rc.on').forEach(e => e.classList.remove('on'));
-    const el = document.querySelector('.rc[data-id="' + id + '"]');
+    const el = [...document.querySelectorAll('.rc')].find(e => e.dataset.id === id);
     if (el) el.classList.add('on');
 
     const msgs = res.messages || [];
@@ -5884,8 +6193,12 @@ async function openSession(id, focusMsg) {
     // 从搜索结果跳进来：滚动到命中的那条消息并高亮一下。
     // restamp 是异步的（下标回填要拉一次存储），所以等它跑完再定位。
     await restamp();
+    // restamp 之后还有多次 await 与 DOM 写入：这里必须再验一次代际，
+    // 否则用户在定位/重放期间切走，旧会话的内容会画进新会话。
+    if (my !== openTok || gen !== convGen) return;
     if (focusMsg != null) {
-      const hit = feed.querySelector('[data-mi="' + focusMsg + '"]');
+      const hit = [...feed.querySelectorAll('[data-mi]')]
+        .find(n => n.dataset.mi === String(focusMsg));
       if (hit) {
         hit.scrollIntoView({ block: 'center', behavior: 'smooth' });
         hit.classList.add('flash');
@@ -5950,6 +6263,7 @@ async function openSession(id, focusMsg) {
           if (sh.ended) {
             try {
               const msgs2 = (await api('/sessions/' + id + '/messages')).messages || [];
+              if (my !== openTok || gen !== convGen) return;
               const flat = msgs2.filter(m => m.role === 'assistant')
                 .map(m => normParts(m.parts).filter(x => x.k === 'text').map(x => x.text).join('\n\n'))
                 .join('\n\n')
@@ -5958,6 +6272,8 @@ async function openSession(id, focusMsg) {
             } catch (e) { /* 存储读不到就照常补渲染，宁可多不可少 */ }
           }
           if (need.trim()) {
+            // await 之后 curA 可能已被 resetTurn() 清掉，别对 null 解引用。
+            if (!curA || my !== openTok || gen !== convGen) return;
             curStream = null;
             renderBlocks(curA.querySelector('.ab'), need);
             curText = (curText || '') + need;
@@ -5983,6 +6299,7 @@ async function openSession(id, focusMsg) {
       if (need) {
         try {
           const msgs = (await api('/sessions/' + id + '/messages')).messages || [];
+          if (my !== openTok || gen !== convGen) return;
           const flat = msgs.filter(m => m.role === 'assistant')
             .map(m => normParts(m.parts).filter(x => x.k === 'text').map(x => x.text).join('\n\n'))
             .join('\n\n')
@@ -5991,6 +6308,7 @@ async function openSession(id, focusMsg) {
         } catch (e) { /* 存储读不到就照常补渲染，宁可多不可少 */ }
       }
       if (need) {
+        if (my !== openTok || gen !== convGen) return;
         const asDone = [...feed.querySelectorAll(':scope > .a')];
         const aDone = asDone[asDone.length - 1];
         if (aDone) renderBlocks(aDone.querySelector('.ab'), need);
@@ -5999,6 +6317,12 @@ async function openSession(id, focusMsg) {
     }
     qLoad();
   } catch (e) {
+    // 加载失败：当前会话没变，把代际、待发送编辑和 busy 都还原，
+    // 否则界面上会凭空少一截消息，或者发送键永远停在「停止」。
+    if (convGen === gen + 1) convGen--;
+    if (pendingEdit) restorePendingEdit();
+    if (busy && !(conv && conv.id && INFLIGHT[conv.id])) { busy = false; sync(); }
+    stopTurnProbe();
     toast(e.message);
   }
 }
@@ -6014,10 +6338,13 @@ async function openSession(id, focusMsg) {
  */
 async function restamp() {
   if (!conv || !conv.id) return;
+  const sid = conv.id, gen = convGen;
   let msgs;
   try {
-    msgs = (await api('/sessions/' + conv.id + '/messages')).messages || [];
+    msgs = (await api('/sessions/' + sid + '/messages')).messages || [];
   } catch (e) { return; }
+  // 请求在途时用户可能切走：旧会话的下标绝不能写到新会话的 DOM 上。
+  if (gen !== convGen || !conv || conv.id !== sid) return;
   const nodes = [...feed.children]
     .filter(n => n.classList.contains('u') || n.classList.contains('a'));
   nodes.forEach(n => { delete n.dataset.mi; delete n.dataset.miEnd; delete n.dataset.raw; });
@@ -6027,14 +6354,22 @@ async function restamp() {
   for (let i = 0; i < msgs.length && ni < nodes.length; i++) {
     const m = msgs[i];
     const tx = normParts(m.parts).filter(p => p.k === 'text');
-    const node = nodes[ni];
     if (m.role === 'user' && tx.length) {
-      if (!node.classList.contains('u')) break;   // DOM 与存储脱节，别乱贴
+      // 存储里遇到下一条提问，说明上一个 .a 气泡的区间到此结束。必须先把
+      // 指针推进到下一个 .u 节点：否则配对会永远停在第一条回答上，第二轮
+      // 之后的所有消息都拿不到 data-mi，编辑/删除/重跑全部失效。
+      while (ni < nodes.length && !nodes[ni].classList.contains('u')) ni++;
+      if (ni >= nodes.length) break;
+      const node = nodes[ni];
       node.dataset.mi = i;
       node.dataset.miEnd = i + 1;
+      // restamp 会先清掉 raw；用户消息的原文在存储里，补回来供复制使用。
+      node.dataset.raw = tx.map(x => x.text).join('\n\n');
       light(node);
       ni++;
-    } else if (node.classList.contains('a')) {
+    } else {
+      const node = nodes[ni];
+      if (!node || !node.classList.contains('a')) break;   // DOM 与存储脱节，别乱贴
       if (node.dataset.mi === undefined) {
         node.dataset.mi = i;
         node.dataset.raw = '';
@@ -6045,8 +6380,6 @@ async function restamp() {
         const add = tx.map(x => x.text).join('\n\n');
         node.dataset.raw = node.dataset.raw ? node.dataset.raw + '\n\n' + add : add;
       }
-    } else {
-      break;
     }
   }
   // 配对循环可能在中途 break（DOM 与存储短暂不同步），剩下的节点就永远
@@ -6068,10 +6401,13 @@ async function restamp() {
  */
 async function reconcileTail() {
   if (!conv || !conv.id) return;
+  const sid = conv.id, gen = convGen;
   try {
-    const msgs = (await api('/sessions/' + conv.id + '/messages')).messages || [];
-    // 从尾部收集最后一条用户提问之后所有 assistant 的文本——
-    // 正是最后一个气泡对应的存储范围，不依赖 restamp 的异步回填。
+    const msgs = (await api('/sessions/' + sid + '/messages')).messages || [];
+    // 切会话后旧响应必须丢弃，否则会把 A 的最终答案写进 B 的最后一个气泡。
+    if (gen !== convGen || !conv || conv.id !== sid) return;
+    // 从尾部收集最后一条用户提问之后所有 assistant 的文本——正是最后一个
+    // 气泡对应的存储范围，不依赖 restamp 的异步回填。
     const txts = [];
     for (let i = msgs.length - 1; i >= 0; i--) {
       const m = msgs[i];
@@ -6266,12 +6602,21 @@ function renameChat(c, el) {
     done = true;
     const v = inp.value.trim(), nt = ok && v ? v : old;
     box.textContent = nt;
-    if (conv && conv.id === c.id) $('#ttl').textContent = nt;
-    if (nt !== old) {
-      api('/sessions/' + c.id, { method: 'PATCH', body: { title: nt } })
-        .then(() => toast(t('cm_renamed') || 'renamed'))
-        .catch(() => {});
-    }
+    if (nt === old) return;
+    api('/sessions/' + c.id, { method: 'PATCH', body: { title: nt } })
+      .then(() => {
+        c.t = nt;
+        const cc = CONVS.find(x => x.id === c.id);
+        if (cc) cc.t = nt;
+        toast(t('cm_renamed') || 'renamed');
+      })
+      .catch(err => {
+        // 服务端没改成功就回滚标题，不能让侧栏和刷新后的结果对不上。
+        c.t = old;
+        box.textContent = old;
+        if (conv && conv.id === c.id) $('#ttl').textContent = old;
+        toast(err.message);
+      });
   };
   inp.onkeydown = e => {
     e.stopPropagation();
@@ -6284,9 +6629,19 @@ function renameChat(c, el) {
 
 function deleteChat(c, el) {
   if (!el) return;
-  // 删除会话不可恢复，先轻确认（双语）
-  confirmBox(t('cf_del_chat')).then(ok => {
+  // 删除会话不可恢复，先确认（双语）。只有服务端真的删掉才动 UI，否则
+  // 刷新后会话又回来，甚至后续消息写回一个已删的会话。
+  confirmBox(t('cf_del_chat')).then(async ok => {
     if (!ok) return;
+    const prevPE = el.style.pointerEvents;
+    el.style.pointerEvents = 'none';
+    try {
+      await api('/sessions/' + c.id, { method: 'DELETE' });
+    } catch (e) {
+      el.style.pointerEvents = prevPE;
+      toast(e.message);
+      return;
+    }
     el.style.height = el.offsetHeight + 'px';
     void el.offsetHeight;
     el.classList.add('out');
@@ -6302,7 +6657,6 @@ function deleteChat(c, el) {
       renderSidebar();
       if (conv && conv.id === c.id) newChat();
     }, A(760));
-    api('/sessions/' + c.id, { method: 'DELETE' }).catch(() => {});
   });
 }
 
@@ -6368,13 +6722,28 @@ function newChat() {
   busy = false;
   pendingInterrupt = false;
   ignoreSid = '';
+  // 新建对话必须同时作废在途的 openSession：否则它回来会把刚点掉的
+  // 「新对话」又切回上一个会话。
+  openTok++;
+  convGen++;
+  pendingEdit = null;
+  awaitingSession = false;
+  pendingSid = null;
+  expectBubble = false;
+  stopTurnProbe();
   sync();
   conv = null;
   refreshGoalBadge();
   document.body.classList.remove('chat');
   apply();
-  setTimeout(() => { if (!conv) feed.innerHTML = ''; }, A(600));
+  setTimeout(() => { if (!conv) { releaseFeedBlobs(); feed.innerHTML = ''; } }, A(600));
   document.querySelectorAll('.rc.on').forEach(e => e.classList.remove('on'));
+  // 未发送的附件预览也要回收，否则新对话里这些 blob 再没有节点引用它们。
+  ATTS.forEach(a => {
+    if (!a || !a.url) return;
+    try { URL.revokeObjectURL(a.url); } catch (e) {}
+    OBJ_URLS.delete(a.url);
+  });
   ATTS = [];
   renderAtts();
   ta.value = '';
@@ -7308,7 +7677,7 @@ async function loadProviders() {
 }
 
 function mpRow(p) {
-  return '<button class="mp-item' + (p.id === mpSel ? ' on' : '') + '" data-mpsel="' + p.id + '">' +
+  return '<button class="mp-item' + (p.id === mpSel ? ' on' : '') + '" data-mpsel="' + esc(p.id) + '">' +
     '<span class="mp-ic" style="background:' + esc(p.color || '#4d6bfe') + '">' + esc(p.icon || 'S') + '</span>' +
     '<b>' + esc(mpName(p)) + '</b>' +
     '<span class="mp-dot ' + (p.enabled ? 'on' : 'off') + '"></span></button>';
@@ -7412,7 +7781,7 @@ function mpOpenEditor(idx) {
   const draw = () => {
     ov.innerHTML = '<div class="mdlc">' +
       '<div class="mdlh"><h3>' + (isNew ? t('mp_addm') : t('mp_edit')) + '</h3>' +
-      '<button class="ib" data-x title="close">' + ic('close') + '</button></div>' +
+      '<button class="ib" data-x title="close">' + ic('x') + '</button></div>' +
       '<div class="mdlb">' +
         '<div class="mp-field"><label>' + t('mp_model_id') + '</label>' +
         '<input class="mp-in" data-f="id" value="' + esc(d.id) + '" placeholder="glm-5.3" spellcheck="false" style="font-family:var(--mono)"></div>' +
@@ -7537,7 +7906,7 @@ function mpPickUpstream(list) {
   const draw = () => {
     ov.innerHTML = '<div class="mdlc">' +
       '<div class="mdlh"><h3>' + t('mp_fetched').replace('{n}', String(list.length)) + '</h3>' +
-      '<button class="ib" data-x title="close">' + ic('close') + '</button></div>' +
+      '<button class="ib" data-x title="close">' + ic('x') + '</button></div>' +
       '<div class="mdlb"><div class="cks">' +
       list.map(m => {
         const dis = have.has(m.id);
@@ -7603,6 +7972,7 @@ let ugHmMode = 'daily';
 let ugModelNames = {};
 let ugSnap = null;
 let ugLoading = false;
+let ugReq = 0;          // 最后一次请求胜出：切范围时旧响应不能覆盖新数据
 let ugLastRefresh = null;
 
 /** 大数字格式化：中文用「万 / 亿」，英文用 K / M / B。 */
@@ -7677,6 +8047,7 @@ let MEM = [];
 let memTag = 'all';
 let memQ = '';
 let memEdit = null;     // null | 'new' | id
+let memFocus = false;   // 只有“刚打开编辑”才抢焦点；增删/刷新不能把焦点从别处拽走
 let memLoading = false;
 const MTAG = { pref: 'mem_pref', proj: 'mem_proj', fact: 'mem_fact' };
 
@@ -7723,9 +8094,9 @@ function renderMemoryPage(host) {
       memDraw();
       return;
     }
-    if (g('data-memadd')) { memEdit = 'new'; memTag = 'all'; memQ = ''; memDraw(); return; }
+    if (g('data-memadd')) { memEdit = 'new'; memTag = 'all'; memQ = ''; memFocus = true; memDraw(); return; }
     if (g('data-memf')) { memTag = g('data-memf').dataset.memf; memDraw(); return; }
-    if (g('data-memedit')) { memEdit = +g('data-memedit').dataset.memedit; memDraw(); return; }
+    if (g('data-memedit')) { memEdit = +g('data-memedit').dataset.memedit; memFocus = true; memDraw(); return; }
     if (g('data-memcancel')) { memEdit = null; memDraw(); return; }
     if (g('data-memsave')) { memSave(); return; }
     if (g('data-memdel')) {
@@ -7806,7 +8177,11 @@ function memDraw() {
       (MEM.length ? '<a data-memclear="1">' + esc(t('mem_clear')) + '</a>' : '');
   }
   const ta = document.getElementById('mted');
-  if (ta) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); }
+  if (ta && memFocus) {
+    memFocus = false;
+    ta.focus();
+    ta.setSelectionRange(ta.value.length, ta.value.length);
+  }
 }
 
 function memSave() {
@@ -8040,17 +8415,22 @@ function renderUsagePage(host) {
 
 async function loadUsage() {
   const body = document.getElementById('ugbody');
-  if (!body || ugLoading) return;
+  if (!body) return;
+  // 不再用 ugLoading 拦请求：快速切换 7d/30d 时旧请求会先返回，把新范围
+  // 的数据盖掉。递增令牌，只认最后一次发出的请求。
+  const my = ++ugReq;
   ugLoading = true;
   try {
     const s = await api('/usage?range=' + encodeURIComponent(ugRange));
+    if (my !== ugReq || !body.isConnected) return;
     ugSnap = s;
     ugLastRefresh = new Date();
     paintUsage(body, s);
   } catch (e) {
+    if (my !== ugReq || !body.isConnected) return;
     body.innerHTML = '<div class="ld"><b>' + t('ug_refresh') + ' ✗</b>' + esc(e.message || String(e)) + '</div>';
   } finally {
-    ugLoading = false;
+    if (my === ugReq) ugLoading = false;
   }
 }
 
@@ -8644,6 +9024,9 @@ $('#sp').addEventListener('change', e => {
    global keys
    ================================================================== */
 addEventListener('keydown', e => {
+  // 确认框/模态层打开时，全局快捷键（切会话、命令面板）一律不响应；
+  // 否则确认“删除”时按 ⌘K 切走会话，后续操作会落到另一个会话上。
+  if (document.body.classList.contains('modal-open')) return;
   const m = e.ctrlKey || e.metaKey;
   if (e.key === 'Escape') {
     if ($('#cmdk').classList.contains('open')) { closeCmd(); return; }
@@ -8691,15 +9074,24 @@ function stopTurnProbe() {
 /** 启动轮询核对（每次 turn 开始时调用）。 */
 function startTurnProbe() {
   stopTurnProbe();
+  // 冻结发起时的会话：轮询结果只能作用于这一轮，切走之后不能再改 busy / DOM。
+  const sid = conv && conv.id;
+  const gen = convGen;
+  if (!sid) return;
   turnProbeTimer = setInterval(async () => {
-    if (turnProbeBusy || !busy || !conv || !conv.id) return;
+    // 会话切走 / 这一轮已经结束：自己停掉。否则 interval 会永久空转，
+    // 反复切会话还会叠出好几个。
+    if (turnProbeBusy) return;
+    if (!busy || !conv || conv.id !== sid || gen !== convGen) { stopTurnProbe(); return; }
     turnProbeBusy = true;
     try {
-      const r = await api('/turn/running?session=' + encodeURIComponent(conv.id));
+      const r = await api('/turn/running?session=' + encodeURIComponent(sid));
+      if (gen !== convGen || !conv || conv.id !== sid) { stopTurnProbe(); return; }
       if (r && r.running === false) {
         // 服务端说没有 turn 在跑：收尾事件丢了，按 turn.end 补收尾。
         if (busy) {
           busy = false;
+          expectBubble = false;
           if (curStream) sflush(curStream);
           finishThink(curThinkEl);
           curThinkEl = null;
@@ -8726,6 +9118,8 @@ function startTurnProbe() {
 async function onEventsLost(ev) {
   toast(t('conn_lost'));
   if (!conv || !conv.id) return;
+  // 只同步事件所属的会话；别的会话丢了事件不能拿它的存储来改当前视图。
+  if (ev && ev.sessionId && ev.sessionId !== conv.id) return;
   // 丢掉的事件可能包含整轮内容，用存储里的最终状态校正视图。
   try {
     await reconcileTail();
@@ -9087,9 +9481,22 @@ function connectEvents() {
     // 最多 6 秒，避免服务端刚重启时的重连风暴。
     try { es.close(); } catch (e) {}
     esRetry = Math.min(esRetry + 1, 6);
-    setTimeout(() => { if (!document.hidden) connectEvents(); }, 1000 * esRetry);
+    clearTimeout(connectEvents.timer);
+    // 不再判断 document.hidden：隐藏标签页里断线后如果跳过重连，就再也没
+    // 有路径把它接回来，切回前台会永久停在断线状态。
+    connectEvents.timer = setTimeout(connectEvents, 1000 * esRetry);
   };
 }
+
+/** 页面回到前台/获得焦点时，如果连接已关闭就立刻重建。 */
+function ensureEvents() {
+  clearTimeout(connectEvents.timer);
+  if (es && es.readyState !== 2) return;
+  esRetry = 0;
+  connectEvents();
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden) ensureEvents(); });
+addEventListener('focus', ensureEvents);
 
 /**
  * 断线重连（以及 boot）后恢复：GET /api/pending 拿回挂起的权限请求，
@@ -9153,7 +9560,7 @@ const SPW_KEY = 'parable.spw2';
 /** 刷新所有侧聊标签的工具条胶囊（模型改名、切语言、选了新模型时调用）。 */
 function spChromeAll() {
   SP.tabs.forEach(tb => {
-    if (tb.kind !== 'sidechat' || tb.id !== SP.cur) return;
+    if (tb.kind !== 'sidechat' || tb.id !== SP.active) return;
     const host = $('#spbody');
     if (host) spSideChrome(host, tb);
   });
@@ -9277,6 +9684,16 @@ function spClose(id) {
   const tab = SP.tabs[i];
   // 释放标签占用的资源（终端的流式收集器等）。
   if (tab.st && tab.st.cleanup) { try { tab.st.cleanup(); } catch (e) {} }
+  // 侧聊关掉后不再收到 turn.end：必须自己清计时器并中断服务端那一轮，
+  // 否则 1s 定时器永久空转、后端还在继续烧 token。
+  if (tab.kind === 'sidechat' && tab.st) {
+    if (tab.st.wkt) { clearInterval(tab.st.wkt); tab.st.wkt = 0; }
+    if (tab.st.streaming && tab.st.sid) {
+      api('/interrupt', { method: 'POST', body: { session_id: tab.st.sid } }).catch(() => {});
+    }
+    tab.st.streaming = false;
+    tab.st.cur = null;
+  }
   SP.tabs.splice(i, 1);
   if (SP.active === id) {
     SP.active = SP.tabs.length ? SP.tabs[SP.tabs.length - 1].id : null;
@@ -9729,11 +10146,13 @@ function spRenderSideChat(host, tab) {
   spSideAtts(host, tab);
 }
 
-/** 消息列表增量渲染：只补/改节点，不重建容器。 */
-/** 消息列表增量渲染：只补/改节点，不重建容器，也不重复追加正文。 */
 /** 消息列表增量渲染：只补/改节点，不重建容器，也不重复追加正文。 */
 function spSideSync(host, tab) {
   const st = tab.st;
+  if (!host || !tab || !st) return;
+  // host 指向当前打开的面板；异步操作（保存/删除）期间用户可能切到别的标签，
+  // 这时不能把后台标签的内容写进用户正在看的那个面板。
+  if (host.id === 'spbody' && tab.id !== SP.active) return;
   const box = host.querySelector('#spc-msgs');
   if (!box) return;
   const list = st.msgs;
@@ -9743,18 +10162,35 @@ function spSideSync(host, tab) {
     if (!n) { n = document.createElement('div'); box.append(n); }
     const cls = 'm ' + (m.role === 'user' ? 'u' : m.role === 'error' ? 'err' : 'a');
     if (n.className !== cls) n.className = cls;
+    // 节点可能被下一条消息复用（重新生成会 splice 掉旧消息，新消息正好落到
+    // 同一个 DOM 节点上）。身份变了必须整块重建，否则 .arow 的 onclick 闭包
+    // 还抓着旧消息对象，「编辑/复制/删除」会作用到已经不存在的那条上——编辑
+    // 尤其危险：PATCH 打的是新下标，内容却是旧答案。
+    if (n.__m !== m) {
+      n.__m = m;
+      n.innerHTML = '';
+      delete n.dataset.init;
+      delete n.dataset.tx;
+      delete n.dataset.editing;
+    }
+    // 就地编辑中：跳过这个节点，别把 textarea 和保存/取消按钮冲掉。
+    if (n.dataset.editing === '1') return;
     if (m.role === 'assistant') {
       // 骨架一次建好：工具卡片区 + 正文区。之后只增量更新，不再整块重画，
       // 否则每来一个 text.delta 都会把工具卡片重建一遍。
-      if (!n.dataset.init) {
+      // 也要检查子节点是否真的存在：spSideEdit 会清空 innerHTML，如果只信
+      // dataset.init，后面 querySelector('.sab') 会拿到 null 并抛异常。
+      if (!n.dataset.init || !n.querySelector('.stools') || !n.querySelector('.sab')) {
         n.innerHTML = '<div class="stools"></div><div class="sab"></div>';
         n.dataset.init = '1';
+        delete n.dataset.tx;
       }
       const toolsBox = n.querySelector('.stools');
       const ab = n.querySelector('.sab');
       // 工具卡片：按 callId 复用节点；结果到达后 fillToolCard 整体重写。
       (m.tools || []).forEach(t => {
-        let card = toolsBox.querySelector('[data-call="' + t.id + '"]');
+        let card = [...toolsBox.querySelectorAll('[data-call]')]
+          .find(el => el.dataset.call === t.id);
         if (!card) {
           card = toolCard(toolsBox, t.id, t.name, toolDesc(t.name, t.args || {}));
           card.dataset.args = JSON.stringify(t.args || {});
@@ -9817,12 +10253,15 @@ function spSideSync(host, tab) {
       n.textContent = m.text;
     }
   });
+  spSidePending(host, tab);
   const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 80;
   if (atBottom || st.streaming) box.scrollTop = box.scrollHeight;
 }
 
-/** 输入框外观与主输入框一致/** 输入框外观与主输入框一致/** 输入框外观与主输入框一致：权限胶囊、模型胶囊、发送键。 */
+/** 输入框外观与主输入框一致：权限胶囊、模型胶囊、发送键。 */
 function spSideChrome(host, tab) {
+  if (!host || !tab) return;
+  if (host.id === 'spbody' && tab.id !== SP.active) return;   // 别写到别的标签上
   const st = tab.st;
   const pml = host.querySelector('#spc-pml');
   if (pml) pml.textContent = t('p_' + S.perm);
@@ -9915,6 +10354,8 @@ async function spSideAddFiles(host, tab, files) {
 }
 
 function spSideAtts(host, tab) {
+  if (!host || !tab) return;
+  if (host.id === 'spbody' && tab.id !== SP.active) return;
   const el = host.querySelector('#spc-atts');
   if (!el) return;
   const st = tab.st;
@@ -9937,9 +10378,10 @@ async function spSideSend(host, tab) {
   if (!st.sid) { toast(t('sp_sidechat_placeholder')); return; }
   inp.value = '';
   inp.style.height = '24px';
-  st.msgs.push({ role: 'user', text: text });
-  st.msgs.push({ role: 'assistant', text: '' });
-  st.cur = st.msgs[st.msgs.length - 1];
+  const userMsg = { role: 'user', text: text };
+  const aiMsg = { role: 'assistant', text: '' };
+  st.msgs.push(userMsg, aiMsg);
+  st.cur = aiMsg;
   st.streaming = true;
   st.t0 = Date.now();
   if (st.wkt) clearInterval(st.wkt);
@@ -9968,6 +10410,15 @@ async function spSideSend(host, tab) {
     st.streaming = false;
     st.cur = null;
     if (st.wkt) { clearInterval(st.wkt); st.wkt = 0; }
+    // 请求失败就回滚两条乐观消息，并把文字还给输入框；附件还在 st.atts 里。
+    const ai = st.msgs.indexOf(aiMsg);
+    if (ai >= 0 && !(aiMsg.text || '').trim()) st.msgs.splice(ai, 1);
+    const ui = st.msgs.indexOf(userMsg);
+    if (ui >= 0) st.msgs.splice(ui, 1);
+    if (inp && !inp.value.trim()) {
+      inp.value = text;
+      inp.dispatchEvent(new Event('input'));
+    }
     st.msgs.push({ role: 'error', text: e.message });
     spSideSync(host, tab);
     spSideChrome(host, tab);
@@ -10033,6 +10484,7 @@ function sigStopSide(tab) {
   const sid = tab && tab.st && tab.st.sid;
   if (tab && tab.st) {
     tab.st.streaming = false;
+    tab.st.cur = null;
     if (tab.st.wkt) { clearInterval(tab.st.wkt); tab.st.wkt = 0; }
   }
   if (!sid) return;
@@ -10207,24 +10659,91 @@ function spSideIdx(tab, i) {
   return base + n;
 }
 
+/** 从存储消息里提取正文（用于把本地气泡对齐到服务端下标）。 */
+function spSideText(m) {
+  return normParts(m && m.parts).filter(p => p.k === 'text')
+    .map(p => p.text).join('\n\n').trim();
+}
+
+/**
+ * 重新把本地气泡映射到服务端下标。
+ *
+ * 旧实现只给最后一条钉 si = length-1，前面的消息靠“本地条数”推算——服务端
+ * 每次工具调用都会多插一条 ToolResult user 消息，只要用过工具，后面的编辑/
+ * 删除/重跑就会整体偏移，删错消息。这里从尾部按 role + 正文回溯对齐，工具
+ * 结果消息会被自然跳过。
+ */
+async function spSideRemap(tab) {
+  const st = tab && tab.st;
+  if (!st || !st.sid) return;
+  let msgs;
+  try {
+    const r = await api('/sessions/' + st.sid + '/messages');
+    msgs = r.messages || [];
+  } catch (e) { return; }
+  if (!SP.tabs.includes(tab)) return;
+  st.srvCount = msgs.length;
+  // 先清掉上一轮的映射：本次没匹配上的消息必须退回「未知」，留着过期 si 会
+  // 让编辑/删除打到别的消息上。
+  st.msgs.forEach(m => { if (m && m.si != null) delete m.si; });
+  // 正向配对：本地顺序和服务端顺序一致，从上一条命中的位置继续往后找。
+  // 倒序搜索在多段正文/工具结果交错时会命中更靠后的分片。
+  let from = 0;
+  for (let i = 0; i < st.msgs.length; i++) {
+    const m = st.msgs[i];
+    if (!m || m.role === 'error') continue;
+    const want = String(m.text || '').trim();
+    if (!want) continue;
+    let found = -1;
+    for (let k = from; k < msgs.length; k++) {
+      const sm = msgs[k];
+      if (!sm || sm.role !== m.role) continue;
+      const tx = spSideText(sm);
+      if (!tx) continue;
+      const hit = m.role === 'user'
+        ? tx === want
+        : (tx === want || tx.startsWith(want) || want.startsWith(tx));
+      if (hit) { found = k; break; }
+    }
+    if (found >= 0) { m.si = found; from = found + 1; }
+  }
+}
+
 /** 侧聊：删掉这条回答，让模型带着同样的上下文重跑一遍（和主对话的 ↻ 同义）。 */
 async function spSideRegen(tab, i, at) {
   const st = tab.st;
   if (!st.sid || st.streaming) return;
+  if (at == null) { toast(t('toast')); return; }
   try {
     await api('/sessions/' + st.sid + '/messages', { method: 'DELETE', body: { from: at } });
   } catch (e) { toast(e.message); return; }
+  // DELETE 期间标签可能被关掉：再发 /chat 会让后端白烧一轮 token，
+  // 前端却已经没有任何状态在跟踪它。
+  if (!SP.tabs.includes(tab)) return;
   st.msgs.splice(i);
   st.cur = { role: 'assistant', text: '' };
   st.msgs.push(st.cur);
   st.streaming = true;
   st.t0 = Date.now();
+  if (st.wkt) clearInterval(st.wkt);
+  st.wkt = setInterval(() => {
+    if (!st.streaming) { clearInterval(st.wkt); st.wkt = 0; return; }
+    const curTab = SP.tabs.find(x => x.id === SP.active);
+    if (curTab && curTab.id === tab.id) spSideSync($('#spbody'), tab);
+  }, 1000);
   spSideSync($('#spbody'), tab);
   spSideChrome($('#spbody'), tab);
   api('/chat', {
     method: 'POST',
-    body: { session_id: st.sid, text: '', retry: true, model: S.model, permission_mode: S.perm, thinking_level: S.lvl }
-  }).catch(e => { st.streaming = false; st.cur = null; toast(e.message); spSideSync($('#spbody'), tab); });
+    body: { session_id: st.sid, text: '', retry: true, model: S.model, permission_mode: S.perm, thinking_level: Math.max(0, Math.min(3, +S.lvl || 0)) }
+  }).catch(e => {
+    st.streaming = false;
+    st.cur = null;
+    if (st.wkt) { clearInterval(st.wkt); st.wkt = 0; }
+    toast(e.message);
+    spSideSync($('#spbody'), tab);
+    spSideRemap(tab).then(() => { if (SP.active === tab.id) spSideSync($('#spbody'), tab); });
+  });
 }
 
 /** 侧聊：就地改这段回答的正文并落库（执行过程不属于可编辑范围，这里只有正文）。 */
@@ -10239,34 +10758,58 @@ function spSideEdit(tab, i, at, node, m) {
   bar.style.cssText = 'opacity:1;transform:none;justify-content:flex-start';
   bar.innerHTML = '<button class="btn" data-save>' + t('save') + '</button>' +
                   '<button class="btn" data-cancel>' + t('close') + '</button>';
-  const old = [...node.querySelectorAll('.md, .ab')];
+  // 关键：骨架标记必须一起清掉。否则 spSideSync 会以为 .stools/.sab 还在，
+  // 直接去取 ab.dataset.tx 时抛 TypeError，整个侧聊从此不再刷新。
   node.innerHTML = '';
-  // 清掉正文指纹：取消编辑后 spSideSync 必须重画，否则会留下一个空气泡。
+  delete node.dataset.init;
   delete node.dataset.tx;
+  // 标记为「正在就地编辑」：期间来的 status / permission 事件会触发重绘，
+  // 不挡住的话骨架检查会把 textarea 整个冲掉，用户打的字就没了。
+  node.dataset.editing = '1';
   node.append(box, bar);
   box.focus();
-  bar.querySelector('[data-cancel]').onclick = () => spSideSync($('#spbody'), tab);
-  bar.querySelector('[data-save]').onclick = () => {
-    const v = box.value;
-    m.text = v;
-    api('/sessions/' + tab.st.sid + '/messages/' + at, { method: 'PATCH', body: { text: v } })
-      .catch(e => toast(e.message));
+  bar.querySelector('[data-cancel]').onclick = () => {
+    delete node.dataset.editing;
     spSideSync($('#spbody'), tab);
+  };
+  bar.querySelector('[data-save]').onclick = async () => {
+    const v = box.value;
+    try {
+      await api('/sessions/' + tab.st.sid + '/messages/' + at, { method: 'PATCH', body: { text: v } });
+      m.text = v;
+      delete node.dataset.editing;
+      spSideSync($('#spbody'), tab);
+    } catch (e) {
+      delete node.dataset.editing;
+      spSideSync($('#spbody'), tab);
+      toast(e.message);
+    }
   };
 }
 
 /** 侧聊：删掉这条回答（本地 + 服务端），之前的上下文保留。 */
 async function spSideDel(tab, i, at) {
   if (tab.st.streaming) return;
-  if (!(await confirmBox(S.lang === 'zh' ? '确定删除这条消息？' : 'Delete this message?', { danger: false }))) return;
+  if (at == null) { toast(t('toast')); return; }
+  if (!(await confirmBox(S.lang === 'zh' ? '确定删除这条消息？' : 'Delete this message?'))) return;
+  // 一个气泡可能横跨 assistant + 多条 ToolResult user 消息：删除范围要取
+  // 下一条已知服务端下标，而不是永远 at+1（旧代码会把工具结果留在库里）。
+  const next = tab.st.msgs.slice(i + 1).find(x => x && x.si != null && x.si > at);
+  const to = next ? next.si
+    : (tab.st.srvCount && tab.st.srvCount > at ? tab.st.srvCount : at + 1);
   tab.st.msgs.splice(i, 1);
+  tab.st.msgs.forEach(x => { if (x && x.si != null && x.si >= to) x.si -= (to - at); });
+  if (tab.st.srvCount) tab.st.srvCount -= (to - at);
   spSideSync($('#spbody'), tab);
-  api('/sessions/' + tab.st.sid + '/messages', { method: 'DELETE', body: { from: at, to: at + 1 } })
+  api('/sessions/' + tab.st.sid + '/messages', { method: 'DELETE', body: { from: at, to } })
     .catch(e => toast(e.message));
 }
 
 /** 侧聊底部三块统计（会话 / token / 上下文），口径与主对话一致。 */
 function spSideStats(tab) {
+  // 只在当前激活的标签上写：这些 id 是全局的，后台标签的 status 事件
+  // 不能覆盖用户正在看的那个面板。
+  if (!tab || tab.id !== SP.active) return;
   const host = $('#spbody');
   if (!host || !tab || !tab.st) return;
   const s = tab.st.status || {};
@@ -10279,6 +10822,92 @@ function spSideStats(tab) {
   set('spc-ctx-tx', (cx.limit ? Math.round((cx.used || 0) / cx.limit * 100) : 0) + '%');
 }
 
+/**
+ * 侧聊内联的权限/提问面板。
+ *
+ * 主对话有底部 qsurf 接管，侧聊以前只把事件存进 st.perm / st.question 却
+ * 从不渲染——permission_mode=ask 或 ask_user 时整轮永久挂起。这里给侧聊
+ * 一个最小的批准/回答入口，复用同一组 /permission、/answer 接口。
+ */
+function spSidePending(host, tab) {
+  if (!host || !tab) return;
+  if (host.id === 'spbody' && tab.id !== SP.active) return;
+  const st = tab.st;
+  const el = host.querySelector('#spc-perm');
+  if (!el) return;
+  const key = st.perm ? 'p:' + (st.perm.callId || '') : (st.question ? 'q:' + (st.question.callId || '') : '');
+  // 流式 delta 每秒都会调 spSideSync；内容没变就不要重建，否则正在输入的
+  // 回答会被 innerHTML 清掉。
+  if (el.dataset.k === key) return;
+  el.dataset.k = key;
+  if (st.perm) {
+    const p = st.perm;
+    el.innerHTML = '<div style="margin:8px 10px;padding:10px 12px;border:1px solid var(--line);border-radius:12px;background:var(--bg2)">' +
+      '<div style="font:12px/1.6 var(--sans)"><b>' + esc(p.tool || '') + '</b> ' + riskChip(p.risk) +
+      (p.path ? '<div style="font-family:var(--mono);word-break:break-all;opacity:.8">' + esc(p.path) + '</div>' : '') +
+      (p.reason ? '<div style="opacity:.8">' + esc(p.reason) + '</div>' : '') +
+      '<div style="opacity:.6">' + esc(t('wp')) + '</div></div>' +
+      '<div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">' +
+      '<button class="btn" data-pd="once">' + esc(t('a1')) + '</button>' +
+      '<button class="btn ghost" data-pd="always">' + esc(t('aa')) + '</button>' +
+      '<button class="btn ghost" data-pd="deny">' + esc(t('dy')) + '</button>' +
+      '</div></div>';
+    el.querySelectorAll('[data-pd]').forEach(b => {
+      b.onclick = async () => {
+        b.disabled = true;
+        try {
+          await api('/permission', { method: 'POST', body: { call_id: p.callId, decision: b.dataset.pd } });
+          st.perm = null;
+          // 必须删掉而不是置空：下一个 key 也是 ''，置空会命中早退分支，
+          // 面板永远清不掉，剩下的按钮还能再点一次。
+          delete el.dataset.k;
+          spSidePending(host, tab);
+          spSideSync(host, tab);
+        } catch (e) { b.disabled = false; toast(e.message); }
+      };
+    });
+    return;
+  }
+  if (st.question) {
+    const q = st.question;
+    const opts = (q.options || []).map(o => String(o == null ? '' : o).trim()).filter(Boolean);
+    el.innerHTML = '<div style="margin:8px 10px;padding:10px 12px;border:1px solid var(--line);border-radius:12px;background:var(--bg2)">' +
+      '<div style="font:12px/1.6 var(--sans);white-space:pre-wrap">' + esc(q.question || '') + '</div>' +
+      (opts.length ? '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">' +
+        opts.map((o, i) => '<button class="btn ghost" data-qo="' + i + '">' + esc(o) + '</button>').join('') + '</div>' : '') +
+      '<div style="display:flex;gap:6px;margin-top:8px"><input class="spq-in" style="flex:1;min-width:0" placeholder="' +
+      esc(t('q_hint')) + '"><button class="btn" data-qs>' + esc(t('send_answer')) + '</button></div></div>';
+    const inp = el.querySelector('.spq-in');
+    const send = async v => {
+      const val = String(v == null ? inp.value : v).trim();
+      if (!val) { toast(t('q_need')); inp.focus(); return; }
+      el.querySelectorAll('button,input').forEach(x => { x.disabled = true; });
+      try {
+        const r = await api('/answer', { method: 'POST', body: { call_id: q.callId, answer: val } });
+        if (!r || !r.answered) toast(t('q_closed'));
+        st.question = null;
+        delete el.dataset.k;   // 同上：置空会命中早退，面板清不掉
+        spSidePending(host, tab);
+        spSideSync(host, tab);
+      } catch (e) {
+        el.querySelectorAll('button,input').forEach(x => { x.disabled = false; });
+        toast(e.message);
+      }
+    };
+    el.querySelectorAll('[data-qo]').forEach(b => {
+      b.onclick = () => send(opts[+b.dataset.qo]);
+    });
+    el.querySelector('[data-qs]').onclick = () => send();
+    inp.onkeydown = e => {
+      e.stopPropagation();
+      if (e.key === 'Enter') { e.preventDefault(); send(); }
+    };
+    setTimeout(() => { if (el.dataset.k === key) inp.focus(); }, 30);
+    return;
+  }
+  el.innerHTML = '';
+}
+
 function spOnEvent(ev) {
   if (!SP.tabs.length || !ev) return;
   // 辅助对话标签：只处理属于自己会话的事件。
@@ -10286,6 +10915,11 @@ function spOnEvent(ev) {
     if (tab.kind !== 'sidechat') return;
     const sid = tab.st.sid;
     if (!sid || ev.sessionId !== sid) return;
+    // 停止后（或还没开始时）迟到的正文/工具增量一律丢弃；收尾和状态事件
+    // 仍要处理，否则计时器/状态会卡住。
+    if (!tab.st.streaming && ev.type !== 'turn.end' && ev.type !== 'status' &&
+        ev.type !== 'permission.request' && ev.type !== 'question' &&
+        ev.type !== 'permission.resolved' && ev.type !== 'error') return;
     if (ev.type === 'text.delta') {
       // 空气泡已在发送时就挂进 msgs 了：这里只往里追加，收尾不清数组。
       if (!tab.st.cur) { tab.st.cur = { role: 'assistant', text: '' }; tab.st.msgs.push(tab.st.cur); }
@@ -10314,25 +10948,34 @@ function spOnEvent(ev) {
       if (last && last.role === 'assistant') {
         last.doneMs = tab.st.t0 ? Date.now() - tab.st.t0 : 0;
         last.ts = last.ts || Date.now();
-        // 工具调用会在服务端额外落一条 ToolResult user 消息，本地数组条数
-        // 不再等于服务端下标。收尾时拉一次条数，把真实下标钉在这条消息上。
-        api('/sessions/' + tab.st.sid + '/messages').then(r => {
-          const n = (r.messages || []).length;
-          if (n > 0) last.si = n - 1;
-        }).catch(() => {});
       }
       tab.st.cur = null;
       tab.st.streaming = false;
       if (tab.st.wkt) { clearInterval(tab.st.wkt); tab.st.wkt = 0; }
+      // 工具调用会在服务端额外落 ToolResult user 消息，本地数组条数不等于
+      // 服务端下标。整段重新对齐，而不是只给最后一条钉 length-1。
+      spSideRemap(tab).then(() => {
+        if (SP.active === tab.id) spSideSync($('#spbody'), tab);
+      });
     } else if (ev.type === 'status') {
       tab.st.status = ev;
       spSideStats(tab);
     } else if (ev.type === 'permission.request') {
       tab.st.perm = ev;
+    } else if (ev.type === 'permission.resolved') {
+      const id = ev.id || ev.callId;
+      if (tab.st.perm && (!id || id === tab.st.perm.callId)) tab.st.perm = null;
     } else if (ev.type === 'question') {
       tab.st.question = ev;
     } else if (ev.type === 'error') {
       tab.st.msgs.push({ role: 'error', text: ev.error || ev.message || 'error' });
+      // 致命错误后不会再有 turn.end：不停掉流式状态的话发送键会永远停在
+      // 「停止」，1 秒计时器也一直空转。
+      if (ev.fatal) {
+        tab.st.streaming = false;
+        tab.st.cur = null;
+        if (tab.st.wkt) { clearInterval(tab.st.wkt); tab.st.wkt = 0; }
+      }
     }
   });
   // 终端面板：收集本标签发起的命令的流式输出。
@@ -10360,7 +11003,8 @@ function spOnEvent(ev) {
   if (!cur) return;
   if (cur.kind === 'sidechat' && (ev.type === 'text.delta' || ev.type === 'turn.end' ||
       ev.type === 'tool.call' || ev.type === 'tool.result' ||
-      ev.type === 'text.done' || ev.type === 'permission.request' || ev.type === 'question')) {
+      ev.type === 'text.done' || ev.type === 'permission.request' || ev.type === 'question' ||
+      ev.type === 'permission.resolved' || ev.type === 'error')) {
     // 只增量刷消息节点，不重建整块，输入框不会闪。
     spSideSync($('#spbody'), cur);
     spSideChrome($('#spbody'), cur);
@@ -10621,35 +11265,39 @@ function spOnEvent(ev) {
 spInitDrag();
 
 async function boot() {
-  if (innerWidth < 760 || !S.side) document.body.classList.add('sc');
-
   // Server holds the authoritative config; merge it over the local cache.
+  // 用 ?? 而不是 ||：服务端明确下发的 false / 0 / 空字符串也是有效值，
+  // 用 || 会把“关闭侧栏”“字号 0”这类设置静默改回本地缓存。
   try {
-    const c = await api('/config');
+    const c = (await api('/config')) || {};
     const local = JSON.parse(localStorage.getItem('cd-s') || '{}');
     Object.assign(S, {
-      lang: c.lang || S.lang, name: c.name || S.name, theme: c.theme || S.theme,
-      font: c.font || S.font, size: c.size || S.size, w: c.width || S.w,
-      accent: c.accent || S.accent, speed: c.speed || S.speed, cd: c.cd || S.cd,
-      blur: c.blur || S.blur, sf: c.sf || S.sf, anim: c.anim || S.anim,
-      stream: c.stream !== undefined ? c.stream : S.stream,
-      think: c.think !== undefined ? c.think : S.think,
-      side: c.side !== undefined ? c.side : S.side,
-      prefs: c.prefs || S.prefs,
-      systemPrompt: c.system_prompt || S.systemPrompt,
-      systemPromptRaw: c.system_prompt_raw !== undefined ? c.system_prompt_raw : S.systemPromptRaw,
-      searchKey: c.search_key !== undefined ? c.search_key : S.searchKey,
-      spref: c.search_pref !== undefined ? c.search_pref : S.spref,
-      followupMode: c.followup_mode || S.followupMode,
-      model: c.model || local.model || S.model,
-      perm: c.permission_mode || S.perm,
-      lvl: c.thinking_level !== undefined ? c.thinking_level : S.lvl,
-      uiSize: c.ui_size !== undefined ? c.ui_size : S.uiSize,
-      lineHeight: c.line_height !== undefined ? c.line_height : S.lineHeight,
-      codeSize: c.code_size !== undefined ? c.code_size : S.codeSize,
-      density: c.density || S.density
+      lang: c.lang ?? S.lang, name: c.name ?? S.name, theme: c.theme ?? S.theme,
+      font: c.font ?? S.font, size: c.size ?? S.size, w: c.width ?? S.w,
+      accent: c.accent ?? S.accent, speed: c.speed ?? S.speed, cd: c.cd ?? S.cd,
+      blur: c.blur ?? S.blur, sf: c.sf ?? S.sf, anim: c.anim ?? S.anim,
+      stream: c.stream ?? S.stream,
+      think: c.think ?? S.think,
+      side: c.side ?? S.side,
+      prefs: c.prefs ?? S.prefs,
+      systemPrompt: c.system_prompt ?? S.systemPrompt,
+      systemPromptRaw: c.system_prompt_raw ?? S.systemPromptRaw,
+      searchKey: c.search_key ?? S.searchKey,
+      spref: c.search_pref ?? S.spref,
+      followupMode: c.followup_mode ?? S.followupMode,
+      model: c.model ?? local.model ?? S.model,
+      perm: c.permission_mode ?? S.perm,
+      lvl: c.thinking_level ?? S.lvl,
+      uiSize: c.ui_size ?? S.uiSize,
+      lineHeight: c.line_height ?? S.lineHeight,
+      codeSize: c.code_size ?? S.codeSize,
+      density: c.density ?? S.density
     });
   } catch (e) { /* offline: use local cache */ }
+
+  // 合并完才知道服务端的 side 偏好，挪到这里判断，否则“默认收起”会在
+  // S.side=true 时仍然生效。
+  if (innerWidth < 760 || !S.side) document.body.classList.add('sc');
 
   // 历史配置里的 anysearch 已不可用（那个接口返回的是裁判文书，不是网络搜索），迁到 multi
   if (S.spref === 'anysearch') { S.spref = 'multi'; apply(); }
