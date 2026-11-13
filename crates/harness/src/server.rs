@@ -207,6 +207,8 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/schedule/{id}", get(get_task).patch(edit_task).delete(delete_task))
         .route("/schedule/{id}/run", post(run_task_now))
         .route("/agents", get(list_agents))
+        // 权限规则（permissions.toml）的读写，设置页用它编辑规则
+        .route("/permissions", get(get_permissions).post(put_permissions))
         .route("/agents/{id}/interrupt", post(interrupt_agent))
         // 该会话当前是否还有 turn 在跑。前端用它核对"我以为在生成"的状态：
         // 如果服务端说没有在跑，前端就复位 busy（事件丢失时的自愈）。
@@ -1470,6 +1472,63 @@ async fn turn_running(
         state.agent.is_running(&sid).await
     };
     Json(json!({"running": running})).into_response()
+}
+
+/// GET /api/permissions —— 读出权限规则（permissions.toml）。
+/// POST /api/permissions —— 覆盖写入规则。
+///
+/// 规则模型：{tool, path, action: allow|deny, exact}。
+/// `exact: true` 表示 path 存的是字面量（shell 存命令原文），匹配按等值比较；
+/// 否则按 glob 语义。
+async fn get_permissions(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    let rs = crate::permission::RuleSet::load();
+    Json(json!({ "allow": rs.allow, "deny": rs.deny })).into_response()
+}
+
+async fn put_permissions(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    let parsed: Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => return bad_request(&format!("invalid JSON: {e}")),
+    };
+    let allow: Vec<crate::permission::Rule> = match serde_json::from_value(
+        parsed.get("allow").cloned().unwrap_or(json!([])),
+    ) {
+        Ok(v) => v,
+        Err(e) => return bad_request(&format!("invalid allow rules: {e}")),
+    };
+    let deny: Vec<crate::permission::Rule> = match serde_json::from_value(
+        parsed.get("deny").cloned().unwrap_or(json!([])),
+    ) {
+        Ok(v) => v,
+        Err(e) => return bad_request(&format!("invalid deny rules: {e}")),
+    };
+    // 只接受 allow/deny 两种动作 —— 其它值落盘后永远不匹配，等于静默失效。
+    for r in allow.iter().chain(deny.iter()) {
+        if r.action != "allow" && r.action != "deny" {
+            return bad_request(&format!(
+                "action must be allow or deny, got {:?}",
+                r.action
+            ));
+        }
+    }
+    let rs = crate::permission::RuleSet { allow, deny };
+    if let Err(e) = rs.save() {
+        return server_error(e);
+    }
+    Json(json!({ "ok": true })).into_response()
 }
 
 /// List the members of one agent tree.

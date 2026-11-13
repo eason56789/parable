@@ -269,6 +269,17 @@ body.chat #sbar{margin-top:10px;opacity:1;transform:none;pointer-events:auto}
 .sr .ct:has(input[type=range]){display:flex;align-items:center;gap:12px;max-width:300px}
 .sr .ct input[type=range]{flex:1;min-width:0}
 .sr .ct .rv{flex:none;min-width:44px;text-align:right;font:12px var(--mono);color:var(--fg2)}
+/* 权限规则编辑 */
+.rsec{margin-bottom:16px}
+.rsec>b{display:block;font:500 13px var(--sans);color:var(--fg2);margin-bottom:8px}
+.rrow{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+.rrow select,.rrow input{border:.5px solid var(--line);border-radius:8px;background:var(--input);color:var(--fg);font:12.5px var(--sans);padding:6px 9px;outline:0}
+.rrow select:focus,.rrow input:focus{border-color:var(--accent)}
+.rrow select{flex:none;min-width:96px}
+.rrow input{flex:1;min-width:0}
+.rrow .rdel{flex:none;padding:6px 8px}
+.rfoot{display:flex;align-items:center;gap:12px;margin-top:14px;padding-top:12px;border-top:.5px solid var(--line)}
+.rfoot .rfh{flex:1;color:var(--fg2);font-size:12px;line-height:1.5}
 /* 搜索命中的设置项 */
 .hit{background:color-mix(in srgb,var(--accent) 9%,transparent);border-radius:8px;
   box-shadow:0 0 0 5px color-mix(in srgb,var(--accent) 9%,transparent)}
@@ -1029,6 +1040,7 @@ const L = {
     l0:'关闭', l1:'低', l2:'中', l3:'高',
     s_g:'通用', s_s:'网络搜索', s_a:'外观', s_m:'模型设置', s_p:'权限与思考', s_n:'动画', s_base:'基础设置',
     s_u:'使用统计', s_data:'数据与统计', s_agent:'Agent 能力',
+    rulesT:'权限规则', rulesH:'命中允许规则就放行，命中拒绝规则就拒绝；规则优先于上面的权限模式。',
     ug_title:'使用统计', ug_desc:'Parable 的 Token 用量、活跃天数与模型分布。',
     ug_total:'累计 Token 数', ug_peak:'峰值 Token 数', ug_longest:'最长聊天时长',
     ug_streak_now:'当前连续天数', ug_streak_max:'最长连续天数',
@@ -1125,6 +1137,7 @@ const L = {
     l0:'Off', l1:'Low', l2:'Medium', l3:'High',
     s_g:'General', s_s:'Web search', s_a:'Appearance', s_m:'Model settings', s_p:'Permissions', s_n:'Animation', s_base:'Basics',
     s_u:'Usage', s_data:'Data & stats', s_agent:'Agent capabilities',
+    rulesT:'Permission rules', rulesH:'A matching allow rule wins, a matching deny rule wins; rules override the permission mode above.',
     ug_title:'Usage', ug_desc:'Token usage, active days and model breakdown in Parable.',
     ug_total:'Total tokens', ug_peak:'Peak tokens', ug_longest:'Longest chat',
     ug_streak_now:'Current streak', ug_streak_max:'Longest streak',
@@ -4785,7 +4798,8 @@ const SC = {
   ],
   p:[
     { k:'perm', t:'rl', l:'permT', h:'permH', o:PK },
-    { k:'lvl', t:'seg', l:'lvlT', o:[0,1,2,3], i:1, p:'l' }
+    { k:'lvl', t:'seg', l:'lvlT', o:[0,1,2,3], i:1, p:'l' },
+    { t:'rules', l:'rulesT', h:'rulesH' }
   ],
   n:[
     { k:'stream', t:'tg', l:'stream' },
@@ -4902,6 +4916,98 @@ $('#snav').onclick = async e => {
   p.classList.remove('fo');
 };
 
+/* ---- 权限规则（permissions.toml） ----
+   规则模型与后端一致：{tool, path, action: allow|deny, exact}。
+   - tool: 工具名，* 表示全部
+   - path: 路径 / 命令；exact=true 时是字面量（等值匹配），否则是 glob
+   - action: allow / deny
+   规则优先级高于权限模式：命中 allow 就放行，命中 deny 就拒绝。 */
+const RULE_TOOLS = ['*', 'bash', 'read_file', 'write_file', 'edit_file', 'list_dir', 'glob', 'grep', 'web_fetch', 'web_search'];
+let RULES = { allow: [], deny: [] };
+let rulesDirty = false;
+
+async function rulesLoad() {
+  try {
+    const r = await api('/permissions');
+    RULES = { allow: r.allow || [], deny: r.deny || [] };
+  } catch (e) { /* 保持空列表 */ }
+}
+
+async function rulesSave() {
+  try {
+    await api('/permissions', { method: 'POST', body: RULES });
+    rulesDirty = false;
+    toast(S.lang === 'zh' ? '规则已保存' : 'Rules saved');
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+function rulesRender(host) {
+  if (!host) return;
+  const z = S.lang === 'zh';
+  const row = (name, list, i) => {
+    const r = list[i];
+    if (!r) return '';
+    return '<div class="rrow" data-l="' + name + '" data-i="' + i + '">' +
+      '<select data-f="tool">' + RULE_TOOLS.map(x =>
+        '<option value="' + x + '"' + (r.tool === x ? ' selected' : '') + '>' + x + '</option>').join('') + '</select>' +
+      '<input data-f="path" value="' + esc(r.path || '') + '" placeholder="' +
+      (z ? '路径或命令（* 通配）' : 'path or command (* wildcard)') + '" spellcheck="false">' +
+      '<select data-f="exact"><option value="0"' + (!r.exact ? ' selected' : '') + '>' + (z ? '通配' : 'glob') + '</option>' +
+      '<option value="1"' + (r.exact ? ' selected' : '') + '>' + (z ? '精确' : 'exact') + '</option></select>' +
+      '<button class="btn rdel" title="' + (z ? '删除' : 'Delete') + '">' + ic('trash') + '</button></div>';
+  };
+  const draw = () => {
+    host.innerHTML =
+      '<div class="rsec"><b>' + (z ? '允许' : 'Allow') + '</b>' +
+      RULES.allow.map((_, i) => row('allow', RULES.allow, i)).join('') +
+      '<button class="btn rapp" data-a="allow">' + ic('plus') + (z ? '添加' : 'Add') + '</button></div>' +
+      '<div class="rsec"><b>' + (z ? '拒绝' : 'Deny') + '</b>' +
+      RULES.deny.map((_, i) => row('deny', RULES.deny, i)).join('') +
+      '<button class="btn rapp" data-a="deny">' + ic('plus') + (z ? '添加' : 'Add') + '</button></div>' +
+      '<div class="rfoot"><span class="rfh">' + (z ? '规则优先于权限模式：命中允许就放行，命中拒绝就拒绝。' :
+        'Rules override the permission mode: a matching allow wins, a matching deny wins.') + '</span>' +
+      '<button class="btn pri" data-save>' + (z ? '保存规则' : 'Save rules') + '</button></div>';
+  };
+  draw();
+  host.oninput = e => {
+    const f = e.target.dataset.f;
+    if (!f) return;
+    const rowEl = e.target.closest('.rrow');
+    if (!rowEl) return;
+    const list = RULES[rowEl.dataset.l];
+    const r = list[+rowEl.dataset.i];
+    if (!r) return;
+    if (f === 'tool') r.tool = e.target.value;
+    else if (f === 'path') r.path = e.target.value;
+    else if (f === 'exact') r.exact = e.target.value === '1';
+    rulesDirty = true;
+  };
+  host.onchange = host.oninput;
+  host.onclick = e => {
+    const add = e.target.closest('.rapp');
+    if (add) {
+      RULES[add.dataset.a].push({ tool: '*', path: '', action: add.dataset.a, exact: false });
+      rulesDirty = true;
+      draw();
+      return;
+    }
+    const del = e.target.closest('.rdel');
+    if (del) {
+      const rowEl = del.closest('.rrow');
+      RULES[rowEl.dataset.l].splice(+rowEl.dataset.i, 1);
+      rulesDirty = true;
+      draw();
+      return;
+    }
+    if (e.target.closest('[data-save]')) rulesSave();
+  };
+  // 拉取现有规则（每次进入都拉，保证与 permissions.toml 一致）
+  // 用户已经改过但没保存时不覆盖：dirty 时只更新内存，不重绘 DOM。
+  rulesLoad().then(() => { if (!rulesDirty) draw(); });
+}
+
 function panel() {
   if (pvs) pvs.stop = true;
   const p = $('#sp');
@@ -4924,7 +5030,7 @@ function panel() {
   const body = p.querySelector('.spb');
   SC[tab].forEach(c => {
     const r = document.createElement('div');
-    r.className = 'sr' + (['ta', 'th', 'pv', 'rl'].includes(c.t) ? ' stk' : '');
+    r.className = 'sr' + (['ta', 'th', 'pv', 'rl', 'rules'].includes(c.t) ? ' stk' : '');
     r.style.setProperty('--i', i++);
     // 滑块类（rg）的数值不放在标签列：标签列窄，"字号16px" 会被拆成两行。
     // 数值随滑块一起放在内容列。
@@ -4988,6 +5094,11 @@ function panel() {
         }
         ct.firstChild.value = v;
         ct.querySelector('.rv').textContent = v + c.u;
+      } else if (c.t === 'rules') {
+        // 权限规则：读写 permissions.toml（/api/permissions）
+        ct.className = 'ct';
+        ct.innerHTML = '<div class="rlist"></div>';
+        rulesRender(ct.querySelector('.rlist'));
       } else if (c.t === 'tx' || c.t === 'ta') {
         if (!ct.firstChild) {
           ct.innerHTML = c.t === 'tx'
