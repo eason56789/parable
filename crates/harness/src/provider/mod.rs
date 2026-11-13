@@ -96,7 +96,9 @@ pub struct ChatRequest {
     pub model: String,
     pub system: String,
     pub messages: Vec<Msg>,
-    pub tools: Vec<ToolSpec>,
+    /// Tool schemas. Shared behind an `Arc` so the per-step clone in the
+    /// agent loop does not copy 19 JSON schemas every time.
+    pub tools: std::sync::Arc<Vec<ToolSpec>>,
     pub max_tokens: u32,
     /// 思考档位:0 = 显式关闭(不发送任何 thinking/reasoning 参数),1 = low,
     /// 2 = medium,3 = high。各 provider 自行映射到线上协议的具体字段。

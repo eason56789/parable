@@ -392,6 +392,17 @@ fn read_image(path: &Path, mime: &str) -> Result<ToolOutcome, HarnessError> {
 
 // ------------------------------------------------------------------ registry
 
+/// Process-wide memo for the tool schema list. Keyed by everything the
+/// schemas depend on (search preference, key presence, plugin count).
+fn specs_cache() -> &'static std::sync::Mutex<
+    Option<((String, bool, usize), std::sync::Arc<Vec<crate::provider::ToolSpec>>)>,
+> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<Option<((String, bool, usize), std::sync::Arc<Vec<crate::provider::ToolSpec>>)>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(None))
+}
+
 pub struct Registry {
     pub workspace: PathBuf,
     /// External-command tools contributed by enabled plugins.
@@ -423,7 +434,34 @@ impl Registry {
     }
 
     /// JSON Schema list handed to the model.
-    pub fn specs(&self) -> Vec<crate::provider::ToolSpec> {
+    ///
+    /// Building the 19 built-in schemas costs ~1ms and this runs once per
+    /// agent *step* (the list is re-serialised into every request), so a
+    /// 100-step turn would burn 100ms on schema building alone. The result
+    /// only depends on the search preference, key presence and plugin set,
+    /// so it is memoised process-wide under that key and handed out as an
+    /// `Arc` — no clone per step.
+    pub fn specs(&self) -> std::sync::Arc<Vec<crate::provider::ToolSpec>> {
+        let cache_key = (
+            self.search_pref.clone(),
+            !self.search_key.trim().is_empty(),
+            self.plugin_tools.len(),
+        );
+        {
+            let cache = specs_cache().lock().unwrap_or_else(|e| e.into_inner());
+            if let Some((k, specs)) = cache.as_ref() {
+                if *k == cache_key {
+                    return std::sync::Arc::clone(specs);
+                }
+            }
+        }
+        let specs = std::sync::Arc::new(self.build_specs());
+        let mut cache = specs_cache().lock().unwrap_or_else(|e| e.into_inner());
+        *cache = Some((cache_key, std::sync::Arc::clone(&specs)));
+        specs
+    }
+
+    fn build_specs(&self) -> Vec<crate::provider::ToolSpec> {
         use crate::provider::ToolSpec;
         let mut specs = vec![
             ToolSpec {

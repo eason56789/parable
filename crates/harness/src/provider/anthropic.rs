@@ -570,11 +570,11 @@ mod tests {
             model: "m".into(),
             system: "sys".into(),
             messages: vec![Msg::user("hi")],
-            tools: vec![ToolSpec {
+            tools: std::sync::Arc::new(vec![ToolSpec {
                 name: "read_file".into(),
                 description: "read".into(),
                 input_schema: json!({"type":"object"}),
-            }],
+            }]),
             max_tokens: 4096,
             thinking_level: 2,
         };

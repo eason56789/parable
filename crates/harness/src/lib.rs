@@ -14,6 +14,11 @@ pub mod session;
 pub mod subagent;
 pub mod tools;
 pub mod token;
+pub mod usage;
+
+/// Performance micro-benchmarks. Only compiled under `cfg(test)`.
+#[cfg(test)]
+mod perf;
 
 pub use error::HarnessError;
 pub type Result<T> = std::result::Result<T, HarnessError>;

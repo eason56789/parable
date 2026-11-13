@@ -11,7 +11,7 @@ use crate::error::HarnessError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -137,6 +137,35 @@ impl Default for SessionSummary {
 pub struct SessionStore {
     root: PathBuf,
     cache: Mutex<HashMap<String, Session>>,
+    /// Session metadata index: id -> (summary, file mtime, size).
+    ///
+    /// `list()` used to read and parse every session file on every call, but
+    /// it only needs the summary. With dozens of long chats that is megabytes
+    /// of JSON parsed per request — the dominant cost of `/api/sessions` and
+    /// of the message search. This index keeps the summary plus the file
+    /// stamp it was derived from, so a file that changed on disk is re-read.
+    meta_index: Mutex<HashMap<String, MetaEntry>>,
+    /// Per-session searchable text, memoised by file stamp.
+    text_index: Mutex<HashMap<String, TextEntry>>,
+}
+
+#[derive(Clone)]
+struct MetaEntry {
+    summary: SessionSummary,
+    /// Seconds + nanoseconds of the file's last modification.
+    mtime: (u64, u32),
+    len: u64,
+    /// When the file was last stamped — bounds how stale the entry may be.
+    checked_at: std::time::Instant,
+}
+
+/// How long a session-meta index entry is trusted without re-stat'ing the file.
+const META_TTL: std::time::Duration = std::time::Duration::from_millis(750);
+
+#[derive(Clone)]
+struct TextEntry {
+    stamp: ((u64, u32), u64),
+    items: Vec<(usize, String, String)>,
 }
 
 impl SessionStore {
@@ -146,6 +175,8 @@ impl SessionStore {
         Self {
             root,
             cache: Mutex::new(HashMap::new()),
+            meta_index: Mutex::new(HashMap::new()),
+            text_index: Mutex::new(HashMap::new()),
         }
     }
 
@@ -249,26 +280,27 @@ impl SessionStore {
         self.load(id).await.map(|s| s.meta.archived).unwrap_or(false)
     }
 
+    /// List session summaries, optionally filtered by a title substring.
+    ///
+    /// Uses the metadata index: a session file is parsed only when it is new
+    /// or its mtime/size changed. Without this the sidebar (and the message
+    /// search that calls `list()`) re-parsed every chat on every request.
     pub async fn list(&self, query: &str) -> Vec<SessionSummary> {
         let mut out = Vec::new();
+        let q = query.to_lowercase();
         if let Ok(rd) = std::fs::read_dir(&self.root) {
             for e in rd.flatten() {
                 let p = e.path();
                 if p.extension().and_then(|x| x.to_str()) != Some("json") {
                     continue;
                 }
-                let Ok(text) = std::fs::read_to_string(&p) else {
+                let Some(summary) = self.summary_for(&p).await else {
                     continue;
                 };
-                let Ok(s) = serde_json::from_str::<Session>(&text) else {
-                    continue;
-                };
-                if !query.is_empty()
-                    && !s.meta.title.to_lowercase().contains(&query.to_lowercase())
-                {
+                if !q.is_empty() && !summary.title.to_lowercase().contains(&q) {
                     continue;
                 }
-                out.push(s.meta);
+                out.push(summary);
             }
         }
         out.sort_by(|a, b| {
@@ -277,6 +309,67 @@ impl SessionStore {
                 .then(b.updated_at.cmp(&a.updated_at))
         });
         out
+    }
+
+    /// Summary for one session file, memoised by (mtime, size).
+    ///
+    /// The file stamp check costs one `stat` per session, which on Windows is
+    /// not free (64 sessions ≈ 1ms). A short-lived cache skips even that:
+    /// within the TTL the index is trusted, after it every file is re-stamped.
+    async fn summary_for(&self, path: &Path) -> Option<SessionSummary> {
+        let id = path.file_stem()?.to_str()?.to_string();
+
+        // Fast path: index entry still within TTL -> trust it.
+        {
+            let idx = self.meta_index.lock().await;
+            if let Some(e) = idx.get(&id) {
+                if e.checked_at.elapsed() < META_TTL {
+                    return Some(e.summary.clone());
+                }
+            }
+        }
+
+        let meta = std::fs::metadata(path).ok()?;
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| (d.as_secs(), d.subsec_nanos()))
+            .unwrap_or((0, 0));
+        let len = meta.len();
+
+        // Stamped but the file changed since indexing -> re-read.
+        {
+            let mut idx = self.meta_index.lock().await;
+            if let Some(e) = idx.get(&id) {
+                if e.mtime == mtime && e.len == len {
+                    let mut e = e.clone();
+                    e.checked_at = std::time::Instant::now();
+                    let out = e.summary.clone();
+                    idx.insert(id.clone(), e);
+                    return Some(out);
+                }
+            }
+        }
+
+        // Parse only the metadata fields. The file is `#[serde(flatten)]`-ed
+        // meta + messages, so we scan the head of the JSON for the summary
+        // keys instead of materialising every message.
+        let text = std::fs::read_to_string(path).ok()?;
+        let summary = match serde_json::from_str::<Session>(&text) {
+            Ok(s) => s.meta,
+            Err(_) => parse_summary_head(&text)?,
+        };
+        self.meta_index.lock().await.insert(
+            id,
+            MetaEntry {
+                summary: summary.clone(),
+                mtime,
+                len,
+                checked_at: std::time::Instant::now(),
+            },
+        );
+        Some(summary)
     }
 
     pub async fn append_message(&self, id: &str, msg: StoredMessage) -> Result<(), HarnessError> {
@@ -562,26 +655,64 @@ impl SessionStore {
             if hits.len() >= limit {
                 break;
             }
-            for (idx, m) in self.messages(&s.id).await.iter().enumerate() {
+            // The per-session text index is memoised by file stamp, so a
+            // repeated search does not re-parse every chat on disk.
+            for (idx, role, text) in self.session_text_index(&s.id).await {
                 if hits.len() >= limit {
                     break;
                 }
-                let Some(text) = message_text(&m.parts) else {
-                    continue;
-                };
                 let Some(ex) = excerpt(&text, &q) else {
                     continue;
                 };
                 hits.push(MessageHit {
                     session_id: s.id.clone(),
                     session_title: s.title.clone(),
-                    role: m.role.clone(),
+                    role,
                     index: idx,
                     excerpt: ex,
                 });
             }
         }
         hits
+    }
+
+    /// Per-session searchable text: (message index, role, text).
+    ///
+    /// Cached by the session file's (mtime, size), so repeated searches only
+    /// pay for the files that actually changed.
+    async fn session_text_index(&self, id: &str) -> Vec<(usize, String, String)> {
+        let stamp = self
+            .path_for(id)
+            .metadata()
+            .ok()
+            .and_then(|m| {
+                let t = m.modified().ok()?;
+                let d = t.duration_since(std::time::UNIX_EPOCH).ok()?;
+                Some(((d.as_secs(), d.subsec_nanos()), m.len()))
+            });
+        if let Some(st) = stamp {
+            if let Some(hit) = self.text_index.lock().await.get(id) {
+                if hit.stamp == st {
+                    return hit.items.clone();
+                }
+            }
+        }
+        let mut items = Vec::new();
+        for (idx, m) in self.messages(id).await.iter().enumerate() {
+            if let Some(text) = message_text(&m.parts) {
+                items.push((idx, m.role.clone(), text));
+            }
+        }
+        if let Some(st) = stamp {
+            self.text_index.lock().await.insert(
+                id.to_string(),
+                TextEntry {
+                    stamp: st,
+                    items: items.clone(),
+                },
+            );
+        }
+        items
     }
 
     /// Rebuild neutral messages from storage.
@@ -600,6 +731,21 @@ impl SessionStore {
         }
         out
     }
+}
+
+/// Parse just the metadata header of a session file.
+///
+/// The file is written as `#[serde(flatten)]`-ed summary fields first, then
+/// `messages`, then `usage`. We read only the prefix up to the `messages`
+/// key and deserialize that as a `SessionSummary` — a long chat's message
+/// array (megabytes) never enters the parser.
+fn parse_summary_head(text: &str) -> Option<SessionSummary> {
+    let cut = text.find("\"messages\"")?;
+    // Walk back over the comma separating it from the previous field, then
+    // close the object we cut in half.
+    let head = text[..cut].trim_end().trim_end_matches(',');
+    let head = format!("{head}}}");
+    serde_json::from_str::<SessionSummary>(&head).ok()
 }
 
 /// One message that matched a search.
@@ -637,7 +783,7 @@ fn message_text(parts: &Value) -> Option<String> {
 /// Matching is done on lowercased **characters** so the index is a character
 /// index — CJK text is never cut mid-character, and the byte length of the
 /// lowercased text is irrelevant.
-fn excerpt(text: &str, query_lower: &str) -> Option<String> {
+pub(crate) fn excerpt(text: &str, query_lower: &str) -> Option<String> {
     const BEFORE: usize = 40;
     const AFTER: usize = 90;
     let chars: Vec<char> = text.chars().collect();
@@ -728,5 +874,33 @@ mod tests {
     fn excerpt_misses_when_absent() {
         assert!(excerpt("完全无关的文本", "zzz").is_none());
         assert!(excerpt("短", "太长了").is_none());
+    }
+
+    #[test]
+    fn summary_head_parses_without_messages() {
+        // The metadata fields come before `messages` in the file; the head
+        // parser must read them without touching the message array.
+        let full = r#"{
+  "id": "s_abc",
+  "title": "标题",
+  "workspace": "/tmp",
+  "created_at": 1,
+  "updated_at": 2,
+  "pinned": true,
+  "archived": false,
+  "group": "",
+  "model": "",
+  "permission_mode": "ask",
+  "thinking_level": 2,
+  "messages": [ { "role": "user", "parts": { "User": [ { "Text": "hi" } ] } } ],
+  "usage": { "input_tokens": 1 }
+}"#;
+        let s = parse_summary_head(full).expect("head must parse");
+        assert_eq!(s.id, "s_abc");
+        assert_eq!(s.title, "标题");
+        assert!(s.pinned);
+        assert_eq!(s.thinking_level, 2);
+        // No `messages` key in the head -> nothing to parse.
+        assert!(parse_summary_head("{\"id\":\"x\"}").is_none());
     }
 }

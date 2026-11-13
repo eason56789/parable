@@ -29,6 +29,8 @@ pub struct AppState {
     pub agent: AgentRuntime,
     pub schedule: crate::schedule::SharedSchedule,
     pub subagents: crate::subagent::SharedSubagents,
+    /// Persistent usage journal behind `GET /api/usage`.
+    pub usage: Arc<crate::usage::UsageJournal>,
     pub started_at: u64,
     /// Actual bound port (0 until `serve` resolves it); used by the Origin
     /// whitelist. Requests cannot arrive before it is set.
@@ -190,6 +192,7 @@ pub fn build_router(state: SharedState) -> Router {
             patch(edit_message).delete(delete_message),
         )
         .route("/status", get(status))
+        .route("/usage", get(get_usage))
         .route("/tools", get(tools))
         .route("/schedule", get(list_tasks).post(create_task))
         .route("/schedule/{id}", get(get_task).patch(edit_task).delete(delete_task))
@@ -1442,6 +1445,28 @@ async fn status(State(state): State<SharedState>, headers: HeaderMap) -> Respons
     .into_response()
 }
 
+/// Aggregate usage statistics for the 设置 → 使用统计 page.
+///
+/// `range` scopes the chart series (`all` | `7d` | `30d`); the summary
+/// strip and the heatmap are always all-time.
+async fn get_usage(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    let range = match q.get("range").map(|s| s.as_str()) {
+        Some("7d") => "7d",
+        Some("30d") => "30d",
+        _ => "all",
+    };
+    let sessions_root = Config::home_dir().join("sessions");
+    let snap = state.usage.snapshot(range, &sessions_root).await;
+    Json(snap).into_response()
+}
+
 async fn tools(State(state): State<SharedState>, headers: HeaderMap) -> Response {
     if !check_auth(&headers, None, &state) {
         return unauthorized();
@@ -1454,7 +1479,7 @@ async fn tools(State(state): State<SharedState>, headers: HeaderMap) -> Response
     };
     let reg = crate::tools::Registry::new(std::path::PathBuf::from(".")).with_search(&pref, &key);
     let specs = reg.specs();
-    Json(json!({"tools": specs})).into_response()
+    Json(json!({"tools": specs.as_ref()})).into_response()
 }
 
 // ------------------------------------------------------------------ bootstrap
@@ -1468,6 +1493,10 @@ pub async fn serve(
     let broker = Arc::new(PermissionBroker::new(hub.clone()));
     let questions = Arc::new(QuestionBroker::new());
     let store: SharedStore = Arc::new(SessionStore::new());
+    // 用量日志：每轮一条记录，供「使用统计」页聚合。
+    let usage = Arc::new(crate::usage::UsageJournal::new(
+        Config::home_dir().join("usage"),
+    ));
     let sched_store = Arc::new(crate::schedule::ScheduleStore::new());
 
     // schedule 不依赖 runtime,先建;workspace 根取全局配置(定时任务建会话用),
@@ -1497,7 +1526,8 @@ pub async fn serve(
         broker.clone(),
         questions.clone(),
         store.clone(),
-    );
+    )
+    .with_usage(usage.clone());
     let child_runtime: Arc<AgentRuntime> = Arc::new(
         agent_base
             .clone()
@@ -1562,6 +1592,7 @@ pub async fn serve(
         agent,
         schedule,
         subagents,
+        usage,
         started_at: crate::event::now_ms(),
         port: std::sync::atomic::AtomicU16::new(0),
     });

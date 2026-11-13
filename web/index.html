@@ -6,9 +6,9 @@
 <title>Parable</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&family=Inter:wght@400;500;600&display=swap">
 <style>
-:root{--bg:#faf9f5;--side:#f5f4ed;--fg:#141413;--fg2:#73726c;--line:rgba(31,30,29,.14);--input:#fff;--bubble:#f0eee6;--hov:rgba(31,30,29,.06);--accent:#d97757;--sans:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;--serif:"Source Serif 4",ui-serif,Georgia,"Songti SC","Noto Serif CJK SC",serif;--mono:ui-monospace,"SF Mono",Menlo,Consolas,"PingFang SC",monospace;--chat:var(--serif);--fs:16px;--w:760px;--blur:8px;--sf:1.5;--cd:calc(.65s * var(--animd));--animd:1;--anim:1;--code-bg:#1e1e1e;--code-fg:#d4d4d4;--code-ln:#6b7280;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
-@media(prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#262624;--side:#1f1e1d;--fg:#faf9f5;--fg2:#9c9a92;--line:rgba(222,220,209,.15);--input:#30302e;--bubble:#141413;--hov:rgba(222,220,209,.08)}}
-:root[data-theme="dark"]{--bg:#262624;--side:#1f1e1d;--fg:#faf9f5;--fg2:#9c9a92;--line:rgba(222,220,209,.15);--input:#30302e;--bubble:#141413;--hov:rgba(222,220,209,.08)}
+:root{--bg:#faf9f5;--side:#f5f4ed;--fg:#141413;--fg2:#73726c;--line:rgba(31,30,29,.14);--input:#fff;--bubble:#f0eee6;--hov:rgba(31,30,29,.06);--accent:#d97757;--sans:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;--serif:"Source Serif 4",ui-serif,Georgia,"Songti SC","Noto Serif CJK SC",serif;--mono:ui-monospace,"SF Mono",Menlo,Consolas,"PingFang SC",monospace;--chat:var(--serif);--fs:16px;--w:760px;--blur:8px;--sf:1.5;--cd:calc(.65s * var(--animd));--animd:1;--anim:1;--code-bg:#1e1e1e;--code-fg:#d4d4d4;--code-ln:#6b7280;--uch1:#0b7fff;--uch2:#1e8a3e;--uch3:#9e77ed;--uch4:#e03131;--uch5:#e07b00;--uch6:#0aa7a7;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media(prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#262624;--side:#1f1e1d;--fg:#faf9f5;--fg2:#9c9a92;--line:rgba(222,220,209,.15);--input:#30302e;--bubble:#141413;--hov:rgba(222,220,209,.08);--uch1:#4099ff;--uch2:#46bf72;--uch3:#7b5ce5;--uch4:#ff5c5c;--uch5:#ff8a30;--uch6:#42c8c8}}
+:root[data-theme="dark"]{--bg:#262624;--side:#1f1e1d;--fg:#faf9f5;--fg2:#9c9a92;--line:rgba(222,220,209,.15);--input:#30302e;--bubble:#141413;--hov:rgba(222,220,209,.08);--uch1:#4099ff;--uch2:#46bf72;--uch3:#7b5ce5;--uch4:#ff5c5c;--uch5:#ff8a30;--uch6:#42c8c8}
 *{box-sizing:border-box}
 html,body{height:100%;margin:0}
 body{font:14px/1.45 var(--sans);background:var(--side);color:var(--fg);overflow:hidden;transition:background-color calc(.6s * var(--animd)),color calc(.6s * var(--animd));-webkit-font-smoothing:antialiased}
@@ -498,6 +498,60 @@ select.mp-in{appearance:none;background-image:linear-gradient(45deg,transparent 
 @media(max-width:760px){.tabs{display:none}#body{position:relative}#side{position:absolute;z-index:30;top:0;bottom:0;left:0;width:280px!important;background:var(--side);box-shadow:0 0 40px rgba(0,0,0,.2)}#scr{display:block;position:absolute;inset:0;z-index:29;background:rgba(0,0,0,.35);transition:opacity calc(.5s * var(--animd))}body.sc #scr{opacity:0;pointer-events:none}body.sc #side{transform:translateX(-102%)}body.sc #sin{opacity:1}.gr{font-size:30px}#card{width:100vw;height:100vh;height:100dvh;border-radius:0;flex-direction:column}#snav{width:auto;flex-direction:row;padding:12px;overflow-x:auto}#snav h3{display:none}.sr .ct{width:150px}}
 @media(prefers-reduced-motion:reduce){.msg,.pn,.sr,.rc,.c,.shim,.pop.open>*,.es.fx{animation:none}}
 
+/* ============ 使用统计 ============ */
+.ug{display:flex;flex-direction:column;gap:18px;max-width:1100px;margin:0 auto;padding:38px 44px 60px}
+@media(max-width:760px){.ug{padding:22px 20px 40px}}
+.ug-h{display:flex;align-items:flex-start;justify-content:space-between;gap:20px}
+.ug-h h2{margin:0;font:600 26px var(--serif)}
+.ug-h p{margin:5px 0 0;color:var(--fg2);font-size:13px;line-height:1.5}
+.ug-ha{display:flex;align-items:center;gap:8px;flex:none}
+/* 顶部 5 格概览 */
+.ug-sum{display:grid;grid-template-columns:repeat(5,1fr);border:.5px solid var(--line);border-radius:14px;overflow:hidden;background:var(--bg)}
+@media(max-width:900px){.ug-sum{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:560px){.ug-sum{grid-template-columns:repeat(2,1fr)}}
+.ug-sum>div{padding:18px 16px;text-align:center;border-left:.5px solid var(--line)}
+.ug-sum>div:first-child{border-left:0}
+@media(max-width:900px){.ug-sum>div:nth-child(4),.ug-sum>div:nth-child(1){border-left:0}}
+@media(max-width:560px){.ug-sum>div:nth-child(3),.ug-sum>div:nth-child(5){border-left:0}}
+.ug-sum b{display:block;font:600 22px var(--serif);color:var(--fg);letter-spacing:-.01em}
+.ug-sum span{display:block;margin-top:4px;color:var(--fg2);font-size:11.5px}
+.ug-card{border:.5px solid var(--line);border-radius:14px;background:var(--bg);padding:18px 20px 20px}
+.ug-card>h3{margin:0 0 14px;font:500 14px var(--sans);color:var(--fg)}
+.ug-ch{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px}
+.ug-ch h3{margin:0;font:500 14px var(--sans);color:var(--fg)}
+/* 分段切换（复用 .seg） */
+.ug-seg{display:flex;background:var(--hov);border-radius:9px;padding:3px;flex:none}
+.ug-seg button{border:0;background:none;color:var(--fg2);border-radius:7px;padding:5px 12px;font:12px var(--sans);cursor:pointer;transition:background-color calc(.3s * var(--animd)),color calc(.3s * var(--animd))}
+.ug-seg button.on{background:var(--bg);color:var(--fg);box-shadow:0 1px 2px rgba(0,0,0,.1)}
+/* 热力图 */
+.ug-hm{display:flex;gap:8px;overflow-x:auto;padding-bottom:4px}
+.ug-hmw{display:flex;flex-direction:column;gap:3px;flex:none}
+.ug-hmc{width:11px;height:11px;border-radius:3px;background:color-mix(in srgb,var(--fg2) 12%,transparent)}
+.ug-hmc.l1{background:color-mix(in srgb,var(--uch1) 30%,transparent)}
+.ug-hmc.l2{background:color-mix(in srgb,var(--uch1) 50%,transparent)}
+.ug-hmc.l3{background:color-mix(in srgb,var(--uch1) 72%,transparent)}
+.ug-hmc.l4{background:var(--uch1)}
+.ug-hmc.void{background:transparent}
+.ug-hmm{display:grid;grid-template-columns:repeat(53,minmax(0,1fr));gap:3px;flex:1;min-width:520px}
+.ug-hmm .ug-hmc{width:auto;aspect-ratio:1;height:auto}
+.ug-hml{display:grid;grid-template-columns:repeat(53,minmax(0,1fr));gap:3px;margin-top:6px;flex:1;min-width:520px}
+.ug-hml span{font-size:10px;color:var(--fg2);white-space:nowrap;overflow:hidden}
+/* 图表 */
+.ug-chart{width:100%;display:block;overflow:visible}
+.ug-legend{display:flex;flex-wrap:wrap;gap:8px 18px;margin-bottom:12px}
+.ug-lg{display:flex;align-items:center;gap:6px;font:12px var(--sans);color:var(--fg2)}
+.ug-lg i{width:8px;height:8px;border-radius:50%;flex:none}
+.ug-mu{display:flex;align-items:center;gap:32px;flex-wrap:wrap}
+.ug-mu-l{flex:1;min-width:240px;display:flex;flex-direction:column;gap:9px}
+.ug-mu-r{flex:1;min-width:240px;display:flex;flex-direction:column;gap:2px}
+.ug-mu-i{display:flex;align-items:baseline;gap:9px;padding:8px 0;border-bottom:.5px solid var(--line)}
+.ug-mu-i:last-child{border-bottom:0}
+.ug-mu-i i{width:8px;height:8px;border-radius:50%;flex:none;align-self:center}
+.ug-mu-i b{flex:1;font:12.5px var(--mono);color:var(--fg);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ug-mu-i em{font-style:normal;font:12px var(--sans);color:var(--fg2)}
+.ug-mu-i span{font:11.5px var(--sans);color:var(--fg2);min-width:64px;text-align:right}
+.ug-empty{padding:40px 0;text-align:center;color:var(--fg2);font-size:13px}
+
 /* ============ 命令面板 ============ */
 #cmdk{position:fixed;inset:0;z-index:95;display:none;justify-content:center;align-items:flex-start;padding:11vh 20px 20px;background:rgba(0,0,0,0);-webkit-backdrop-filter:blur(0);backdrop-filter:blur(0);opacity:0;pointer-events:none;transition:opacity calc(.32s * var(--animd)) ease,background-color calc(.32s * var(--animd)) ease,backdrop-filter calc(.32s * var(--animd)) ease}
 #cmdk.open{display:flex;opacity:1;pointer-events:auto;background:rgba(0,0,0,.34);-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px)}
@@ -729,6 +783,16 @@ const L = {
     lvlT:'思考强度', modelT:'模型',
     l0:'关闭', l1:'低', l2:'中', l3:'高',
     s_g:'通用', s_s:'网络搜索', s_a:'外观', s_m:'模型设置', s_p:'权限与思考', s_n:'动画', s_base:'基础设置',
+    s_u:'使用统计', s_data:'数据与统计',
+    ug_title:'使用统计', ug_desc:'Parable 的 Token 用量、活跃天数与模型分布。',
+    ug_total:'累计 Token 数', ug_peak:'峰值 Token 数', ug_longest:'最长聊天时长',
+    ug_streak_now:'当前连续天数', ug_streak_max:'最长连续天数',
+    ug_activity:'Token 活动', ug_range:'时间范围', ug_trend:'每日 Token 趋势图',
+    ug_model_usage:'模型用量', ug_daily:'每日', ug_weekly:'每周', ug_cumulative:'累计',
+    ug_7d:'近 7 日', ug_30d:'近 30 日', ug_all:'全部',
+    ug_tokens:'tokens', ug_turns:'轮', ug_refresh:'刷新', ug_empty:'还没有用量记录',
+    ug_legacy:'历史会话（模型未知）', ug_hm_tip:'{d} · {t} tokens · {n} 轮',
+    ug_hm_total:'{d} · 累计 {t} tokens', ug_hm_week:'{d} 起 · {t} tokens',
     sprefT:'优先搜索引擎', sprefH:'auto：两种搜索都交给模型，配了 DeepSeek key 时优先它；deepseek：只推荐 DeepSeek 搜索；anysearch / multi：web_search 只查对应来源',
     sp_auto:'自动', sp_deepseek:'DeepSeek', sp_anysearch:'AnySearch', sp_multi:'多平台',
     name:'你的名字', nameh:'Parable 会用它来称呼你', prefs:'个人偏好', prefsh:'你希望 Parable 在回复时考虑哪些偏好？',
@@ -789,6 +853,16 @@ const L = {
     lvlT:'Thinking effort', modelT:'Model',
     l0:'Off', l1:'Low', l2:'Medium', l3:'High',
     s_g:'General', s_s:'Web search', s_a:'Appearance', s_m:'Model settings', s_p:'Permissions', s_n:'Animation', s_base:'Basics',
+    s_u:'Usage', s_data:'Data & stats',
+    ug_title:'Usage', ug_desc:'Token usage, active days and model breakdown in Parable.',
+    ug_total:'Total tokens', ug_peak:'Peak tokens', ug_longest:'Longest chat',
+    ug_streak_now:'Current streak', ug_streak_max:'Longest streak',
+    ug_activity:'Token activity', ug_range:'Time range', ug_trend:'Daily token trend',
+    ug_model_usage:'Model usage', ug_daily:'Daily', ug_weekly:'Weekly', ug_cumulative:'Cumulative',
+    ug_7d:'Last 7 days', ug_30d:'Last 30 days', ug_all:'All',
+    ug_tokens:'tokens', ug_turns:'turns', ug_refresh:'Refresh', ug_empty:'No usage recorded yet',
+    ug_legacy:'Earlier chats (model unknown)', ug_hm_tip:'{d} · {t} tokens · {n} turns',
+    ug_hm_total:'{d} · {t} tokens total', ug_hm_week:'from {d} · {t} tokens',
     sprefT:'Preferred search engine', sprefH:'auto: both tools stay available, DeepSeek first once a key is set; deepseek: DeepSeek search only; anysearch / multi: web_search queries that source exclusively',
     sp_auto:'Auto', sp_deepseek:'DeepSeek', sp_anysearch:'AnySearch', sp_multi:'Multi-engine',
     name:'Your name', nameh:'Parable will use it to address you', prefs:'Personal preferences',
@@ -3961,7 +4035,12 @@ $('#mm').onclick = e => {
 /* ==================================================================
    settings modal
    ================================================================== */
-const TAB = ['g', 's', 'a', 'm', 'p', 'n'];
+const TAB = ['g', 's', 'a', 'm', 'p', 'n', 'u'];
+/** 导航分组：基础设置 / 数据与统计 */
+const TGRP = [
+  { k: 's_base', tabs: ['g', 's', 'a', 'm', 'p', 'n'] },
+  { k: 's_data', tabs: ['u'] }
+];
 const SW = ['#d97757', '#6a9bcc', '#788c5d', '#9b87f5', '#d4637a', '#c9a227'];
 const SC = {
   g:[
@@ -4004,15 +4083,14 @@ let tab = 'g', pvs = null;
 
 function nav() {
   const z = S.lang === 'zh';
+  const btn = k => '<button data-t="' + k + '" class="' + (k === tab ? 'on' : '') + '" data-label="' + t('s_' + k) + '">' +
+    t('s_' + k) + '</button>';
   $('#snav').innerHTML =
     '<div id="sback"><button data-back title="' + t('close') + '">' + ic('back') + '</button>' +
     '<span class="sbx"><b>' + t('set') + '</b><span>' + (z ? '返回工作区' : 'Back to workspace') + '</span></span></div>' +
     '<input id="sfind" placeholder="' + (z ? '搜索设置' : 'Search settings') + '" spellcheck="false" autocomplete="off">' +
-    '<div class="sgrp">' + t('s_base') + '</div>' +
-    TAB.map(k =>
-    '<button data-t="' + k + '" class="' + (k === tab ? 'on' : '') + '" data-label="' + t('s_' + k) + '">' +
-    t('s_' + k) + '</button>'
-  ).join('');
+    TGRP.map(g => '<div class="sgrp" data-grp="' + g.k + '">' + t(g.k) + '</div>' +
+      g.tabs.map(btn).join('')).join('');
   const f = $('#sfind');
   if (f) {
     f.value = navQ;
@@ -4032,8 +4110,16 @@ function navFilter() {
     b.style.display = hit ? '' : 'none';
     if (hit) shown++;
   });
-  const grp = $('#snav .sgrp');
-  if (grp) grp.style.display = shown ? '' : 'none';
+  // 每个分组独立显示/隐藏：组内一个都没命中就把组标题也藏起来。
+  $('#snav').querySelectorAll('.sgrp').forEach(g => {
+    let any = 0;
+    let n = g.nextElementSibling;
+    while (n && n.tagName === 'BUTTON') {
+      if (n.style.display !== 'none') any++;
+      n = n.nextElementSibling;
+    }
+    g.style.display = any ? '' : 'none';
+  });
   // 命中的分类自动切过去，免得还要再点一次
   if (q && shown) {
     const first = [...$('#snav').querySelectorAll('button[data-t]')].find(b => b.style.display !== 'none');
@@ -4063,8 +4149,9 @@ function panel() {
   const p = $('#sp');
   p.innerHTML = '';
   let i = 0;
-  $('#card').classList.toggle('wide', tab === 'm');
+  $('#card').classList.toggle('wide', tab === 'm' || tab === 'u');
   if (tab === 'm') { renderModelPage(p); return; }
+  if (tab === 'u') { renderUsagePage(p); return; }
   // 右侧：大标题 + 说明，然后是设置项
   const z = S.lang === 'zh';
   const HD = {
@@ -4298,6 +4385,317 @@ function pushProvider(p) {
     .then(() => loadProviders())
     .catch(e => toast(e.message));
 }
+
+/* ==================================================================
+   使用统计（settings → usage）
+   ================================================================== */
+const UCH = ['--uch1', '--uch2', '--uch3', '--uch4', '--uch5', '--uch6'];
+/** 用量页状态：区间范围、热力图模式、模型显示名缓存 */
+let ugRange = '30d', ugHmMode = 'daily', ugModelNames = {}, ugSnap = null;
+
+/** 大数字格式化：中文用「万 / 亿」，英文用 K / M / B。 */
+function fmtBig(n) {
+  n = Number(n) || 0;
+  const z = S.lang === 'zh';
+  if (n < 1000) return String(n);
+  if (z) {
+    if (n >= 1e8) return (n / 1e8).toFixed(n >= 1e9 ? 0 : 1).replace(/\.0$/, '') + ' 亿';
+    if (n >= 1e4) return (n / 1e4).toFixed(n >= 1e6 ? 0 : 1).replace(/\.0$/, '') + ' 万';
+    return n.toLocaleString();
+  }
+  if (n >= 1e9) return (n / 1e9).toFixed(1).replace(/\.0$/, '') + 'B';
+  if (n >= 1e6) return (n / 1e6).toFixed(1).replace(/\.0$/, '') + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(1).replace(/\.0$/, '') + 'K';
+  return String(n);
+}
+/** 时长格式化（毫秒 → 天/小时/分钟）。 */
+function fmtLongMs(ms) {
+  ms = Number(ms) || 0;
+  const d = Math.floor(ms / 86400000);
+  const h = Math.floor(ms % 86400000 / 3600000);
+  const m = Math.floor(ms % 3600000 / 60000);
+  if (d > 0) return d + (S.lang === 'zh' ? ' 天' : 'd');
+  if (h > 0) return h + (S.lang === 'zh' ? ' 小时' : 'h');
+  if (m > 0) return m + (S.lang === 'zh' ? ' 分钟' : 'm');
+  return Math.floor(ms / 1000) + (S.lang === 'zh' ? ' 秒' : 's');
+}
+/** 模型显示名：优先用供应商配置里的友好名。 */
+function ugModelName(id) {
+  if (id === '__legacy__') return t('ug_legacy');
+  if (ugModelNames[id]) return ugModelNames[id];
+  try {
+    for (const p of (MPROV || [])) {
+      const m = (p.models || []).find(x => x.id === id);
+      if (m) { ugModelNames[id] = m.name || m.id; return ugModelNames[id]; }
+    }
+  } catch (e) { /* 供应商尚未加载，用裸 id */ }
+  return id;
+}
+
+function renderUsagePage(host) {
+  host.innerHTML =
+    '<div class="ug"><div class="ug-h"><div><h2>' + t('ug_title') + '</h2><p>' + t('ug_desc') + '</p></div>' +
+    '<div class="ug-ha"><button class="btn" data-ugref="1">' + ic('retry') + '<span>' + t('ug_refresh') + '</span></button></div></div>' +
+    '<div id="ugbody"><div class="ug-empty">' + t('ug_empty') + '</div></div></div>';
+  loadUsage();
+}
+
+async function loadUsage() {
+  const body = document.getElementById('ugbody');
+  if (!body) return;
+  try {
+    const s = await api('/usage?range=' + encodeURIComponent(ugRange));
+    ugSnap = s;
+    paintUsage(body, s);
+  } catch (e) {
+    body.innerHTML = '<div class="ug-empty">' + esc(e.message || String(e)) + '</div>';
+  }
+}
+
+function paintUsage(body, s) {
+  const sum = s.summary || {};
+  const daily = s.daily || [];
+  const models = s.models || [];
+
+  // ---- 顶部概览
+  const strip =
+    '<div class="ug-sum">' +
+    '<div><b>' + esc(fmtBig(sum.totalTokens)) + '</b><span>' + t('ug_total') + '</span></div>' +
+    '<div><b>' + esc(fmtBig(sum.peakDayTokens)) + '</b><span>' + t('ug_peak') + '</span></div>' +
+    '<div><b>' + esc(fmtLongMs(sum.longestSessionMs)) + '</b><span>' + t('ug_longest') + '</span></div>' +
+    '<div><b>' + esc(String(sum.currentStreakDays || 0)) + '</b><span>' + t('ug_streak_now') + '</span></div>' +
+    '<div><b>' + esc(String(sum.longestStreakDays || 0)) + '</b><span>' + t('ug_streak_max') + '</span></div>' +
+    '</div>';
+
+  // ---- 热力图
+  const hm = s.heatmap || { weeks: [] };
+  const hmModes = [['daily', 'ug_daily'], ['weekly', 'ug_weekly'], ['cumulative', 'ug_cumulative']];
+  const hmSeg = '<div class="ug-seg">' + hmModes.map(([k, l]) =>
+    '<button data-ughm="' + k + '" class="' + (ugHmMode === k ? 'on' : '') + '">' + t(l) + '</button>').join('') + '</div>';
+  const heat = '<div class="ug-card"><div class="ug-ch"><h3>' + t('ug_activity') + '</h3>' + hmSeg + '</div>' +
+    ugHeatmap(hm) + '</div>';
+
+  // ---- 时间范围 + 趋势图
+  const rSeg = '<div class="ug-seg">' + [['7d', 'ug_7d'], ['30d', 'ug_30d'], ['all', 'ug_all']].map(([k, l]) =>
+    '<button data-ugrange="' + k + '" class="' + (ugRange === k ? 'on' : '') + '">' + t(l) + '</button>').join('') + '</div>';
+  const trend = '<div class="ug-card"><div class="ug-ch"><h3>' + t('ug_trend') + '</h3>' + rSeg + '</div>' +
+    ugTrend(daily) + '</div>';
+
+  // ---- 模型用量
+  const mu = '<div class="ug-card"><h3>' + t('ug_model_usage') + '</h3>' + ugModelUsage(models) + '</div>';
+
+  body.innerHTML = strip + heat + trend + mu;
+}
+
+/* ---------------------------------------------------------------- 热力图 */
+
+/**
+ * 热力图。服务端给的是「按天」的格子，这里按模式重排：
+ * 每天 = 原样；每周 = 每列一周（7 天求和）；累计 = 到该天为止的累计和。
+ */
+function ugHeatmap(hm) {
+  const weeks = hm.weeks || [];
+  if (!weeks.length) return '<div class="ug-empty">' + t('ug_empty') + '</div>';
+  const mode = ugHmMode;
+
+  // 摊平成「天」的列表：[{date, total, turns, level, void}]
+  const cells = [];
+  weeks.forEach(w => (w.days || []).forEach(c => {
+    if (!c) { cells.push({ date: '', total: 0, turns: 0, level: 0, void: true }); return; }
+    cells.push({ date: c.date, total: c.totalTokens || 0, turns: c.turnCount || 0, level: c.level || 0, void: false });
+  }));
+  const active = cells.filter(c => !c.void && c.total > 0).map(c => c.total).sort((a, b) => a - b);
+  const maxT = hm.maxTokens || (active.length ? active[active.length - 1] : 0);
+  const q = p => active.length ? active[Math.min(active.length - 1, Math.round((active.length - 1) * p))] : 0;
+  const [q1, q2, q3] = [q(.25), q(.5), q(.75)];
+  const lvlOf = v => v <= 0 ? 0 : v <= q1 ? 1 : v <= q2 ? 2 : v <= q3 ? 3 : 4;
+
+  // 按模式重算每格的聚合值
+  const vals = cells.map(c => c.total);
+  if (mode !== 'daily') {
+    if (mode === 'weekly') {
+      for (let i = 0; i < vals.length; i += 7) {
+        let sum = 0, has = false;
+        for (let j = i; j < Math.min(i + 7, vals.length); j++) {
+          if (cells[j].void) continue;
+          has = true; sum += vals[j];
+        }
+        for (let j = i; j < Math.min(i + 7, vals.length); j++) {
+          cells[j].total = has ? sum : 0;
+          cells[j].level = lvlOf(cells[j].total);
+        }
+      }
+    } else { // cumulative
+      let run = 0;
+      cells.forEach(c => {
+        if (c.void) return;
+        run += c.total;
+        c.total = run;
+        c.level = lvlOf(run);
+      });
+    }
+  }
+
+  const cols = Math.ceil(cells.length / 7);
+  const grid = [];
+  for (let w = 0; w < cols; w++) {
+    const col = [];
+    for (let d = 0; d < 7; d++) {
+      const c = cells[w * 7 + d];
+      if (!c || c.void) { col.push('<i class="ug-hmc void"></i>'); continue; }
+      const tip = mode === 'daily'
+        ? t('ug_hm_tip').replace('{d}', c.date).replace('{t}', fmtBig(c.total)).replace('{n}', c.turns)
+        : mode === 'weekly'
+          ? t('ug_hm_week').replace('{d}', c.date).replace('{t}', fmtBig(c.total))
+          : t('ug_hm_total').replace('{d}', c.date).replace('{t}', fmtBig(c.total));
+      col.push('<i class="ug-hmc l' + c.level + '" title="' + esc(tip) + '"></i>');
+    }
+    grid.push('<div class="ug-hmw">' + col.join('') + '</div>');
+  }
+
+  // 月份标签：每列的起始日期跨月时打一个标签
+  const labels = [];
+  let lastMonth = -1;
+  for (let w = 0; w < cols; w++) {
+    const c = cells[w * 7];
+    if (!c || !c.date) { labels.push('<span></span>'); continue; }
+    const m = Number(c.date.slice(5, 7));
+    if (m !== lastMonth) {
+      lastMonth = m;
+      labels.push('<span>' + esc(Number(c.date.slice(8, 10)) === 1 ? (m + '月') : (S.lang === 'zh' ? m + '月' : m.toString())) + '</span>');
+    } else labels.push('<span></span>');
+  }
+
+  return '<div class="ug-hm">' + grid.join('') + '</div>' +
+    '<div class="ug-hml">' + labels.join('') + '</div>' +
+    '<div style="margin-top:10px;display:flex;align-items:center;gap:6px;color:var(--fg2);font-size:11px">' +
+    '<span>' + esc(t('ug_daily')) + '</span>' +
+    '<i class="ug-hmc" style="width:10px;height:10px"></i><i class="ug-hmc l1"></i><i class="ug-hmc l2"></i><i class="ug-hmc l3"></i><i class="ug-hmc l4"></i>' +
+    '<span>' + esc(fmtBig(maxT)) + '</span></div>';
+}
+
+/* ---------------------------------------------------------------- 趋势图 */
+
+/**
+ * 每日 Token 趋势图：一个模型一条折线。
+ * 纯 SVG（项目里没有图表库），坐标轴 + 网格线 + 平滑曲线。
+ */
+function ugTrend(daily) {
+  if (!daily || !daily.length) return '<div class="ug-empty">' + t('ug_empty') + '</div>';
+  const W = 720, H = 220, PL = 52, PR = 12, PT = 12, PB = 26;
+  const iw = W - PL - PR, ih = H - PT - PB;
+
+  // 每个模型一条序列
+  const series = new Map();
+  daily.forEach((d, i) => {
+    (d.models || []).forEach(m => {
+      const id = m.modelId || '';
+      if (!series.has(id)) series.set(id, new Array(daily.length).fill(0));
+      series.get(id)[i] = m.totalTokens || 0;
+    });
+  });
+  const ids = [...series.keys()].sort((a, b) => {
+    const sa = series.get(a).reduce((x, y) => x + y, 0), sb = series.get(b).reduce((x, y) => x + y, 0);
+    return sb - sa;
+  });
+  const maxV = Math.max(1, ...ids.flatMap(id => series.get(id)));
+  const niceMax = niceCeil(maxV);
+  const x = i => PL + (daily.length <= 1 ? iw / 2 : iw * i / (daily.length - 1));
+  const y = v => PT + ih - (v / niceMax) * ih;
+
+  // 网格线 + y 轴标签
+  let g = '';
+  for (let k = 0; k <= 4; k++) {
+    const v = niceMax * k / 4, yy = y(v);
+    g += '<line x1="' + PL + '" y1="' + yy.toFixed(1) + '" x2="' + (W - PR) + '" y2="' + yy.toFixed(1) +
+      '" stroke="var(--line)" stroke-width="1"/>' +
+      '<text x="' + (PL - 8) + '" y="' + (yy + 4).toFixed(1) + '" text-anchor="end" font-size="10" fill="var(--fg2)">' +
+      esc(fmtBig(v)) + '</text>';
+  }
+  // x 轴日期标签（首、中、尾）
+  const idxs = [0, Math.floor(daily.length / 2), daily.length - 1].filter((v, i, a) => a.indexOf(v) === i && v >= 0);
+  idxs.forEach(i => {
+    g += '<text x="' + x(i).toFixed(1) + '" y="' + (H - 8) + '" text-anchor="middle" font-size="10" fill="var(--fg2)">' +
+      esc(String(daily[i].date || '').slice(5)) + '</text>';
+  });
+
+  // 折线（Catmull-Rom 转 bezier 的简化版：相邻点中点作为控制点）
+  let paths = '';
+  ids.forEach((id, k) => {
+    const col = 'var(' + UCH[k % UCH.length] + ')';
+    const pts = series.get(id);
+    let d = '', started = false;
+    pts.forEach((v, i) => {
+      if (v <= 0 && !started) return;
+      started = true;
+      const px = x(i), py = y(v);
+      d += (d ? ' L' : 'M') + px.toFixed(1) + ' ' + py.toFixed(1);
+    });
+    if (!d) return;
+    paths += '<path d="' + d + '" fill="none" stroke="' + col + '" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity=".9"/>';
+  });
+
+  const legend = ids.length
+    ? '<div class="ug-legend">' + ids.map((id, k) =>
+      '<span class="ug-lg"><i style="background:var(' + UCH[k % UCH.length] + ')"></i>' + esc(ugModelName(id)) + '</span>').join('') + '</div>'
+    : '';
+
+  return legend + '<svg class="ug-chart" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="xMidYMid meet" role="img">' +
+    g + paths + '</svg>';
+}
+
+/** 取一个「好看」的坐标轴上界。 */
+function niceCeil(v) {
+  if (v <= 0) return 1;
+  const e = Math.pow(10, Math.floor(Math.log10(v)));
+  const m = v / e;
+  const n = m <= 1 ? 1 : m <= 2 ? 2 : m <= 5 ? 5 : 10;
+  return n * e;
+}
+
+/* ---------------------------------------------------------------- 模型用量 */
+
+/** 模型用量：环形图 + 排名列表。 */
+function ugModelUsage(models) {
+  if (!models || !models.length) return '<div class="ug-empty">' + t('ug_empty') + '</div>';
+  const total = models.reduce((s, m) => s + (m.totalTokens || 0), 0);
+  const R = 58, C = 2 * Math.PI * R, ST = 24;
+  let off = 0, segs = '';
+  models.forEach((m, k) => {
+    const frac = total ? (m.totalTokens || 0) / total : 0;
+    const len = frac * C;
+    const col = 'var(' + UCH[k % UCH.length] + ')';
+    segs += '<circle cx="80" cy="80" r="' + R + '" fill="none" stroke="' + col + '" stroke-width="' + ST +
+      '" stroke-dasharray="' + len.toFixed(2) + ' ' + (C - len).toFixed(2) +
+      '" stroke-dashoffset="' + (-off).toFixed(2) + '" transform="rotate(-90 80 80)"/>';
+    off += len;
+  });
+  const donut = '<svg class="ug-chart" viewBox="0 0 160 160" style="width:160px;height:160px;flex:none">' + segs +
+    '<text x="80" y="76" text-anchor="middle" font-size="19" font-weight="600" fill="var(--fg)">' + esc(fmtBig(total)) + '</text>' +
+    '<text x="80" y="94" text-anchor="middle" font-size="11" fill="var(--fg2)">' + esc(t('ug_tokens')) + '</text></svg>';
+
+  const list = models.map((m, k) =>
+    '<div class="ug-mu-i"><i style="background:var(' + UCH[k % UCH.length] + ')"></i>' +
+    '<b>' + esc(ugModelName(m.modelId)) + '</b>' +
+    '<span>' + esc((m.share * 100).toFixed(1)) + '%</span>' +
+    '<em>' + esc(fmtBig(m.totalTokens)) + ' ' + esc(t('ug_tokens')) + '</em></div>').join('');
+
+  return '<div class="ug-mu">' + donut + '<div class="ug-mu-l"></div><div class="ug-mu-r">' + list + '</div></div>';
+}
+
+$('#sp').addEventListener('click', e => {
+  if (tab !== 'u') return;
+  const r = e.target.closest('[data-ugrange]');
+  if (r) { ugRange = r.dataset.ugrange; loadUsage(); return; }
+  const hm = e.target.closest('[data-ughm]');
+  if (hm) {
+    ugHmMode = hm.dataset.ughm;
+    const body = document.getElementById('ugbody');
+    if (body && ugSnap) paintUsage(body, ugSnap);
+    return;
+  }
+  if (e.target.closest('[data-ugref]')) { loadUsage(); return; }
+});
 
 $('#sp').addEventListener('click', e => {
   if (tab !== 'm') return;

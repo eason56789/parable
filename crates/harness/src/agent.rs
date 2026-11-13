@@ -128,6 +128,8 @@ pub struct AgentRuntime {
     stats: Arc<Mutex<HashMap<String, SessStats>>>,
     pub schedule: Option<crate::schedule::SharedSchedule>,
     pub subagents: Option<crate::subagent::SharedSubagents>,
+    /// Persistent usage journal — one record per turn, for the 使用统计 page.
+    pub usage: Option<Arc<crate::usage::UsageJournal>>,
     /// Computer use bridge (CDP browser control), shared across turns.
     pub computer: Arc<crate::computer::ComputerBridge>,
 }
@@ -141,6 +143,13 @@ impl AgentRuntime {
     ) -> Self {
         self.schedule = schedule;
         self.subagents = subagents;
+        self
+    }
+
+    /// Attach the usage journal. Set before the runtime is cloned into the
+    /// sub-agent runtime so parent and child turns share one journal.
+    pub fn with_usage(mut self, usage: Arc<crate::usage::UsageJournal>) -> Self {
+        self.usage = Some(usage);
         self
     }
 
@@ -259,6 +268,7 @@ impl AgentRuntime {
             stats: Arc::new(Mutex::new(HashMap::new())),
             schedule: None,
             subagents: None,
+            usage: None,
             computer: Arc::new(crate::computer::ComputerBridge::new()),
         }
     }
@@ -791,9 +801,10 @@ When it is achieved, say so clearly in your reply.",
             Ok(x) => x,
             Err(e) => {
                 // 提前失败也要统一记账 + 发布 turn.end（stopReason: error）。
+                // 还没有解析出具体模型，model 留空。
                 self.finalize_turn(
                     session_id, turn_id, t_start, &Usage::default(), 0, "error",
-                    ctx_limit, 0, 0, 0, 0,
+                    ctx_limit, 0, 0, 0, 0, "",
                 )
                 .await;
                 return Err(e);
@@ -874,7 +885,7 @@ When it is achieved, say so clearly in your reply.",
 
             // Context guard: if the conversation is about to overflow, summarise
             // the older part before sending anything to the model.
-            let tools: Vec<ToolSpec> = registry.specs();
+            let tools = registry.specs();
             let fixed_tokens = estimate_fixed(&system, &tools);
             match compact_history(&*provider, &mut history, &self.hub, session_id, ctx_limit, fixed_tokens).await {
                 Ok((n, summary)) => {
@@ -1163,6 +1174,7 @@ When it is achieved, say so clearly in your reply.",
             model_ms,
             tool_ms,
             ttft_ms,
+            &model_id,
         )
         .await;
         result.map(|_| ())
@@ -1208,8 +1220,8 @@ When it is achieved, say so clearly in your reply.",
         }
     }
 
-    /// turn 收尾：add_usage（所有出口路径都记账）、更新会话统计、发布
-    /// turn.end（含 modelMs/toolMs/ttftMs）与最终 status。
+    /// turn 收尾：add_usage（所有出口路径都记账）、更新会话统计、写入用量
+    /// 日志、发布 turn.end（含 modelMs/toolMs/ttftMs）与最终 status。
     #[allow(clippy::too_many_arguments)]
     async fn finalize_turn(
         &self,
@@ -1224,11 +1236,28 @@ When it is achieved, say so clearly in your reply.",
         model_ms: u64,
         tool_ms: u64,
         ttft_ms: u64,
+        model: &str,
     ) {
         let wall = t_start.elapsed().as_millis() as u64;
         self.store
             .add_usage(session_id, turn_usage, 1, steps, wall)
             .await;
+        // 用量日志：一轮一条记录，供「使用统计」页按天/按模型聚合。
+        if let Some(j) = &self.usage {
+            let ts = crate::event::now_ms();
+            j.record(crate::usage::UsageRecord {
+                ts,
+                day: crate::usage::day_key(ts),
+                session_id: session_id.to_string(),
+                model: model.to_string(),
+                input_tokens: turn_usage.input_tokens,
+                output_tokens: turn_usage.output_tokens,
+                cache_read: turn_usage.cache_read_input_tokens,
+                cache_write: turn_usage.cache_creation_input_tokens,
+                wall_ms: wall,
+            })
+            .await;
+        }
         {
             let mut st = self.stats.lock().await;
             let s = st.entry(session_id.to_string()).or_default();
@@ -1545,7 +1574,7 @@ async fn summarize(
         model: String::new(),
         system: system.to_string(),
         messages: vec![Msg::user(digest.to_string())],
-        tools: Vec::new(),
+        tools: std::sync::Arc::new(Vec::new()),
         max_tokens: 1500,
         thinking_level: 0,
     };
