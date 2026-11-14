@@ -31,6 +31,7 @@ fn synth_message() -> StoredMessage {
         role: "assistant".into(),
         parts: serde_json::json!({ "Assistant": parts }),
         displays: vec![],
+        turn: String::new(),
         created_at: 1,
     }
 }

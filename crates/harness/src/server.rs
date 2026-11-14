@@ -253,8 +253,9 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/sessions/clear-all", post(clear_all_sessions))
         // 多 Profile：一键把命名配置束套到当前配置上
         .route("/profiles/apply", post(apply_profile))
-        // 文件检查点：列出某会话的可回退点 / 执行回退
+        // 文件检查点：列出某会话的可回退点（带逐文件统计）/ 单文件审查 diff / 执行回退
         .route("/sessions/{id}/checkpoints", get(list_checkpoints))
+        .route("/sessions/{id}/checkpoint-diff", get(checkpoint_diff))
         .route("/sessions/{id}/rewind", post(rewind_session))
         // 内置浏览器 app 模式的引导页（无敏感信息、无需鉴权——本地 only）
         .route("/browser-boot", get(browser_boot))
@@ -1822,7 +1823,8 @@ async fn apply_profile(
     .into_response()
 }
 
-/// GET /api/sessions/{id}/checkpoints — 该会话的全部文件检查点。
+/// GET /api/sessions/{id}/checkpoints — 该会话的全部文件检查点（带逐文件
+/// 状态与增删统计；已回退的 turn 盘上内容等于快照，状态为 unchanged）。
 async fn list_checkpoints(
     State(state): State<SharedState>,
     headers: HeaderMap,
@@ -1831,8 +1833,34 @@ async fn list_checkpoints(
     if !check_auth(&headers, None, &state) {
         return unauthorized();
     }
-    let list = state.agent.checkpoints.list(&id).await;
+    let list = state.agent.checkpoints.list_detail(&id).await;
     Json(json!({"checkpoints": list})).into_response()
+}
+
+/// GET /api/sessions/{id}/checkpoint-diff?turn=&path= — 单文件的审查 diff
+/// （快照 vs 当前盘上内容，行级、长段未变更区已折叠）。
+async fn checkpoint_diff(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    let Some(turn) = q.get("turn").cloned() else {
+        return server_error("checkpoint-diff: missing turn");
+    };
+    let Some(path) = q.get("path").cloned() else {
+        return server_error("checkpoint-diff: missing path");
+    };
+    match state.agent.checkpoints.diff_for(&id, &turn, &path).await {
+        Some((status, added, removed, lines)) => {
+            Json(json!({"status": status, "added": added, "removed": removed, "lines": lines}))
+                .into_response()
+        }
+        None => server_error("checkpoint-diff: no checkpoint for this turn/path"),
+    }
 }
 
 #[derive(Debug, Deserialize)]

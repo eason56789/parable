@@ -26,6 +26,24 @@ pub struct CheckpointInfo {
     pub files: Vec<String>,
 }
 
+/// 单文件相对本轮改动前快照的当前状态（前端改动摘要条的行）。
+#[derive(Debug, Clone, Serialize)]
+pub struct FileChange {
+    /// 绝对路径。
+    pub path: String,
+    /// created / modified / deleted / unchanged / gone（新建后又被删）。
+    pub status: String,
+    pub added: usize,
+    pub removed: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CheckpointDetail {
+    pub turn: String,
+    pub ts: u64,
+    pub files: Vec<FileChange>,
+}
+
 /// 检查点存储。
 ///
 /// `record` / `restore` / `prune` 之间用一把互斥锁串行化：manifest 是
@@ -211,6 +229,111 @@ impl CheckpointStore {
         }
         out.sort_by(|a, b| b.ts.cmp(&a.ts));
         out
+    }
+
+    /// 带逐文件改动详情的检查点列表（按时间倒序）。
+    ///
+    /// 每个文件对比「快照内容（本轮改动前）」与「当前盘上内容」，给出状态与
+    /// 行级增删统计——前端改动摘要条（N 个文件已更改 +A -B）直接消费这份
+    /// 数据。已回退过的 turn：盘上内容等于快照，状态收敛为 unchanged，前端
+    /// 据此隐藏摘要条，撤销按钮无需额外状态查询。
+    pub async fn list_detail(&self, session: &str) -> Vec<CheckpointDetail> {
+        let mut out = Vec::new();
+        let session_dir = self.session_dir(session);
+        let Some(rd) = std::fs::read_dir(&session_dir).ok() else {
+            return out;
+        };
+        for e in rd.flatten() {
+            let dir = e.path();
+            if !dir.is_dir() {
+                continue;
+            }
+            let Some(m) = Self::read_manifest(&dir) else {
+                continue;
+            };
+            let files = m
+                .files
+                .iter()
+                .map(|f| Self::change_stat(&dir, f))
+                .collect();
+            out.push(CheckpointDetail {
+                turn: m.turn,
+                ts: m.ts,
+                files,
+            });
+        }
+        out.sort_by(|a, b| b.ts.cmp(&a.ts));
+        out
+    }
+
+    /// 单文件：快照 vs 当前盘上内容 → 状态 + 增删行数。
+    fn change_stat(turn_dir: &Path, f: &FileEntry) -> FileChange {
+        let snap = || -> Option<String> {
+            let bytes = std::fs::read(turn_dir.join("snaps").join(&f.snap)).ok()?;
+            Some(String::from_utf8_lossy(&bytes).into_owned())
+        };
+        let cur = std::fs::read(&f.path)
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+            .ok();
+        let (status, added, removed) = match (f.existed, cur) {
+            (true, Some(new)) => {
+                let old = snap().unwrap_or_default();
+                let (a, r, _) = crate::tools::fs::diff_lines(&old, &new);
+                if a + r == 0 {
+                    ("unchanged", a, r)
+                } else {
+                    ("modified", a, r)
+                }
+            }
+            (true, None) => {
+                // 本轮改过、现在没了：视为整文件删除
+                let old = snap().unwrap_or_default();
+                let r = old.lines().count().max(if old.is_empty() { 0 } else { 1 });
+                ("deleted", 0, r)
+            }
+            (false, Some(new)) => {
+                let (a, _, _) = crate::tools::fs::diff_lines("", &new);
+                ("created", a, 0)
+            }
+            (false, None) => ("gone", 0, 0),
+        };
+        FileChange {
+            path: f.path.clone(),
+            status: status.into(),
+            added,
+            removed,
+        }
+    }
+
+    /// 单文件的审查 diff：快照 vs 当前盘上内容，行级（已折叠长段未变更区）。
+    /// 返回 (状态, 增, 删, 行)。turn/路径没有对应检查点时返回 None。
+    pub async fn diff_for(
+        &self,
+        session: &str,
+        turn: &str,
+        path: &str,
+    ) -> Option<(String, usize, usize, Vec<crate::tools::DiffLine>)> {
+        safe_id(session).ok()?;
+        safe_id(turn).ok()?;
+        let dir = self.turn_dir(session, turn);
+        let m = Self::read_manifest(&dir)?;
+        let f = m.files.iter().find(|f| f.path == path)?;
+        let stat = Self::change_stat(&dir, f);
+        let cur = std::fs::read(&f.path)
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+            .ok();
+        let old = || -> String {
+            std::fs::read(dir.join("snaps").join(&f.snap))
+                .map(|b| String::from_utf8_lossy(&b).into_owned())
+                .unwrap_or_default()
+        };
+        let lines = match (&stat.status[..], cur) {
+            ("modified", Some(new)) => crate::tools::fs::diff_lines(&old(), &new).2,
+            ("created", Some(new)) => crate::tools::fs::diff_lines("", &new).2,
+            ("deleted", _) => crate::tools::fs::diff_lines(&old(), "").2,
+            _ => Vec::new(),
+        };
+        Some((stat.status, stat.added, stat.removed, lines))
     }
 
     /// 回退某 turn 的文件改动；返回恢复/删除的文件绝对路径列表（新建文件被删除）。

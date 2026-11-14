@@ -381,6 +381,7 @@ impl SubagentService {
                             role: role.into(),
                             parts: serde_json::to_value(m).unwrap_or(Value::Null),
                             displays: Vec::new(),
+                            turn: String::new(),
                             created_at: crate::event::now_ms(),
                         },
                     )
@@ -571,6 +572,7 @@ impl SubagentService {
                             role: "user".into(),
                             parts: json!({"User": [{"Text": text}]}),
                             displays: Vec::new(),
+                            turn: String::new(),
                             created_at: crate::event::now_ms(),
                         },
                     )

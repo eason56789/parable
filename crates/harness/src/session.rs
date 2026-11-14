@@ -24,6 +24,10 @@ pub struct StoredMessage {
     /// Lets the UI rebuild the exact cards it showed when the turn ran.
     #[serde(default)]
     pub displays: Vec<Value>,
+    /// 产生这条消息的 turn（t_xxx）。前端用它把「本轮文件改动摘要条」
+    /// 精确放回它所属的回合末尾；旧会话数据没有此字段，按空串兼容。
+    #[serde(default)]
+    pub turn: String,
     #[serde(default)]
     pub created_at: u64,
 }
@@ -838,6 +842,8 @@ impl SessionStore {
                     role: "assistant".into(),
                     parts: Value::Object(obj),
                     displays: Vec::new(),
+                    // 旧数据迁移合并出的消息：原始 turn 已不可考
+                    turn: String::new(),
                     created_at,
                 });
                 if let Some(list) = groups.get(&old) {
@@ -869,6 +875,7 @@ impl SessionStore {
                         role: "user".into(),
                         parts: Value::Object(obj),
                         displays: d,
+                        turn: String::new(),
                         created_at,
                     });
                 }
@@ -917,6 +924,7 @@ impl SessionStore {
                 role: "user".into(),
                 parts: Value::Object(obj),
                 displays: Vec::new(),
+                turn: String::new(),
                 created_at: crate::event::now_ms(),
             });
         }
@@ -1016,6 +1024,8 @@ impl SessionStore {
                 role: "user".into(),
                 parts: serde_json::json!({"User": [{"Text": summary}]}),
                 displays: Vec::new(),
+                // 压缩摘要不属于任何执行回合
+                turn: String::new(),
                 created_at: crate::event::now_ms(),
             },
         );

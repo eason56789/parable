@@ -1249,6 +1249,16 @@ impl Registry {
             &preview,
         )
         .await?;
+        // 文件检查点：写前快照旧内容；新建文件记 None，回退时应删除。
+        // 此前只有 edit_file 记检查点，新建的文件一直无法回退。
+        {
+            let cur = std::fs::read(&path).ok();
+            if let Some(cp) = &ctx.checkpoint {
+                let _ = cp
+                    .record(&ctx.session_id, &ctx.turn_id, &path, cur.as_deref())
+                    .await;
+            }
+        }
         fs_impl::write_file(&path, content)
     }
 

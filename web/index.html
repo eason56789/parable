@@ -175,6 +175,37 @@ body.chat #chat{opacity:1;pointer-events:auto}
 .tgrp-bin{position:relative;border-left:2px solid var(--line);padding:2px 0 2px 12px;margin-left:4px;display:flex;flex-direction:column;max-height:480px;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin}
 .tgrp-bin .ec{margin:3px 0;animation:none}
 .tgrp-bin .ec>.eh{padding-top:3px;padding-bottom:3px}
+/* ---- 轮末改动摘要条（对标 ZCode files-changed bar）---- */
+.chgbar{margin:10px 0 2px;border:1px solid var(--line);border-radius:12px;background:color-mix(in srgb,var(--hov) 40%,transparent);font:13px var(--sans);overflow:hidden}
+.chg-r1{display:flex;align-items:center;gap:6px;padding:8px 12px;min-width:0}
+.chg-t{display:flex;align-items:center;gap:8px;min-width:0;background:none;border:0;padding:0;color:var(--fg);font:600 13px var(--sans);cursor:pointer}
+.chg-t>svg{flex:none;width:14px;height:14px;color:var(--fg2);transition:transform calc(.45s * var(--animd)) cubic-bezier(.32,.72,0,1)}
+.chgbar.open .chg-t>svg{transform:rotate(180deg)}
+.chg-t b{font-weight:600;white-space:nowrap}
+.chg-t .add,.chg-r2 .add{color:#4ade80;font-weight:600}
+.chg-t .del,.chg-r2 .del{color:#f87171;font-weight:600}
+.chg-u{margin-left:auto;display:flex;align-items:center;gap:5px;flex:none;background:none;border:0;color:var(--fg2);font:13px var(--sans);cursor:pointer;padding:3px 9px;border-radius:8px;transition:color calc(.2s * var(--animd)),background-color calc(.2s * var(--animd))}
+.cbu:hover{color:var(--fg);background:var(--hov)}
+.cbu svg{width:14px;height:14px}
+.chgbar.undone .chg-u{pointer-events:none;opacity:.55;color:var(--fg2)}
+.chgbar.undone .chg-t b{color:var(--fg2);font-weight:500}
+.chg-b{display:grid;grid-template-rows:0fr;opacity:0;transition:grid-template-rows calc(.5s * var(--animd)) cubic-bezier(.32,.72,0,1),opacity calc(.4s * var(--animd))}
+.chgbar.open .chg-b{grid-template-rows:1fr;opacity:1}
+.chg-b>div{overflow:hidden}
+.chg-r2{display:flex;align-items:center;gap:7px;padding:7px 12px;min-width:0;border-top:1px solid color-mix(in srgb,var(--line) 55%,transparent);flex-wrap:wrap;position:relative}
+.chg-r2 .chg-fic{flex:none;display:flex}
+.chg-r2 .chg-fic svg{width:15px;height:15px}
+.chg-r2 .chg-nm{color:var(--fg);font-weight:500;white-space:nowrap}
+.chg-r2 .chg-dir{color:var(--fg2);font:12px var(--mono);min-width:40px;flex:1 1 60px;max-width:46%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chg-r2 .chg-st{flex:none;font:11.5px var(--sans);color:var(--fg2);border:1px solid var(--line);border-radius:6px;padding:1px 7px}
+.chg-r2 .chg-acts{margin-left:auto;display:flex;gap:6px;flex:none}
+.chg-btn{font:12px var(--sans);border:1px solid var(--line);background:none;color:var(--fg2);padding:3px 11px;border-radius:8px;cursor:pointer;transition:color calc(.2s * var(--animd)),background-color calc(.2s * var(--animd))}
+.chg-btn:hover{color:var(--fg);background:var(--hov)}
+.cbr2 .chg-d{flex-basis:100%;min-width:0}
+.chg-r2 .chg-d:empty{display:none}
+.chg-r2 .chg-d .df{max-height:300px;margin:4px 0 8px;padding:6px 0;border:0;background:color-mix(in srgb,var(--bg) 55%,transparent);border-radius:8px}
+.chgbar .df .ad{background:color-mix(in srgb,#4ade80 12%,transparent)}
+.chgbar .df .rm{background:color-mix(in srgb,#f87171 12%,transparent)}
 /* agent 消息的操作条靠左（用户消息的 .macts 靠右） */
 .arow{display:flex;align-items:center;justify-content:flex-start;gap:10px;margin-top:3px;min-height:28px}
 .arow>.ts{margin-left:auto}
@@ -1617,6 +1648,10 @@ const L = {
     ago_now:'刚刚', ago_m:'{n}分', ago_h:'{n}小时', ago_d:'{n}天',
     ph:'今天我能帮你什么？', ph2:'回复 Parable…',
     thinking:'思考中…', thought:'思考了 {n} 秒', worked:'已工作 {t}',
+    chg_files:'{n} 个文件已更改', chg_file1:'1 个文件已更改',
+    chg_review:'审查', chg_open:'打开', chg_undo:'撤销', chg_undone:'已撤销',
+    chg_created:'新建', chg_modified:'修改', chg_deleted:'已删除',
+    chg_undo_done:'已回退 {n} 个文件', chg_undone_tip:'本轮改动已回退',
     dk_agents:'后台智能体', dk_terms:'后台终端', dk_goal:'目标与阶段',
     dk_idle:'空闲', dk_thinking:'思考中', dk_writing:'输出中', dk_tool:'执行工具',
     dk_none_agents:'当前没有后台智能体在跑', dk_none_terms:'还没有后台终端会话',
@@ -1823,6 +1858,10 @@ const L = {
     ago_now:'now', ago_m:'{n}m', ago_h:'{n}h', ago_d:'{n}d',
     ph:'How can I help you today?', ph2:'Reply to Parable…',
     thinking:'Thinking…', thought:'Thought for {n}s', worked:'Worked for {t}',
+    chg_files:'{n} files changed', chg_file1:'1 file changed',
+    chg_review:'Review', chg_open:'Open', chg_undo:'Revert', chg_undone:'Reverted',
+    chg_created:'new', chg_modified:'modified', chg_deleted:'deleted',
+    chg_undo_done:'Reverted {n} file(s)', chg_undone_tip:'Turn changes reverted',
     dk_agents:'Agents', dk_terms:'Terminals', dk_goal:'Goal & stage',
     dk_idle:'Idle', dk_thinking:'Thinking', dk_writing:'Writing', dk_tool:'Running tool',
     dk_none_agents:'No background agents', dk_none_terms:'No background terminals',
@@ -3740,6 +3779,160 @@ function tgSchedule() {
 // 折叠自身的移动也会触发回调，但那一轮结构与文案都无变化、零写入，循环终止。
 new MutationObserver(tgSchedule).observe(feed, { childList: true, subtree: true });
 
+/* ---- 轮末改动摘要条（对标 ZCode 的 files-changed bar）----
+ *
+ * turn.end 后按 turnId 拉 /checkpoints 的逐文件统计（后端对比本轮改动前
+ * 快照与当前盘上内容），有实际改动就渲染成一条摘要卡：
+ *   [⌄] N 个文件已更改 +A -B            [↺ 撤销]
+ * 展开：逐文件行（扩展名着色图标 / 文件名 / 目录 / 状态 / ±统计），
+ * 「审查」就地展开快照 vs 当前内容的行级 diff，「打开」跳侧栏文件面板。
+ * 撤销走 /rewind（后端恢复快照前会再做一次 pre-restore 备份），完成后
+ * 摘要条进入 undone 终态。历史回放复用同一构造器（openSession）。
+ */
+
+const EXT_TINT = {
+  html:'#e5623a', htm:'#e5623a', css:'#5b8def', js:'#d6c55a', mjs:'#d6c55a',
+  ts:'#4a9be0', tsx:'#4a9be0', jsx:'#d6c55a', py:'#5aa469', rs:'#e0a584',
+  go:'#5aa4d6', md:'#6a9fb5', json:'#c9b458', yml:'#c17156', yaml:'#c17156',
+  toml:'#b0765a', sh:'#89c471', bat:'#a8b86a', sql:'#c99a5a', txt:'#8a8a8a',
+  xlsx:'#4f9e6b', docx:'#5b8dd6', pptx:'#d67e5a', pdf:'#d65a5a', lock:'#8a8a8a'
+};
+
+function extTint(path) {
+  const m = /\.([a-z0-9]+)$/i.exec(path);
+  return EXT_TINT[m ? m[1].toLowerCase() : ''] || 'var(--fg2)';
+}
+
+/** 组装摘要条 DOM。ck: {turn, files:[{path,status,added,removed}]}（已过滤无效状态）。 */
+function buildChangeBar(ck, sid) {
+  const zh = S.lang === 'zh';
+  const files = (ck.files || []).filter(f => f.status !== 'unchanged' && f.status !== 'gone');
+  if (!files.length) return null;
+  const A = files.reduce((s, f) => s + f.added, 0);
+  const B = files.reduce((s, f) => s + f.removed, 0);
+  const n = files.length;
+  // 公共目录前缀（按字符逐段比较，带 / 边界）
+  const dirs = files.map(f => String(f.path).replace(/\\/g, '/').slice(0, String(f.path).replace(/\\/g, '/').lastIndexOf('/') + 1));
+  let prefix = dirs[0] || '';
+  for (const d of dirs.slice(1)) {
+    let i = 0;
+    const lim = Math.min(prefix.length, d.length);
+    while (i < lim && prefix[i] === d[i]) i++;
+    prefix = prefix.slice(0, i);
+    if (!prefix) break;
+  }
+  // 前缀必须收在 / 边界，避免半截目录名
+  const slash = prefix.lastIndexOf('/');
+  prefix = slash >= 0 ? prefix.slice(0, slash + 1) : '';
+  const label = zh ? n + ' 个文件已更改'
+    : (n === 1 ? '1 file changed' : n + ' files changed');
+  const bar = document.createElement('div');
+  bar.className = 'chgbar';
+  bar.dataset.turn = ck.turn || '';
+  bar.innerHTML =
+    '<div class="chg-r1">' +
+      '<button class="chg-t" type="button">' + ic('chev') + '<b>' + esc(label) + '</b>' +
+        (A ? '<span class="add">+' + A + '</span>' : '') +
+        (B ? '<span class="del">-' + B + '</span>' : '') + '</button>' +
+      '<button class="chg-u" type="button">' + ic('retry') + '<span>' + t('chg_undo') + '</span></button>' +
+    '</div>' +
+    '<div class="chg-b"><div class="chg-bi">' + files.map(f => {
+      const norm = String(f.path).replace(/\\/g, '/');
+      const nm = norm.slice(norm.lastIndexOf('/') + 1);
+      const dir = norm.slice(0, norm.length - nm.length);
+      // 目录列剥公共前缀：绝对路径太长会把按钮挤换行；同一轮的文件几乎都在
+      // 同一个工作区里，公共前缀没有信息量，留尾段就够了。
+      const dirRel = dir.startsWith(prefix) ? dir.slice(prefix.length) : dir;
+      const stTxt = { created: t('chg_created'), modified: t('chg_modified'),
+        deleted: t('chg_deleted') }[f.status] || '';
+      return '<div class="chg-r2" data-path="' + esc(f.path) + '">' +
+        '<span class="chg-fic" style="color:' + extTint(f.path) + '">' + ic('file') + '</span>' +
+        '<b class="chg-nm">' + esc(nm) + '</b>' +
+        (dir ? '<span class="chg-dir">' + esc(dirRel) + '</span>' : '') +
+        (stTxt ? '<span class="chg-st">' + esc(stTxt) + '</span>' : '') +
+        (f.added ? '<span class="add">+' + f.added + '</span>' : '') +
+        (f.removed ? '<span class="del">-' + f.removed + '</span>' : '') +
+        '<span class="chg-acts">' +
+          (f.status !== 'deleted'
+            ? '<button class="chg-btn" data-a="review">' + esc(t('chg_review')) + '</button>' : '') +
+          '<button class="chg-btn" data-a="open">' + esc(t('chg_open')) + '</button>' +
+        '</span>' +
+        '<div class="chg-d"></div>' +
+      '</div>';
+    }).join('') + '</div></div>';
+
+  bar.querySelector('.chg-t').onclick = () => bar.classList.toggle('open');
+  const undoBtn = bar.querySelector('.chg-u');
+  undoBtn.onclick = async ev => {
+    ev.stopPropagation();
+    if (bar.classList.contains('undone') || undoBtn.disabled) return;
+    undoBtn.disabled = true;
+    try {
+      const r = await api('/sessions/' + sid + '/rewind',
+        { method: 'POST', body: { turn: ck.turn } });
+      bar.classList.add('undone');
+      undoBtn.querySelector('span').textContent = t('chg_undone');
+      undoBtn.title = t('chg_undone_tip');
+      const k = r && r.files ? r.files.length : 0;
+      toast(t('chg_undo_done').replace('{n}', k));
+    } catch (e) {
+      undoBtn.disabled = false;
+      toast(e.message);
+    }
+  };
+
+  bar.querySelectorAll('.chg-r2').forEach(row => {
+    const path = row.dataset.path;
+    const cbd = row.querySelector('.chg-d');
+    const rv = row.querySelector('[data-a="review"]');
+    if (rv) rv.onclick = async () => {
+      if (row.classList.contains('reviewing')) {
+        row.classList.remove('reviewing');
+        cbd.innerHTML = '';
+        return;
+      }
+      bar.querySelectorAll('.chg-r2.reviewing').forEach(o => {
+        o.classList.remove('reviewing');
+        o.querySelector('.chg-d').innerHTML = '';
+      });
+      row.classList.add('reviewing');
+      cbd.innerHTML = '<div class="spempty">…</div>';
+      try {
+        const d = await api('/sessions/' + sid + '/checkpoint-diff?turn=' +
+          encodeURIComponent(ck.turn || '') + '&path=' + encodeURIComponent(path));
+        cbd.innerHTML = '<div class="df">' + (d.lines || []).map(l => {
+          const cls = l.sign === '+' ? 'ad' : l.sign === '-' ? 'rm' : '';
+          const no = l.old != null ? l.old : (l.new != null ? l.new : '');
+          return '<div class="' + cls + '"><i class="ln">' + no + '</i>' + esc(l.text) + '</div>';
+        }).join('') + '</div>';
+      } catch (e) {
+        row.classList.remove('reviewing');
+        cbd.innerHTML = '';
+        toast(e.message);
+      }
+    };
+    const ob = row.querySelector('[data-a="open"]');
+    if (ob) ob.onclick = () => {
+      const dirP = path.replace(/[\\/][^\\/]*$/, '');
+      const tab = spOpen('files', { path: dirP });
+      spFilesOpen(tab, path);
+    };
+  });
+  return bar;
+}
+
+/** turn 收尾后挂摘要条：拉检查点 → 有实际改动才渲染。引用气泡快照，防 resetTurn 竞态。 */
+function attachChangeBar(a0, sid, gen0, turnId) {
+  if (!a0 || !sid || !turnId) return;
+  api('/sessions/' + sid + '/checkpoints').then(r => {
+    if (gen0 !== convGen || !conv || conv.id !== sid) return;
+    const ck = (r.checkpoints || []).find(c => c.turn === turnId);
+    if (!ck) return;
+    const bar = buildChangeBar(ck, sid);
+    if (bar) a0.querySelector('.ab').append(bar);
+  }).catch(() => {});
+}
+
 /* ---------------------------------------------------------------- tool cards */
 const TOOL_ICON = {
   read_file:'file', write_file:'edit', edit_file:'edit', list_dir:'folder',
@@ -4926,10 +5119,16 @@ function dispatch(ev) {
         // reconcileTail 会把正文删掉重追加，只在「顺序本来就等价」时才做。
         // 模型在工具之间说过话（或被中断时停在半路）就不动它，保留实时看到的
         // 交错顺序；刷新后由 openSession 按存储顺序重放，折叠结果一致。
-        if (foldSafe(curA)) {
-          // 以存储为准校正最终答案：流式期间任何丢失（切换会话、SSE 断连、
-          // 渲染异常）都在这里兜底补齐，保证收尾视图与存储一致。
-          reconcileTail();
+        // 以存储为准校正最终答案（foldSafe 才允许）：流式期间任何丢失（切换
+        // 会话、SSE 断连、渲染异常）都在这里兜底补齐。摘要条必须等校正完成
+        // 再挂——reconcileTail 会把正文删掉重追加，先挂会被排到正文前面。
+        // 气泡/会话/turn 引用在这里立即快照：resetTurn 马上会清掉 curA，
+        // 箭头函数里再读就是 null 了（e2e 实测踩过的坑）。
+        {
+          const a0 = curA, sid0 = conv && conv.id, gen0 = convGen, tid0 = ev.turnId;
+          (foldSafe(curA) ? reconcileTail() : Promise.resolve())
+            .then(() => attachChangeBar(a0, sid0, gen0, tid0))
+            .catch(() => {});
         }
         // 空轮次兜底：模型零产出且错误事件丢失（或还没带上后端修复）时，
         // 气泡里什么都没有。补一行说明，别让用户对着一格空气猜。
@@ -6506,19 +6705,52 @@ async function openSession(id, focusMsg) {
     if (el) el.classList.add('on');
 
     const msgs = res.messages || [];
+    // 轮末改动摘要条：预取本会话的检查点（只留有实际改动的回合），
+    // 按消息上的 turn 字段精确挂载；旧数据没有 turn 字段，回放时按
+    // 每个气泡消费的消息时间范围兜底定位。
+    const ckByTurn = {};
+    let ckFallback = [];
+    try {
+      const ckr = await api('/sessions/' + id + '/checkpoints');
+      (ckr.checkpoints || []).forEach(c => {
+        const files = (c.files || []).filter(f => f.status !== 'unchanged' && f.status !== 'gone');
+        if (!files.length) return;
+        ckByTurn[c.turn] = { ...c, files };
+        ckFallback.push({ ...c, files });
+      });
+    } catch (e) { /* 检查点读取失败就不显示摘要条 */ }
+    ckFallback.sort((x, y) => y.ts - x.ts);
+    const ckPlaced = new Set();
     // Rebuild the transcript as one continuous flow: user text bubbles, and
     // assistant turns whose thinking / tool cards / answer keep their order.
     const cardById = {};
     let pendingAsk = null;
     let a = null, ab = null, aTs = 0;
     let aHasTool = false;
+    let aTurns = [];
+    let aTsMin = Infinity, aTsMax = 0;
     const ensureA = () => {
-      if (!a) { a = aMsg(null, false, aTs); ab = a.querySelector('.ab'); aHasTool = false; }
+      if (!a) {
+        a = aMsg(null, false, aTs); ab = a.querySelector('.ab'); aHasTool = false;
+        aTurns = []; aTsMin = Infinity; aTsMax = 0;
+      }
       return ab;
     };
     const closeA = () => {
+      if (!a) return;
+      // 轮末改动摘要条：优先用气泡内消息自带的 turn 字段精确匹配；
+      // 旧数据（消息无 turn）由后面的时间范围兜底处理。
+      const ck = [...aTurns].reverse().map(t => ckByTurn[t]).find(Boolean);
+      if (ck) {
+        ckPlaced.add(ck.turn);
+        const bar = buildChangeBar(ck, conv.id);
+        if (bar) a.querySelector('.ab').append(bar);
+      }
+      a.dataset.tsMin = aTsMin;
+      a.dataset.tsMax = aTsMax;
       // 操作条交给末尾的 restamp()：拿到存储下标才显示，避免灰色不可点。
-      if (a) { setActs(a, true); a = null; ab = null; aHasTool = false; }
+      setActs(a, true);
+      a = null; ab = null; aHasTool = false;
     };
 
     for (const m of msgs) {
@@ -6544,9 +6776,17 @@ async function openSession(id, focusMsg) {
           fillToolCard(card, display, !r.error, card.querySelector('.fi b').textContent);
           if (pendingAsk && pendingAsk.callId === r.id) pendingAsk = null;
         });
+        if (results.length && a) {
+          aTsMin = Math.min(aTsMin, m.created_at || aTs);
+          aTsMax = Math.max(aTsMax, m.created_at || aTs);
+        }
         continue;
       }
 
+      // 助手消息：收集 turn id（新数据）与时间范围（旧数据兜底）
+      if (m.turn) aTurns.push(m.turn);
+      aTsMin = Math.min(aTsMin, m.created_at || aTs);
+      aTsMax = Math.max(aTsMax, m.created_at || aTs);
       for (const p of parts) {
         if (p.k === 'think') {
           if (S.think === false) continue;
@@ -6588,6 +6828,21 @@ async function openSession(id, focusMsg) {
       }
     }
     closeA();
+    // 旧数据兜底：检查点的回合在消息里找不到 turn 字段时，按气泡消费的
+    // 消息时间范围定位 —— 检查点 ts 是本轮首次写盘时刻，落在该轮消息的
+    // 时间跨度内（工具结果批次总在写盘之后落库）。
+    for (const ck of ckFallback) {
+      if (ckPlaced.has(ck.turn) || !ck.turn) continue;
+      const tol = 1000;
+      const bub = [...feed.children].reverse().find(el =>
+        el.classList.contains('a') &&
+        (+el.dataset.tsMin || 0) - tol <= ck.ts &&
+        ck.ts <= (+el.dataset.tsMax || 0) + tol);
+      if (!bub) continue;
+      ckPlaced.add(ck.turn);
+      const bar = buildChangeBar(ck, conv.id);
+      if (bar) bub.querySelector('.ab').append(bar);
+    }
     // 所有已落库工具卡都登记到全局映射：复用旧气泡或接收后续 tool.result 时
     // 都能命中同一张卡，不会凭空再建一张。
     toolEls = { ...cardById };
@@ -6836,7 +7091,7 @@ async function reconcileTail() {
       const c = k.classList;
       if (k.style && k.style.color) return;           // 错误/提示行保留
       // 过程节点保留：工具卡、思考块、工具运行组（组壳内的卡片随壳保留）
-      if (!c.contains('ec') && !c.contains('th') && !c.contains('tgrp')) k.remove();
+      if (!c.contains('ec') && !c.contains('th') && !c.contains('tgrp') && !c.contains('chgbar')) k.remove();
     });
     renderBlocks(ab, want);
   } catch (e) { /* 存储读取失败就放弃校正 */ }
@@ -10582,7 +10837,7 @@ async function spRenderReview(host, tab) {
     const letter = f.state === 'untracked' ? '?' : f.state === 'added' ? 'A'
       : f.state === 'deleted' ? 'D' : 'M';
     return '<div class="spgf ' + cls + '" data-spgp="' + esc(f.path) + '">' +
-      '<span class="st">' + letter + '</span><span class="nm">' + esc(f.path) + '</span></div>';
+      '<span class="chg-st">' + letter + '</span><span class="nm">' + esc(f.path) + '</span></div>';
   }).join('');
   list.querySelectorAll('[data-spgp]').forEach(r => {
     r.onclick = () => spGitDiff(tab, r.dataset.spgp);

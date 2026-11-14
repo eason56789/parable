@@ -517,6 +517,7 @@ impl AgentRuntime {
                         role: "user".into(),
                         parts: serde_json::to_value(&Msg::User(parts)).unwrap_or(Value::Null),
                         displays: Vec::new(),
+                        turn: turn_id.to_string(),
                         created_at: crate::event::now_ms(),
                     },
                 )
@@ -1216,6 +1217,7 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
                     parts: serde_json::to_value(&Msg::User(user_parts.clone()))
                         .unwrap_or(Value::Null),
                     displays: Vec::new(),
+                    turn: turn_id.to_string(),
                     created_at: crate::event::now_ms(),
                 })
                 .await
@@ -1283,6 +1285,7 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
                         parts: serde_json::to_value(&Msg::Assistant(notice_parts))
                             .unwrap_or(Value::Null),
                         displays: Vec::new(),
+                        turn: turn_id.to_string(),
                         created_at: crate::event::now_ms(),
                     })
                     .await;
@@ -1508,6 +1511,7 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
                         role: "assistant".into(),
                         parts: serde_json::to_value(&Msg::Assistant(parts.clone())).unwrap_or(Value::Null),
                         displays: Vec::new(),
+                        turn: turn_id.to_string(),
                         created_at: crate::event::now_ms(),
                     })
                     .await;
@@ -1688,6 +1692,7 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
                         role: "user".into(),
                         parts: serde_json::to_value(&Msg::User(results)).unwrap_or(Value::Null),
                         displays,
+                        turn: turn_id.to_string(),
                         created_at: crate::event::now_ms(),
                     })
                     .await;
