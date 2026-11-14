@@ -159,7 +159,9 @@ body.chat #chat{opacity:1;pointer-events:auto}
 .th.open.clipped.top .thb>div::before{opacity:0}
 .th.open.clipped.top .thbody{-webkit-mask-image:none;mask-image:none}
 /* ---- 工具运行组：同一气泡里连续出现的工具卡折叠成一行统计，可展开 ---- */
-.tgrp{margin:6px 0}
+.tgrp{margin:4px 0}
+/* 紧贴组壳的正文行收敛自己的段距，避免「段距+组距」叠加出大缝 */
+.ab>*:has(+ .tgrp){margin-bottom:6px}
 .tgrp-h{display:flex;align-items:center;gap:7px;max-width:100%;padding:2px 0;border:0;background:none;color:var(--fg2);font:13px var(--sans);cursor:pointer;text-align:left;transition:color calc(.2s * var(--animd))}
 .tgrp-h:hover{color:var(--fg)}
 .tgrp-ic{display:flex;flex:none}.tgrp-ic svg{width:14px;height:14px}
