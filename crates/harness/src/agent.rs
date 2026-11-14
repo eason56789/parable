@@ -1938,7 +1938,11 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
             let outcome = if stop_reason == "error" { "failed" } else { "ok" };
             let _ = self
                 .store
-                .update_meta(session_id, |m| m.outcome = outcome.to_string())
+                .update_meta(session_id, |m| {
+                    m.outcome = outcome.to_string();
+                    // 状态变化置起「未读」小球；进会话时由前端 PATCH 消费。
+                    m.dot = true;
+                })
                 .await;
         }
         // 用量日志：一轮一条记录，供「使用统计」页按天/按模型聚合。

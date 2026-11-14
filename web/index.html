@@ -277,6 +277,7 @@ body.chat #chat{opacity:1;pointer-events:auto}
 .tfold>div{overflow:hidden}
 /* ---- 侧栏会话状态小球：完成蓝 #80BEFF / 失败红 / 待提问淡黄 / 运行中转圈 ---- */
 .sdot{flex:none;width:8px;height:8px;border-radius:50%;background:#80BEFF;align-self:center}
+.sdot.hide{display:none}
 .sdot.wait{background:#f0d264}
 .sdot.fail{background:#f26d6d}
 .sdot.run{background:none;border:2px solid #80BEFF55;border-top-color:#80BEFF;animation:wkspin calc(.9s * var(--animd)) linear infinite}
@@ -5284,6 +5285,8 @@ function dispatch(ev) {
     // 侧栏状态小球跟随轮次起止（运行中转圈 / 结束上色），去抖刷新。
     const now = Date.now();
     if (now - sessRefreshAt >= 3000) { sessRefreshAt = now; loadSessions(true); }
+    // 转圈/彩色的切换要即时（loadSessions 有 3s 去抖，先本地刷一遍）。
+    refreshDots();
   }
   if (ev.type === 'turn.end') {
     INFLIGHT[ev.sessionId] = false;
@@ -5296,6 +5299,9 @@ function dispatch(ev) {
       turnId: ev.turnId || '',
       ms: typeof ev.ms === 'number' ? ev.ms : null,
     };
+    // 在场看完的轮次：即时消费未读球——「点进去后清除」的语义延伸到
+    // 你就在里面看它结束的情况，不留「看过的还挂球」。
+    if (conv && conv.id === ev.sessionId) consumeDot(ev.sessionId);
     delete TURN_T0[ev.sessionId];
     delete WK_START[ev.sessionId];
     // 只丢「正在看的那个会话」的影子缓冲。别的会话结束时不删：切走期间如果
@@ -7009,15 +7015,13 @@ function sbNode(c) {
   d.dataset.ts = c.ts || Date.now();
   d.querySelector('.rct').textContent = noEmoji(c.t || '');
   d.querySelector('.rcd').textContent = fmtAgo(+d.dataset.ts);
-  // 状态小球：完成蓝 / 失败红 / 待提问淡黄 / 运行中转圈（行最左、垂直居中）。
-  // 实时覆盖：内存里的 INFLIGHT 比列表快照准，运行中一律显示转圈。
+  // 状态小球 = 未读徽标 + 实时转圈：
+  //  - 转圈（运行中）是实时态：不在看它就显示——点进去消失、离开又出现；
+  //    轮次结束转蓝（彩色徽标规则接管）
+  //  - 彩色（蓝完成 / 红失败 / 黄待提问）是新鲜事件徽标：进会话消费，
+  //    当前打开的会话一律不显示
   const dot = d.querySelector('.sdot');
-  if (dot) {
-    const st = INFLIGHT[c.id] ? 'running' : (c.st || 'ok');
-    dot.className = 'sdot' +
-      (st === 'running' ? ' run' : st === 'waiting' ? ' wait' : st === 'failed' ? ' fail' : '');
-    dot.title = st === 'running' ? t('working') : st === 'waiting' ? t('q_wait') : '';
-  }
+  if (dot) dot.className = dotClass(c.id);
   d.classList.toggle('pin', !!c.pin && !c.arch);
   d.classList.toggle('arch', !!c.arch);
   if (c.pin && !c.arch) d.dataset.pinAt = c.pinAt || c.ts || '';
@@ -7228,6 +7232,7 @@ async function loadSessions(quiet) {
       pin: s.pinned, pinAt: s.updated_at, grp: s.group, arch: !!s.archived,
       ws: s.workspace || '',
       st: s.state || 'ok',
+      dot: !!s.dot,
     }));
     renderSidebar();
     refreshTimes();
@@ -7247,6 +7252,33 @@ $('#sbfind').onclick = () => openCmd();
 $('#sbnew').onclick = () => newChat();
 
 let openTok = 0;   // openSession 竞态令牌：连点两个会话时旧请求直接作废
+
+/** 小球状态类：转圈（运行中实时态）> 未读彩色徽标 > 隐藏。当前会话恒隐藏。 */
+function dotClass(id) {
+  const c = CONVS.find(x => x.id === id) || {};
+  if (conv && conv.id === id) return 'sdot hide';
+  if (INFLIGHT[id]) return 'sdot run';
+  if (c.dot) return 'sdot' + (c.st === 'waiting' ? ' wait' : c.st === 'failed' ? ' fail' : '');
+  return 'sdot hide';
+}
+
+/** 侧栏小球的实时刷新：切会话 / turn 起止 / 消费未读位后按行更新，
+ *  不动行 DOM、不重排侧栏。 */
+function refreshDots() {
+  document.querySelectorAll('.rc[data-id]').forEach(row => {
+    const d = row.querySelector('.sdot');
+    if (d) d.className = dotClass(row.dataset.id);
+  });
+}
+
+/** 消费会话的未读小球：本地清位 + 持久化，侧栏即时刷新。 */
+function consumeDot(id) {
+  const c = CONVS.find(x => x.id === id);
+  if (!c || !c.dot) return;
+  c.dot = false;
+  api('/sessions/' + id, { method: 'PATCH', body: { dot: false } }).catch(() => {});
+  refreshDots();
+}
 
 /** 给已落库但仍在运行的气泡补回「工作中」计时条。openSession 复用它时用。 */
 /** 确保顶部状态行存在并切到运行态（切回运行中的会话时复用既有气泡）。 */
@@ -7378,6 +7410,10 @@ async function openSession(id, focusMsg) {
       if (my !== openTok) return;
     }
     conv = { id, title: (CONVS.find(c => c.id === id) || {}).t || '' };
+    // 进会话即消费侧栏状态小球（不管什么颜色，点进来就清除）。
+    consumeDot(id);
+    // 「当前会话不显示球」随切换实时变化：进隐、离显（转圈的离开又出现）。
+    refreshDots();
     ignoreSid = '';
     // 加载成功才丢弃「待发送的编辑」：失败时还得留在原视图里（见 catch）。
     pendingEdit = null;

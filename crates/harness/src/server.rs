@@ -1803,6 +1803,9 @@ struct PatchSession {
     archived: Option<bool>,
     #[serde(default)]
     group: Option<String>,
+    /// 侧栏状态小球的「未读」位：进会话时前端 PATCH false 消费。
+    #[serde(default)]
+    dot: Option<bool>,
 }
 
 async fn patch_session(
@@ -1830,6 +1833,9 @@ async fn patch_session(
             }
             if let Some(g) = &r.group {
                 m.group = g.clone();
+            }
+            if let Some(d) = r.dot {
+                m.dot = d;
             }
         })
         .await;

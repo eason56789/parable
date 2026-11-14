@@ -1530,13 +1530,18 @@ impl Registry {
             "question",
             json!({"callId": ctx.call_id, "question": question, "options": options.clone()}),
         );
+        // 侧栏「待提问」小球（淡黄）：置起未读位，进会话消费。
+        let _ = ctx
+            .store
+            .update_meta(&ctx.session_id, |m| m.dot = true)
+            .await;
 
         // ask_timeout_ms > 0（设置 → Agent 行为 → 提问自动裁决）：超时自动选
         // 第一项；没有选项就用空串（仍算"已回答"，走既有 None/Some 语义）。
         let answer = if ctx.ask_timeout_ms > 0 {
             match tokio::time::timeout(
                 std::time::Duration::from_millis(ctx.ask_timeout_ms),
-                ctx.questions.ask(&ctx.call_id),
+                ctx.questions.ask(&ctx.call_id, &ctx.session_id),
             )
             .await
             {
@@ -1552,7 +1557,7 @@ impl Registry {
                 }
             }
         } else {
-            ctx.questions.ask(&ctx.call_id).await
+            ctx.questions.ask(&ctx.call_id, &ctx.session_id).await
         };
         // `None` = timed out / interrupted; `Some("")` = the user submitted
         // an empty answer, which is still an explicit answer.

@@ -70,6 +70,10 @@ pub struct SessionSummary {
     /// 侧栏会话状态小球按它上色（失败红 / 完成蓝）。
     #[serde(default)]
     pub outcome: String,
+    /// 侧栏状态小球的「未读」位：状态变化（轮次收尾/提问）时置起，进会话
+    /// 消费（PATCH dot=false）。彩色球按它显示；转圈是实时态不看它。
+    #[serde(default)]
+    pub dot: bool,
 }
 
 /// A message the user sent while a turn was already running.
@@ -182,6 +186,7 @@ impl Default for SessionSummary {
             permission_mode: "ask".into(),
             thinking_level: 2,
             outcome: String::new(),
+            dot: false,
         }
     }
 }
@@ -1470,6 +1475,7 @@ mod tests {
                 permission_mode: "ask".into(),
                 thinking_level: 2,
                 outcome: String::new(),
+            dot: false,
             },
             messages: Vec::new(),
             pending: Vec::new(),
