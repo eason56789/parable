@@ -834,6 +834,8 @@ async fn get_config(State(state): State<SharedState>, headers: HeaderMap) -> Res
         return unauthorized();
     }
     let cfg = state.config.read().await;
+    // 历史遗留值在回显侧也归一（让 UI 立即看到正确 context）
+
     let mut v = serde_json::to_value(&*cfg).unwrap_or_default();
     // Never hand the raw API keys to the UI.
     if let Some(arr) = v.get_mut("providers").and_then(|p| p.as_array_mut()) {
@@ -867,6 +869,8 @@ async fn patch_config(
     // 先处理删除标记({id, deleted:true}),再做字段合并。
     crate::config::apply_patch_deletions(&mut cfg, &v);
     merge_config(&mut cfg, &v);
+    // 历史遗留非法值归一（如 context=0），写盘前统一修复
+    cfg.normalize();
     // 代理设置即时生效（下次请求用新 client）
     crate::config::set_proxy(cfg.http_proxy.clone(), cfg.http_no_proxy.clone());
     if let Err(e) = cfg.save() {

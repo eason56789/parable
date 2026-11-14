@@ -1119,6 +1119,7 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
                 .resolve_model(&sel)
                 .or_else(|| cfg.active_model())
                 .map(|(_, m)| m.context)
+                .filter(|c| *c > 0) // context=0 = 未知，退回默认窗口
                 .unwrap_or(128_000);
             let tcfg = TurnCfg {
                 max_steps: ov_n("max_steps")

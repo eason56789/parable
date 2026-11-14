@@ -551,11 +551,32 @@ impl Config {
         Self::home_dir().join("logs")
     }
 
+    /// 修复历史遗留的非法值：模型 context = 0（旧版 UI 落库）会让压缩判定
+    /// 把 8000 当窗口、状态栏却按 128000 显示——两边精神分裂。统一归一为
+    /// 128000（运行时兜底同款）。
+    pub fn normalize(&mut self) {
+        let mut fixed = 0usize;
+        for p in &mut self.providers {
+            for m in &mut p.models {
+                if m.context == 0 {
+                    m.context = 128_000;
+                    fixed += 1;
+                }
+            }
+        }
+        if fixed > 0 {
+            tracing::info!("config: normalized {fixed} model(s) with context=0 to 128000");
+        }
+    }
+
     pub fn load() -> Self {
         let path = Self::config_path();
         match std::fs::read_to_string(&path) {
-            Ok(s) => match toml::from_str(&s) {
-                Ok(c) => c,
+            Ok(s) => match toml::from_str::<Config>(&s) {
+                Ok(mut c) => {
+                    c.normalize();
+                    c
+                }
                 Err(e) => {
                     // 解析失败先把原文件备份走，再回退默认值——
                     // 避免后续 save() 用默认配置覆盖丢失原始数据。
