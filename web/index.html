@@ -3846,10 +3846,20 @@ function wkPaint(a) {
   if (tx) tx.textContent = t('working') + ' ' + sec + ' ' + t('sec_unit');
 }
 
-/** 开始计时（turn 开始时调用）。 */
+/** 开始计时（turn 开始时调用）。起点只记一次：切回来恢复时要接着数。 */
 function wkStart_(a) {
   if (!a) return;
   wkStart = Date.now();
+  if (conv && conv.id && WK_START[conv.id] == null) WK_START[conv.id] = wkStart;
+  if (wkTimer) clearInterval(wkTimer);
+  wkPaint(a);
+  wkTimer = setInterval(() => wkPaint(a), 1000);
+}
+
+/** 接续原起点恢复计时（切回运行中的会话用）：绝不重置成「工作中 1 秒」。 */
+function wkResume_(a) {
+  if (!a) return;
+  wkStart = (conv && (WK_START[conv.id] || TURN_T0[conv.id])) || Date.now();
   if (wkTimer) clearInterval(wkTimer);
   wkPaint(a);
   wkTimer = setInterval(() => wkPaint(a), 1000);
@@ -5110,6 +5120,11 @@ const INFLIGHT = {};
  *  只留每个会话最后一轮：更早的轮次在历史里本来就该是终态。
  */
 const DONE_TURNS = {};
+/** 运行中轮次的计时起点记账：切走再切回来时「工作中 x 秒」要接着数，不能
+ *  从 1 重来。WK_START 是 workbar 真实起点（首次开表时记一次）；TURN_T0 是
+ *  turn.start 时刻——轮次在后台开跑、从未开过表时的兜底（略偏早，可接受）。 */
+const WK_START = {};
+const TURN_T0 = {};
 /** 全局事件序号水位：SSE 事件带单调递增 seq，乱序/重复直接丢弃。 */
 let lastSeq = 0;
 // conv 未绑定（首条消息在途）期间闯入的他人会话：其事件全部丢弃直到绑定。
@@ -5164,6 +5179,12 @@ function dispatch(ev) {
   // 会话隔离不应该把它的事件吃掉。钩子只写侧边栏自己的标签。
   spOnEvent(ev);
   if (ignoreSid && ev.sessionId === ignoreSid) return;
+  if (ev.type === 'turn.start') {
+    // 新一轮：计时起点换新，上一轮的定格/起点记录全部作废。
+    TURN_T0[ev.sessionId] = Date.now();
+    delete WK_START[ev.sessionId];
+    delete DONE_TURNS[ev.sessionId];
+  }
   if (ev.type === 'turn.end') {
     INFLIGHT[ev.sessionId] = false;
     // 记下「这一轮在哪个会话跑完、跑了多久」。当前会话走下面的正常收尾
@@ -5175,6 +5196,8 @@ function dispatch(ev) {
       turnId: ev.turnId || '',
       ms: typeof ev.ms === 'number' ? ev.ms : null,
     };
+    delete TURN_T0[ev.sessionId];
+    delete WK_START[ev.sessionId];
     // 只丢「正在看的那个会话」的影子缓冲。别的会话结束时不删：切走期间如果
     // 落库失败或只落了一部分，回来还能从缓冲里补齐；旧代码无条件 delete，
     // 那段正文就永久消失，正是「切会话把思考过程截断」的一半原因。
@@ -7472,12 +7495,16 @@ async function openSession(id, focusMsg) {
         curThinkEl = null;
         turnT0 = Date.now();
         ensureWorkBar(curA);
-        wkStart_(curA);
+        // 接续原起点继续计数——切回来看到的应是「工作中 18 秒」而不是
+        // 从 1 重来的「工作中 1 秒」。
+        wkResume_(curA);
         setActs(curA, false);
         const ts = curA.querySelector('.ts');
         if (ts) ts.classList.add('hide');
       } else {
         startTurnUI();
+        // 同上：新建的气泡也要接续原起点，不从 1 重数。
+        wkResume_(curA);
         turnSawTool = sawStored;
         // 刚重放出来的回答不该挂「重新生成 / 编辑 / 删除」按钮；
         // turn.end 时 restamp() 会按存储下标补回来。
