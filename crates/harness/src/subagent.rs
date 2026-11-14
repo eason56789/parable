@@ -201,18 +201,34 @@ impl ChildCatalog {
     }
 }
 
-/// DSH's naming rule: 1–32 lower-case letters, digits or hyphens, starting with
-/// a letter, and never `lead` (reserved for the root agent).
+/// 命名规则：1–32 个字符（按字符计），允许中文、字母、数字与连字符，
+/// 首字符须是中文或字母；`lead` 保留给根代理。子代理名称由模型起，
+/// 期望是贴切的简短中文名。
 pub fn valid_name(s: &str) -> bool {
-    if s.is_empty() || s.len() > 32 || s == "lead" {
+    if s.is_empty() || s.chars().count() > 32 || s == "lead" {
         return false;
     }
     let mut chars = s.chars();
     match chars.next() {
-        Some(c) if c.is_ascii_lowercase() => {}
+        Some(c) if c.is_alphabetic() => {}
         _ => return false,
     }
-    chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    chars.all(|c| c.is_alphanumeric() || c == '-')
+}
+
+/// 从任务标签提取一个合法名称（模型漏填 name 时的兜底）：去掉空白与
+/// 常见标点，只留中文/字母/数字/连字符；提取不出就返回 None。
+pub fn name_from_label(label: &str) -> Option<String> {
+    let cleaned: String = label
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == '-')
+        .collect();
+    let name: String = cleaned.chars().take(32).collect();
+    if valid_name(&name) {
+        Some(name)
+    } else {
+        None
+    }
 }
 
 // ---------------------------------------------------------------- service
@@ -315,12 +331,26 @@ impl SubagentService {
             Some(n) => {
                 if !valid_name(n) {
                     return Err(HarnessError::Other(format!(
-                        "`{n}` is not a valid agent name: use 1-32 lower-case letters, digits or hyphens, starting with a letter (and not `lead`)"
+                        "`{n}` is not a valid agent name: use 1-32 Chinese characters, letters, digits or hyphens, starting with a Chinese character or letter (and not `lead`)"
                     )));
                 }
                 n.clone()
             }
-            None => self.catalog.next_free_name(&root_session).await,
+            // 模型漏填 name 时：先从中文标签提取，提取不出再退 agent-N。
+            None => match name_from_label(&req.label) {
+                Some(n) => {
+                    let free = self.catalog.next_free_name(&root_session).await;
+                    // 提取名与 agent-N 同名时归一到空闲名，避免撞车
+                    if n == free {
+                        free
+                    } else if self.catalog.get(&n).await.is_none() {
+                        n
+                    } else {
+                        format!("{n}-{}", &free[free.rfind('-').map(|i| i + 1).unwrap_or(0)..])
+                    }
+                }
+                None => self.catalog.next_free_name(&root_session).await,
+            },
         };
 
         // The child gets its own session so its history is isolated from the parent.
@@ -842,9 +872,14 @@ mod tests {
         assert!(valid_name("agent-1"));
         assert!(valid_name("researcher"));
         assert!(valid_name("a"));
+        assert!(valid_name("文档整理师"), "Chinese names are the expected form");
+        assert!(valid_name("统计员2"));
+        assert!(valid_name("Agent"), "letters of any case are fine now");
         assert!(!valid_name("lead"), "reserved for the root agent");
         assert!(!valid_name(""), "empty");
-        assert!(!valid_name("Agent"), "upper-case");
+        assert!(!valid_name("统计 员"), "spaces rejected");
+        assert!(!valid_name("-统计"), "must start with a letter/CJK char");
+        assert!(!valid_name(&"名".repeat(33)), "over 32 chars");
         assert!(!valid_name("1abc"), "must start with a letter");
         assert!(!valid_name("a b"), "no spaces");
         assert!(!valid_name(&"a".repeat(33)), "max 32");

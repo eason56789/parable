@@ -700,11 +700,11 @@ skill matches the current request, then follow the steps it contains. Read-only.
                 input_schema: obj(json!({
                     "label": str_prop("Short task label for the catalogue"),
                     "task": str_prop("The task the child should carry out"),
-                    "name": str_prop("Optional stable name: 1-32 of [a-z0-9-], starts with a letter"),
+                    "name": str_prop("REQUIRED. Give the child a fitting short Chinese name (≤32 chars), e.g. 文档整理师 / 测试跑腿 / 情报搜集员 — it is the agent's identity in the roster. Also accepts letters/digits/hyphens."),
                     "cwd": str_prop("Initial working directory (defaults to the workspace)"),
                     "seed_history": bool_prop("Start the child with this conversation as context"),
                     "model": str_prop("Model selector for the child (defaults to the parent's)"),
-                }), &["label","task"]),
+                }), &["label","task","name"]),
             },
             ToolSpec {
                 name: "agent_list".into(),
@@ -1733,11 +1733,17 @@ impl Registry {
                 let id = sub
                     .spawn(runtime, &ctx.session_id, &self.workspace.to_string_lossy(), req)
                     .await?;
+                let cname = sub
+                    .catalog
+                    .get(&id)
+                    .await
+                    .map(|c| c.name)
+                    .unwrap_or_default();
                 Ok(ToolOutcome::text(
                     true,
-                    format!("Spawned agent {id}"),
+                    format!("Spawned agent {cname} ({id})"),
                     format!(
-                        "Spawned child agent {id} (id `{id}`). It runs in the background; call agent_wait with this id to collect its result."
+                        "Spawned child agent `{cname}` (id `{id}`). It runs in the background; call agent_wait with this id or name to collect its result."
                     ),
                 ))
             }
