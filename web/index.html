@@ -158,16 +158,20 @@ body.chat #chat{opacity:1;pointer-events:auto}
 /* 已经滚到顶部时撤掉渐隐：否则第一行会被顶部蒙版吃掉，永远看不完整。 */
 .th.open.clipped.top .thb>div::before{opacity:0}
 .th.open.clipped.top .thbody{-webkit-mask-image:none;mask-image:none}
-.wf{margin:0 0 12px}
-.wfh{display:flex;align-items:center;gap:5px;padding:3px 0;border:0;background:none;color:var(--fg2);font:13px var(--sans);cursor:pointer;transition:color calc(.2s * var(--animd))}
-.wfh:hover{color:var(--fg)}
-.wfh svg{width:14px;height:14px;transition:transform calc(.45s * var(--animd)) cubic-bezier(.32,.72,0,1)}
-.wf.open .wfh svg{transform:rotate(180deg)}
-.wfb{display:grid;grid-template-rows:0fr;opacity:0;transition:grid-template-rows calc(.55s * var(--animd)) cubic-bezier(.32,.72,0,1),opacity calc(.45s * var(--animd))}
-.wf.open .wfb{grid-template-rows:1fr;opacity:1}
-.wfb>div{overflow:hidden}
-.wfb .th{margin:8px 0 6px}
-.wfb .ec{margin:6px 0}
+/* ---- 工具运行组：同一气泡里连续出现的工具卡折叠成一行统计，可展开 ---- */
+.tgrp{margin:6px 0}
+.tgrp-h{display:flex;align-items:center;gap:7px;max-width:100%;padding:2px 0;border:0;background:none;color:var(--fg2);font:13px var(--sans);cursor:pointer;text-align:left;transition:color calc(.2s * var(--animd))}
+.tgrp-h:hover{color:var(--fg)}
+.tgrp-ic{display:flex;flex:none}.tgrp-ic svg{width:14px;height:14px}
+.tgrp-tx{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tgrp-h>svg{flex:none;width:14px;height:14px;color:var(--fg2);opacity:0;transition:transform calc(.45s * var(--animd)) cubic-bezier(.32,.72,0,1),opacity calc(.25s * var(--animd))}
+.tgrp-h:hover>svg,.tgrp.open .tgrp-h>svg{opacity:1}
+.tgrp.open .tgrp-h>svg{transform:rotate(180deg)}
+.tgrp-b{display:grid;grid-template-rows:0fr;opacity:0;transition:grid-template-rows calc(.55s * var(--animd)) cubic-bezier(.32,.72,0,1),opacity calc(.45s * var(--animd))}
+.tgrp.open .tgrp-b{grid-template-rows:1fr;opacity:1}
+.tgrp-b>div{overflow:hidden}
+.tgrp-bin{position:relative;border-left:2px solid var(--line);padding:2px 0 2px 12px;margin-left:4px;display:flex;flex-direction:column;max-height:480px;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin}
+.tgrp-bin .ec{margin:6px 0;animation:none}
 /* agent 消息的操作条靠左（用户消息的 .macts 靠右） */
 .arow{display:flex;align-items:center;justify-content:flex-start;gap:10px;margin-top:3px;min-height:28px}
 .arow>.ts{margin-left:auto}
@@ -3517,10 +3521,10 @@ function finishThink(el) {
 /**
  * 这次收尾能不能折叠「过程」？
  *
- * foldFlow 会把思考块和工具卡片整体挪到气泡顶部，再在下面放正文。只要模型
- * 在工具之间说过话（正文先于某个过程节点出现），折叠就会改变时序：原来的
- * 「正文 → 工具 → 正文」变成「工具 + 正文」，中断时尤其刺眼。
- * 只有气泡第一个内容节点就是过程节点时，折叠才不改变顺序，才允许折叠。
+ * 正文与过程（思考块/工具卡/工具运行组）的相对顺序有没有被改动过？只要模型
+ * 在工具之间说过话（正文先于某个过程节点出现），reconcileTail 的「删正文重渲染」
+ * 就会改变时序：原来的「正文 → 工具 → 正文」变成「工具 + 正文」，中断时尤其刺眼。
+ * 只有气泡第一个内容节点就是过程节点时，校正才不改变顺序，才允许做。
  */
 function foldSafe(a) {
   const ab = a && a.querySelector('.ab');
@@ -3528,35 +3532,210 @@ function foldSafe(a) {
   const kids = [...ab.children];
   // 错误行 / 压缩提示是内联带色的提示，不算正文，也不该影响判断。
   const main = kids.filter(k => !(k.style && k.style.color));
-  const proc = main.filter(k => k.classList.contains('ec') || k.classList.contains('th'));
-  if (!proc.length) return true;      // 本轮没有过程节点：折叠无事可做，允许走存储校正
-  return main[0] === proc[0];         // 只有过程先行时，折叠才不改变时序
+  const proc = main.filter(k =>
+    k.classList.contains('ec') || k.classList.contains('th') || k.classList.contains('tgrp'));
+  if (!proc.length) return true;      // 本轮没有过程节点：校正无事可做，允许走存储校正
+  return main[0] === proc[0];         // 只有过程先行时，校正才不改变时序
 }
 
-function foldFlow(a, ms) {
-  if (ms == null) return;
-  const ab = a.querySelector('.ab');
-  if (!ab) return;
-  // Fold the *process* — thinking blocks and tool cards, in the order they ran —
-  // into a collapsible, leaving the answer text where it is.
-  const kids = [...ab.children];
-  const process = kids.filter(k => k.classList.contains('ec') || k.classList.contains('th'));
-  if (!process.length) return;
-  let w = a.querySelector('.wf');
-  if (w) w.remove();
-  w = document.createElement('div');
-  w.className = 'wf';
-  w.innerHTML = '<button class="wfh"><span class="wft"></span>' + ic('chev') + '</button>' +
-    '<div class="wfb"><div></div></div>';
-  w.querySelector('.wft').textContent = t('worked').replace('{t}', fmtDur(ms));
-  const body = w.querySelector('.wfb>div');
-  process.forEach(c => body.append(c));
-  ab.insertBefore(w, ab.firstChild);
-  w.querySelector('.wfh').onclick = () => w.classList.toggle('open');
-  // 折叠条本身已经写着「已工作 x 秒」，再把计时条留在下面就是同一句话出现两遍
-  const wk = a.querySelector('.wk');
-  if (wk) wk.classList.remove('on', 'done');
+/* ---- 工具运行组：同一气泡内连续的工具卡折叠为一行可展开统计 ----
+ *
+ * 对标 ZCode 的 ConsecutiveSummaryGroup（packages/ui/src/ToolCallBlocks/
+ * ToolSummaryRow.tsx + v4/conversationAssistantWorkItems.ts）：
+ *  - 正文、思考块、问答卡、等待授权的卡都是「边界」，边界之间的连续工具卡
+ *    （≥2 张）收进一个 .tgrp 组壳 —— 组头是「已运行N条命令，调用M个工具」，
+ *    点击展开原始卡片；单卡不成组，保持原样。
+ *  - 组是本轮尾组且 turn 仍在生成时，组头退成最新工具的滚动预览（shimmer
+ *    呼吸），收尾（turn.end / 后面来了正文）后回到统计文案；展开态永远显示统计。
+ *  - 思考块保持边界地位：toolThink 开启时工具间的思考仍然直接可见，不被吞进组。
+ *  - 全程幂等：结构与文案都无变化时零 DOM 写入，MutationObserver 的回环
+ *    自然终止。观察者挂主对话流 feed 上，覆盖流式插入、历史回放、删除、
+ *    重生成等所有路径，无需在每个渲染点手工调用。
+ */
+
+function tgBoundary(el) {
+  const c = el.classList;
+  if (c.contains('th')) return true;      // 思考块：保持「工具间思考」开关语义
+  if (!c.contains('ec')) return true;     // 正文 / steerline / 错误行 / 压缩提示等
+  // 需要用户交互的卡片永不折叠：问答卡、正在等待授权的卡
+  if (el.dataset.tool === 'ask_user') return true;
+  if (el.dataset.st === 'wait') return true;
+  if (el.querySelector(':scope > .pm > *')) return true;
+  return false;
 }
+
+function tgIsCmd(el) {
+  const t = el.dataset.tool || '';
+  return t === 'bash' || t === 'shell';
+}
+
+/** 组头统计文案：「已运行N条命令，调用M个工具」，零项部分省略。 */
+function tgStats(cards) {
+  const zh = S.lang === 'zh';
+  let cmd = 0;
+  for (const c of cards) if (tgIsCmd(c)) cmd++;
+  const tool = cards.length - cmd;
+  const parts = [];
+  if (cmd) parts.push(zh
+    ? '已运行' + cmd + '条命令'
+    : (cmd === 1 ? 'Ran 1 command' : 'Ran ' + cmd + ' commands'));
+  if (tool) parts.push(zh
+    ? '调用' + tool + '个工具'
+    : (tool === 1 ? 'called 1 tool' : 'called ' + tool + ' tools'));
+  return parts.join(zh ? '，' : ', ');
+}
+
+/** 预览选取：最后一张仍在运行的卡，退化到最后一张。 */
+function tgActiveCard(cards) {
+  for (let i = cards.length - 1; i >= 0; i--) {
+    const st = cards[i].querySelector('.st-tx');
+    if (st && st.classList.contains('run')) return cards[i];
+  }
+  return cards[cards.length - 1];
+}
+
+/** 展开的组体粘底跟随：只有原本就在底部时才跟随新内容，用户上翻不抢滚动。 */
+function tgFollow(bin) {
+  const atBottom = bin.scrollHeight - bin.scrollTop - bin.clientHeight < 48;
+  if (atBottom) bin.scrollTop = bin.scrollHeight;
+}
+
+/** 刷新组头：运行中（收起态）显示滚动预览，其余显示统计。只写有变化的部分。 */
+function tgPaint(g) {
+  const bin = g.querySelector('.tgrp-bin');
+  const cards = [...bin.children];
+  if (!cards.length) return;
+  const head = g.querySelector('.tgrp-h');
+  const icEl = head.querySelector('.tgrp-ic');
+  const k = cards.some(tgIsCmd) ? 'terminal' : (TOOL_ICON[cards[0].dataset.tool] || 'file');
+  if (icEl.dataset.k !== k) { icEl.dataset.k = k; icEl.innerHTML = ic(k); }
+  const tx = head.querySelector('.tgrp-tx');
+  const running = busy && g.parentNode && g === g.parentNode.lastElementChild;
+  let want;
+  if (running && !g.classList.contains('open')) {
+    const act = tgActiveCard(cards);
+    const fi = act.querySelector('.fi b');
+    want = (fi && fi.textContent) || act.dataset.desc || act.dataset.tool || '';
+    tx.classList.add('shim');
+  } else {
+    want = tgStats(cards);
+    tx.classList.remove('shim');
+  }
+  if (tx.textContent !== want) tx.textContent = want;
+}
+
+/**
+ * 把一个气泡的连续工具卡折叠成组。四阶段：
+ * A 组内出现了边界卡（授权请求复用旧卡把 st 置成 wait 等）→ 整组按原顺序拆回；
+ * B 子节点读成逻辑序列（组壳展开成成员卡，与裸卡、边界混排成段）；
+ * C ≥2 卡的段落聚合进组壳（复用旧壳保持展开态），单卡段落还原为裸卡；
+ * D 刷新组头文案。返回是否有 DOM 变化（false = 本轮零写入）。
+ */
+function compactToolRuns(ab) {
+  let changed = false;
+  for (const g of [...ab.children]) {
+    if (!g.classList.contains('tgrp')) continue;
+    const kids = [...g.querySelector('.tgrp-bin').children];
+    if (!kids.some(tgBoundary)) continue;
+    for (const card of kids) ab.insertBefore(card, g);
+    g.remove();
+    changed = true;
+  }
+  const runs = [];
+  const pushCard = (card, g) => {
+    const last = runs[runs.length - 1];
+    if (last && last.cards) {
+      last.cards.push(card);
+      if (g && last.gs.indexOf(g) < 0) last.gs.push(g);
+    } else {
+      runs.push({ cards: [card], gs: g ? [g] : [] });
+    }
+  };
+  for (const el of [...ab.children]) {
+    if (el.classList.contains('tgrp')) {
+      const bin = el.querySelector('.tgrp-bin');
+      const cards = [...bin.children];
+      if (cards.length < 2) {
+        // 组退化成单卡/空组：拆壳还原，随后按新邻居重新聚合
+        for (const card of cards) ab.insertBefore(card, el);
+        el.remove();
+        changed = true;
+        for (const card of cards) pushCard(card, null);
+        continue;
+      }
+      for (const card of cards) pushCard(card, el);
+    } else if (!tgBoundary(el)) {
+      pushCard(el, null);
+    } else {
+      runs.push({ b: el });
+    }
+  }
+  for (const run of runs) {
+    if (!run.cards) continue;
+    const g0 = run.gs[0];
+    const anchor = g0 && g0.querySelector('.tgrp-bin').contains(run.cards[0])
+      ? g0 : run.cards[0];
+    if (run.cards.length >= 2) {
+      let g = g0;
+      if (!g) {
+        g = document.createElement('div');
+        g.className = 'tgrp';
+        g.innerHTML = '<button class="tgrp-h" type="button"><span class="tgrp-ic"></span>' +
+          '<span class="tgrp-tx"></span>' + ic('chev') + '</button>' +
+          '<div class="tgrp-b"><div><div class="tgrp-bin"></div></div></div>';
+        g.querySelector('.tgrp-h').onclick = () => {
+          g.classList.toggle('open');
+          if (g.classList.contains('open')) {
+            const bin = g.querySelector('.tgrp-bin');
+            bin.scrollTop = bin.scrollHeight;
+          }
+        };
+        ab.insertBefore(g, anchor);
+        changed = true;
+      } else if (g !== anchor && g.nextElementSibling !== anchor) {
+        // 组壳必须位于整段首卡之前，否则视觉顺序与运行顺序不一致
+        ab.insertBefore(g, anchor);
+        changed = true;
+      }
+      const bin = g.querySelector('.tgrp-bin');
+      const binCards = [...bin.children];
+      const sameOrder = binCards.length === run.cards.length &&
+        binCards.every((c, i) => c === run.cards[i]);
+      if (!sameOrder) {
+        for (const card of run.cards) {
+          bin.append(card);
+          tgFollow(bin);
+        }
+        changed = true;
+      }
+      for (let i = 1; i < run.gs.length; i++) { run.gs[i].remove(); changed = true; }
+    } else if (g0) {
+      ab.insertBefore(run.cards[0], g0);
+      g0.remove();
+      changed = true;
+    }
+  }
+  for (const g of ab.children) {
+    if (g.classList.contains('tgrp')) tgPaint(g);
+  }
+  return changed;
+}
+
+/** 主对话流的所有气泡跑一遍折叠；侧聊、团队面板等其他容器不受影响。 */
+function tgCompactAll() {
+  if (!feed) return;
+  for (const ab of feed.querySelectorAll(':scope > .a > .ab')) compactToolRuns(ab);
+}
+
+let tgTimer = 0;
+function tgSchedule() {
+  if (tgTimer) return;
+  tgTimer = setTimeout(() => { tgTimer = 0; tgCompactAll(); }, 60);
+}
+
+// 卡片插入/删除/授权状态变化最终都会落到 feed 的 DOM 上，观察者统一兜底；
+// 折叠自身的移动也会触发回调，但那一轮结构与文案都无变化、零写入，循环终止。
+new MutationObserver(tgSchedule).observe(feed, { childList: true, subtree: true });
 
 /* ---------------------------------------------------------------- tool cards */
 const TOOL_ICON = {
@@ -4740,12 +4919,11 @@ function dispatch(ev) {
       if (curA) {
         stopSpin(curA, ev.ms);
         setActs(curA, true);
-        // 折叠会把过程整体挪到顶部，reconcileTail 会把正文删掉重追加——两者
-        // 都只在「顺序本来就等价」时才做。模型在工具之间说过话（或被中断时
-        // 停在半路）就不动它，保留实时看到的交错顺序；刷新后由 openSession
-        // 按存储顺序重放，同样是交错的。
+        // 过程不再挪动 DOM（工具运行组就地折叠，由 MutationObserver 统一收拢）；
+        // reconcileTail 会把正文删掉重追加，只在「顺序本来就等价」时才做。
+        // 模型在工具之间说过话（或被中断时停在半路）就不动它，保留实时看到的
+        // 交错顺序；刷新后由 openSession 按存储顺序重放，折叠结果一致。
         if (foldSafe(curA)) {
-          foldFlow(curA, ev.ms);
           // 以存储为准校正最终答案：流式期间任何丢失（切换会话、SSE 断连、
           // 渲染异常）都在这里兜底补齐，保证收尾视图与存储一致。
           reconcileTail();
@@ -5530,12 +5708,12 @@ function editAgent(el) {
   const idx = el.dataset.mi;
   const miEnd = el.dataset.miEnd;
   const fallback = [...body.children]
-    .filter(k => !k.classList.contains('ec') && !k.classList.contains('th') && !k.classList.contains('wf'))
+    .filter(k => !k.classList.contains('ec') && !k.classList.contains('th') && !k.classList.contains('tgrp'))
     .map(k => k.innerText).join('\n\n').trim();
   const current = (el.dataset.raw || fallback).trim();
-  // 执行过程（思考块、工具卡片，可能收在 .wf 折叠里）原样保留，只换正文。
+  // 执行过程（思考块、工具卡片、工具运行组）原样保留，只换正文。
   const keep = [...body.children].filter(k =>
-    k.classList.contains('ec') || k.classList.contains('th') || k.classList.contains('wf'));
+    k.classList.contains('ec') || k.classList.contains('th') || k.classList.contains('tgrp'));
   const box = document.createElement('textarea');
   box.className = 'tx';
   box.value = current;
@@ -6654,7 +6832,8 @@ async function reconcileTail() {
     [...ab.children].forEach(k => {
       const c = k.classList;
       if (k.style && k.style.color) return;           // 错误/提示行保留
-      if (!c.contains('ec') && !c.contains('th') && !c.contains('wf')) k.remove();
+      // 过程节点保留：工具卡、思考块、工具运行组（组壳内的卡片随壳保留）
+      if (!c.contains('ec') && !c.contains('th') && !c.contains('tgrp')) k.remove();
     });
     renderBlocks(ab, want);
   } catch (e) { /* 存储读取失败就放弃校正 */ }
@@ -9582,7 +9761,7 @@ function startTurnProbe() {
           thinkStart = 0;
           if (curA) {
             stopSpin(curA);
-            if (foldSafe(curA)) { foldFlow(curA, 0); reconcileTail(); }
+            if (foldSafe(curA)) reconcileTail();
           }
           sync();
           resetTurn();
