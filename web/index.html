@@ -3659,8 +3659,12 @@ function fillToolCard(e, display, ok, title) {
     stTx.classList.remove('run');
   }
 
-  // 展开区第一行永远是完整工具调用（bash 的完整命令在下面的 $ 行里）。
-  if (display.kind !== 'shell' && e.dataset.args) {
+  // 展开区第一行显示完整工具调用（bash 的完整命令在下面的 $ 行里）。
+  // 但「内容即全部信息」的工具不重复贴参数：write/edit 的 diff、doc_* 的
+  // 规格就是内容本体——write_file 的参数动辄几十 KB 转义文本，纯噪音。
+  const argsLoud = display.kind !== 'shell' && display.kind !== 'diff' &&
+    !toolName.startsWith('doc_') && e.dataset.args;
+  if (argsLoud) {
     let pretty = e.dataset.args;
     try { pretty = JSON.stringify(JSON.parse(pretty), null, 2); } catch (err) {}
     const raw = document.createElement('div');
