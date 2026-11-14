@@ -518,6 +518,7 @@ impl AgentRuntime {
                         parts: serde_json::to_value(&Msg::User(parts)).unwrap_or(Value::Null),
                         displays: Vec::new(),
                         turn: turn_id.to_string(),
+                        hidden: false,
                         created_at: crate::event::now_ms(),
                     },
                 )
@@ -1218,6 +1219,7 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
                         .unwrap_or(Value::Null),
                     displays: Vec::new(),
                     turn: turn_id.to_string(),
+                    hidden: false,
                     created_at: crate::event::now_ms(),
                 })
                 .await
@@ -1286,6 +1288,7 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
                             .unwrap_or(Value::Null),
                         displays: Vec::new(),
                         turn: turn_id.to_string(),
+                        hidden: false,
                         created_at: crate::event::now_ms(),
                     })
                     .await;
@@ -1512,6 +1515,7 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
                         parts: serde_json::to_value(&Msg::Assistant(parts.clone())).unwrap_or(Value::Null),
                         displays: Vec::new(),
                         turn: turn_id.to_string(),
+                        hidden: false,
                         created_at: crate::event::now_ms(),
                     })
                     .await;
@@ -1693,6 +1697,7 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
                         parts: serde_json::to_value(&Msg::User(results)).unwrap_or(Value::Null),
                         displays,
                         turn: turn_id.to_string(),
+                        hidden: false,
                         created_at: crate::event::now_ms(),
                     })
                     .await;

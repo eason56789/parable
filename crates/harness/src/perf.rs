@@ -32,6 +32,7 @@ fn synth_message() -> StoredMessage {
         parts: serde_json::json!({ "Assistant": parts }),
         displays: vec![],
         turn: String::new(),
+        hidden: false,
         created_at: 1,
     }
 }

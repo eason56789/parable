@@ -28,6 +28,10 @@ pub struct StoredMessage {
     /// 精确放回它所属的回合末尾；旧会话数据没有此字段，按空串兼容。
     #[serde(default)]
     pub turn: String,
+    /// 系统注入、不该渲染给用户的消息（子代理结果投递等）。模型历史
+    /// 照常包含它；/api/sessions/{id}/messages 对前端过滤掉。
+    #[serde(default)]
+    pub hidden: bool,
     #[serde(default)]
     pub created_at: u64,
 }
@@ -844,6 +848,7 @@ impl SessionStore {
                     displays: Vec::new(),
                     // 旧数据迁移合并出的消息：原始 turn 已不可考
                     turn: String::new(),
+                    hidden: false,
                     created_at,
                 });
                 if let Some(list) = groups.get(&old) {
@@ -876,6 +881,7 @@ impl SessionStore {
                         parts: Value::Object(obj),
                         displays: d,
                         turn: String::new(),
+                        hidden: false,
                         created_at,
                     });
                 }
@@ -925,6 +931,7 @@ impl SessionStore {
                 parts: Value::Object(obj),
                 displays: Vec::new(),
                 turn: String::new(),
+                hidden: false,
                 created_at: crate::event::now_ms(),
             });
         }
@@ -1026,6 +1033,7 @@ impl SessionStore {
                 displays: Vec::new(),
                 // 压缩摘要不属于任何执行回合
                 turn: String::new(),
+                hidden: false,
                 created_at: crate::event::now_ms(),
             },
         );
@@ -1162,6 +1170,10 @@ impl SessionStore {
         }
         let mut items = Vec::new();
         for (idx, m) in self.messages(id).await.iter().enumerate() {
+            // hidden 消息不进搜索索引：用户看不见的内容也不该被搜出来。
+            if m.hidden {
+                continue;
+            }
             if let Some(text) = message_text(&m.parts) {
                 items.push((idx, m.role.clone(), text));
             }

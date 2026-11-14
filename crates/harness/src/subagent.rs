@@ -412,6 +412,7 @@ impl SubagentService {
                             parts: serde_json::to_value(m).unwrap_or(Value::Null),
                             displays: Vec::new(),
                             turn: String::new(),
+                            hidden: false,
                             created_at: crate::event::now_ms(),
                         },
                     )
@@ -635,6 +636,9 @@ impl SubagentService {
                             parts: json!({"User": [{"Text": text}]}),
                             displays: Vec::new(),
                             turn: String::new(),
+                            // 系统注入的结果通报：模型历史照常可见，但不对
+                            // 用户渲染（/messages 过滤 hidden）。
+                            hidden: true,
                             created_at: crate::event::now_ms(),
                         },
                     )
@@ -647,6 +651,19 @@ impl SubagentService {
                         "result": payload["result"], "error": err,
                     }),
                 );
+                // 通知父代理：父会话空闲时立刻开一轮（空 prompt = 重跑当前
+                // 历史，结果已在其中），父代理模型就能对子代理的成果做出
+                // 反应 —— 否则结果只在历史里躺着，永远没人处理。父 turn
+                // 仍在跑时不插手：结果等它的下一个自然回合再看。
+                if let Some(rt) = runtime.read().await.as_ref() {
+                    if !rt.is_running(&parent_sid).await {
+                        let opts = rt
+                            .current_turn_options(&parent_sid)
+                            .await
+                            .unwrap_or_else(crate::agent::TurnOptions::default);
+                        let _ = rt.start_turn(&parent_sid, "", Vec::new(), opts).await;
+                    }
+                }
             }
         });
     }

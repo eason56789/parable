@@ -1516,7 +1516,10 @@ async fn session_messages(
         return unauthorized();
     }
     let msgs = state.store.neutral_messages(&id).await;
-    let stored = state.store.messages(&id).await;
+    let mut stored = state.store.messages(&id).await;
+    // 系统注入的 hidden 消息（子代理结果通报等）：模型历史照常包含，
+    // 但不给前端 —— 用户永远看不到它，渲染/下标映射也就不需要跳过。
+    stored.retain(|m| !m.hidden);
     Json(json!({"messages": stored, "neutral": msgs})).into_response()
 }
 
