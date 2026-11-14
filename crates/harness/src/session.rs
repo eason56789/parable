@@ -1241,7 +1241,7 @@ pub struct MessageHit {
 }
 
 /// Flatten a neutral message's text parts into one searchable string.
-fn message_text(parts: &Value) -> Option<String> {
+pub fn message_text(parts: &Value) -> Option<String> {
     let arr = parts.get("User").or_else(|| parts.get("Assistant"))?.as_array()?;
     let mut out = String::new();
     for p in arr {

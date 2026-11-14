@@ -220,6 +220,9 @@ pub fn build_router(state: SharedState) -> Router {
             "/sessions/{id}/messages/{idx}",
             patch(edit_message).delete(delete_message),
         )
+        // 重试某条用户提问：追加一条 hidden 指令后空 prompt 重跑模型，
+        // 新回答追加在会话末尾 —— 不删除、不改写任何既有消息。
+        .route("/sessions/{id}/messages/{idx}/retry", post(retry_message))
         .route("/status", get(status))
         .route("/usage", get(get_usage))
         .route("/tools", get(tools))
@@ -1427,6 +1430,72 @@ struct EditMessageReq {
     /// text folds into one blob (thinking / tool parts are preserved).
     #[serde(default)]
     to: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RetryMessageReq {}
+
+/// POST /api/sessions/{id}/messages/{idx}/retry — 重试一条用户提问。
+///
+/// 语义：不删除、不改写任何既有消息。读出该条用户消息原文，追加一条
+/// hidden 指令（「请重新回答这个问题」）后以空 prompt 重跑模型 —— 新
+/// 回答追加在会话末尾，用户看得见，指令本身不可见。idx 为存储下标。
+async fn retry_message(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path((id, idx)): Path<(String, usize)>,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    let msgs = state.store.messages(&id).await;
+    let Some(m) = msgs.get(idx) else {
+        return bad_request(&format!("message {idx} not found"));
+    };
+    if m.role != "user" {
+        return bad_request("retry targets a user message");
+    }
+    let Some(q) = crate::session::message_text(&m.parts) else {
+        return bad_request("message has no text to retry");
+    };
+    let q = q.trim().to_string();
+    if q.is_empty() {
+        return bad_request("message has no text to retry");
+    }
+    let instruct = format!(
+        "请重新回答用户之前提出的这个问题 —— 这是对该消息的重试，请直接给出完整的新回答（不要复述这个问题本身）：
+
+{q}"
+    );
+    if let Err(e) = state
+        .store
+        .append_message(
+            &id,
+            crate::session::StoredMessage {
+                role: "user".into(),
+                parts: json!({"User": [{"Text": instruct}]}),
+                displays: Vec::new(),
+                turn: String::new(),
+                hidden: true,
+                created_at: crate::event::now_ms(),
+            },
+        )
+        .await
+    {
+        return bad_request(&e.to_string());
+    }
+    // 权限模式沿用全局配置（与 /api/chat 无显式模式时一致），而不是
+    // current_turn_options —— 唤醒/重试链会残留上一轮的 ask，把本该
+    // 自动执行的工具卡进确认门。
+    let mode = state.config.read().await.permission_mode.clone();
+    let opts = TurnOptions {
+        permission_mode: mode,
+        ..TurnOptions::default()
+    };
+    match state.agent.start_turn(&id, "", Vec::new(), opts).await {
+        Ok(turn_id) => Json(json!({"ok": true, "turnId": turn_id})).into_response(),
+        Err(e) => bad_request(&e.to_string()),
+    }
 }
 
 async fn edit_message(

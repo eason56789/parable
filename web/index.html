@@ -1654,7 +1654,8 @@ const L = {
     thinking:'思考中…', thought:'思考了 {n} 秒', worked:'已工作 {t}',
     chg_files:'{n} 个文件已更改', chg_file1:'1 个文件已更改',
     chg_review:'审查', chg_open:'打开', chg_undo:'撤销', chg_undone:'已撤销',
-    chg_created:'新建', chg_modified:'修改', chg_deleted:'已删除',
+    retry_q:'重新回答这个问题（不影响其他消息）', editmsg_q:'只修改这条消息',
+        chg_created:'新建', chg_modified:'修改', chg_deleted:'已删除',
     sp_changes:'改动审查', sp_changes_h:'在侧边栏查看本轮文件改动的完整内容与增减行',
     sp_changes_empty:'本轮没有文件改动（可能已全部撤销）',
     sp_changes_open:'打开文件',
@@ -1867,7 +1868,8 @@ const L = {
     thinking:'Thinking…', thought:'Thought for {n}s', worked:'Worked for {t}',
     chg_files:'{n} files changed', chg_file1:'1 file changed',
     chg_review:'Review', chg_open:'Open', chg_undo:'Revert', chg_undone:'Reverted',
-    chg_created:'new', chg_modified:'modified', chg_deleted:'deleted',
+    retry_q:'Re-answer this question (other messages are untouched)', editmsg_q:'Edit only this message',
+        chg_created:'new', chg_modified:'modified', chg_deleted:'deleted',
     sp_changes:'Changes', sp_changes_h:'Review full file contents with add/del markers for this turn',
     sp_changes_empty:'No file changes in this turn (possibly all reverted)',
     sp_changes_open:'Open file',
@@ -3418,7 +3420,8 @@ function uMsg(q, idx, atts, ts) {
   const acts = document.createElement('div');
   acts.className = 'macts';
   acts.innerHTML =
-    '<button class="ib" data-ue="' + idx + '" title="' + t('editmsg') + '">' + ic('edit') + '</button>' +
+    '<button class="ib" data-ur="' + idx + '" title="' + t('retry_q') + '">' + ic('retry') + '</button>' +
+    '<button class="ib" data-ue="' + idx + '" title="' + t('editmsg_q') + '">' + ic('edit') + '</button>' +
     '<button class="ib" data-uc="' + idx + '" title="' + t('copy') + '">' + ic('copy') + '</button>' +
     '<button class="ib danger" data-ud="' + idx + '" title="' + t('delmsg') + '">' + ic('trash') + '</button>';
   d.append(b, acts);
@@ -5723,6 +5726,8 @@ sd.onclick = () => send();
 
 feed.addEventListener('click', e => {
   // ---- 用户消息 ----
+  const ur = e.target.closest('[data-ur]');
+  if (ur) { if (persisted(ur.closest('.u'))) retryUser(ur.closest('.u')); return; }
   const ue = e.target.closest('[data-ue]');
   if (ue) { if (persisted(ue.closest('.u'))) editUser(ue.closest('.u')); return; }
   const uc = e.target.closest('[data-uc]');
@@ -5850,25 +5855,93 @@ async function deleteMsg(el) {
  * tail is hidden locally only: the server history is truncated when the edited
  * message is actually sent, so canceling / switching away never loses messages.
  */
+/**
+ * 就地编辑一条用户消息：只改这一条的文本（PATCH 单条），不重新生成、
+ * 不删除、不改动其他任何消息。附件行原样保留。
+ */
 function editUser(el) {
   if (!el || busy) return;
-  if (pendingEdit) restorePendingEdit();
   const idx = el.dataset.mi;
   if (!conv || !conv.id || idx == null || idx === 'null') { toast(t('toast')); return; }
-  const c = el.querySelector('.ub').cloneNode(true);
-  c.querySelectorAll('.uatt').forEach(n => n.remove());
-  ta.value = c.innerText;
-  fit();
+  if (el.dataset.editing === '1') return;
+  const b = el.querySelector('.ub');
+  const orig = el.dataset.raw != null ? el.dataset.raw : b.innerText.trim();
+  // 文本行 = .ub 里非附件行的第一个块；附件行（.uatt）原样保留。
+  const txDiv = [...b.children].find(n => !n.classList.contains('uatt')) || b.lastElementChild;
+  if (!txDiv) return;
+  el.dataset.editing = '1';
+  const box = document.createElement('textarea');
+  box.className = 'tx';
+  box.value = orig;
+  box.style.cssText = 'width:100%;font:14px/1.6 var(--sans);resize:vertical;background:var(--input);color:var(--fg);border:1px solid var(--line);border-radius:10px;padding:8px 10px;outline:none';
+  const bar = document.createElement('div');
+  bar.className = 'macts';
+  bar.style.cssText = 'opacity:1;transform:none;justify-content:flex-start;margin-top:4px';
+  bar.innerHTML = '<button class="btn" data-save>' + t('save') + '</button>' +
+                  '<button class="btn ghost" data-cancel>' + t('close') + '</button>';
+  const freshText = v => {
+    const d = document.createElement('div');
+    d.textContent = noEmoji(v);
+    return d;
+  };
+  const autosize = () => {
+    box.style.height = 'auto';
+    box.style.height = Math.max(44, Math.min(box.scrollHeight + 2, Math.round(window.innerHeight * 0.5))) + 'px';
+  };
+  txDiv.replaceWith(box);
+  bar.style.width = '100%';
+  b.append(bar);
+  autosize();
+  box.focus();
+  box.addEventListener('input', autosize);
+
+  const finish = textDiv => {
+    box.replaceWith(textDiv);
+    bar.remove();
+    delete el.dataset.editing;
+  };
+  const save = async () => {
+    const v = box.value.trim();
+    if (!v) { toast(t('toast')); return; }
+    if (v === orig) { finish(freshText(orig)); return; }
+    try {
+      await api('/sessions/' + conv.id + '/messages/' + idx, {
+        method: 'PATCH',
+        body: { text: v }              // 不带 to：只改这一条
+      });
+      el.dataset.raw = v;
+      finish(freshText(v));
+    } catch (e) {
+      toast(e.message);
+    }
+  };
+  box.addEventListener('keydown', ev => {
+    if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)) { ev.preventDefault(); save(); }
+    if (ev.key === 'Escape') { ev.preventDefault(); finish(freshText(orig)); }
+  });
+  bar.querySelector('[data-save]').onclick = save;
+  bar.querySelector('[data-cancel]').onclick = () => finish(freshText(orig));
+}
+
+/**
+ * 重试一条用户提问：只影响它下方的 agent 回应 —— 追加一个新回答到会话
+ * 末尾，不删除、不改写任何既有消息。后端把原问题以 hidden 指令回灌并
+ * 以空 prompt 重跑模型。
+ */
+async function retryUser(el) {
+  if (!el || busy) return;
+  const idx = el.dataset.mi;
+  if (!conv || !conv.id || idx == null || idx === 'null') { toast(t('toast')); return; }
+  busy = true;
   sync();
-  ta.focus();
-  // 记住原始位置，DELETE 失败或用户按 Esc 时按原顺序插回。
-  const nodes = [el];
-  let n = el.nextElementSibling;
-  while (n) { const nx = n.nextElementSibling; nodes.push(n); n = nx; }
-  const parent = el.parentNode, anchor = el.previousElementSibling;
-  nodes.forEach(x => x.remove());
-  pendingEdit = { sid: conv.id, gen: convGen, from: +idx, nodes, parent, anchor };
-  toast(t('editmsg'));
+  try {
+    await api('/sessions/' + conv.id + '/messages/' + idx + '/retry', { method: 'POST' });
+    // 新回答由 SSE 驱动（turn.start → 流式增量），无需本地补画。
+  } catch (e) {
+    busy = false;
+    toast(e.message);
+    sync();
+  }
 }
 
 /**
@@ -6731,13 +6804,17 @@ async function openSession(id, focusMsg) {
       // 子代理完成通报（hidden）：渲染成回答上方的细标识行，不是普通气泡。
       // 标识行打断当前助手气泡 —— 后续内容属于唤醒轮的新回答。
       if (m.hidden) {
+        // 两类 hidden：子代理完成通报 → 渲染成回答上方的细标识行；
+        // 其他系统指令（重试引导等）→ 对用户完全不可见。
         const tx0 = normParts(m.parts).filter(p => p.k === 'text').map(p => p.text).join('\n');
         const line = (tx0.split('\n')[0] || '').replace(/[`*]/g, '').replace(/。\s*$/, '').trim();
         a = null; ab = null; aHasTool = false;
-        const wl = document.createElement('div');
-        wl.className = 'wakeline';
-        wl.textContent = line || (S.lang === 'zh' ? '子代理已完成工作' : 'Subagent finished');
-        feed.append(wl);
+        if (/已完成工作/.test(line)) {
+          const wl = document.createElement('div');
+          wl.className = 'wakeline';
+          wl.textContent = line || (S.lang === 'zh' ? '子代理已完成工作' : 'Subagent finished');
+          feed.append(wl);
+        }
         continue;
       }
       const parts = normParts(m.parts);
