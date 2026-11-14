@@ -1353,11 +1353,6 @@ body.dragging #main{outline:2px dashed var(--accent);outline-offset:-8px}
 .spdr:last-of-type{border-bottom:0}
 .spdcmd{margin-top:10px;padding:8px 10px;border-radius:8px;background:var(--hov);font:12px var(--mono);color:var(--fg2);overflow-x:auto;white-space:nowrap}
 .spdhint{margin:12px 0 0;color:var(--fg2);font-size:12px;line-height:1.6}
-/* 上下文用量条：贴在输入框上方，随 status 事件更新 */
-#ctxbar { height:3px; border-radius:2px; margin:10px 12px 0; background:rgba(128,128,128,.18); overflow:hidden; }
-#ctxbar i { display:block; height:100%; width:0%; background:var(--accent); transition:width .4s; }
-#ctxbar.warn i { background:#e0a03c; }
-#ctxbar.hot i { background:#d4574c; }
 
 /* Wave-2：MCP / Hooks / Profiles 行 */
 .mcprow { display:flex; gap:8px; align-items:center; border:1px solid var(--line); border-radius:10px; padding:8px 10px; margin:6px 0; }
@@ -1423,7 +1418,6 @@ body.dragging #main{outline:2px dashed var(--accent);outline-offset:-8px}
           <div id="qlist"></div>
         </div>
         <div class="box">
-          <div id="ctxbar" hidden><i></i></div>
           <div id="sl"></div>
           <div id="atts"></div>
           <textarea id="ta" rows="1" autofocus></textarea>
@@ -1634,7 +1628,7 @@ const L = {
     maxSteps:'单轮步数上限', maxStepsH:'一轮对话最多执行的工具步数，达到后收尾并说明',
     askAuto:'提问自动裁决', askAutoH:'ask_user 提问 120 秒无应答时自动选第一项（适合无人值守/定时任务）',
     keepAwake:'运行中阻止休眠', keepAwakeH:'turn 运行期间阻止系统进入睡眠',
-    ctxWarn:'上下文告警阈值', ctxWarnH:'输入框上方用量条达到该百分比时变警示色',
+    ctxWarn:'上下文告警阈值', ctxWarnH:'状态栏的上下文占用百分比达到该值时变警示色（+10% 转红色）',
     notify:'后台完成通知', notifySound:'通知提示音', notifyH:'页面在后台时，一轮结束弹系统通知',
     notifySoundH:'通知伴随一声短提示音（需要允许通知）',
     autoArchive:'自动归档旧会话', autoArchiveH:'超过所选天数未活跃的非置顶会话自动归档（服务启动时执行）',
@@ -1838,7 +1832,7 @@ const L = {
     maxSteps:'Max steps per turn', maxStepsH:'Tool steps a single turn may take before wrapping up',
     askAuto:'Auto-resolve questions', askAutoH:'After 120s without an answer, pick the first option (good for unattended runs)',
     keepAwake:'Keep system awake', keepAwakeH:'Prevent system sleep while a turn is running',
-    ctxWarn:'Context warn threshold', ctxWarnH:'The usage bar above the input turns warning-colored at this percent',
+    ctxWarn:'Context warn threshold', ctxWarnH:'The status-bar context percentage turns warning-colored at this percent (red at +10%)',
     notify:'Background notifications', notifySound:'Notification sound', notifyH:'System notification when a turn finishes while the page is hidden',
     notifySoundH:'Play a short beep with the notification (permission required)',
     autoArchive:'Auto-archive old chats', autoArchiveH:'Archive non-pinned sessions idle beyond the selected days (runs at startup)',
@@ -4838,14 +4832,12 @@ function applyStatus(ev) {
   const used = cx.used || 0, limit = cx.limit || 128000;
   const pct = limit ? Math.round((used / limit) * 100) : 0;
   $('#sb-ctx-tx').textContent = pct + '%';
-  // 上下文用量条：告警阈值来自设置（默认 80%），+10 进入红色
+  // 上下文告警色（设置 → Agent 行为 → 告警阈值）：状态栏百分号胶囊变色
   {
-    const bar = $('#ctxbar');
-    if (bar) {
-      bar.hidden = pct <= 0;
-      bar.firstElementChild.style.width = Math.min(100, pct) + '%';
+    const el = $('#sb-ctx-tx');
+    if (el) {
       const warn = S.ctxWarnPct || 80;
-      bar.className = pct >= warn + 10 ? 'hot' : pct >= warn ? 'warn' : '';
+      el.style.color = pct >= warn + 10 ? '#d4574c' : pct >= warn ? '#e0a03c' : '';
     }
   }
   $('#p-ctx-pct').textContent = pct + '%';
