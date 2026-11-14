@@ -273,6 +273,11 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/git/diff", get(git_diff))
         .route("/browser/state", get(browser_state))
         .route("/browser/navigate", post(browser_navigate))
+        // 内置浏览器操作：后退 / 前进 / 刷新 / 侧栏点击穿透
+        .route("/browser/back", post(browser_history_go::<-1>))
+        .route("/browser/forward", post(browser_history_go::<1>))
+        .route("/browser/reload", post(browser_reload))
+        .route("/browser/click", post(browser_click))
         .route("/term/exec", post(term_exec))
         // 后台终端（右上角悬浮窗）：/term/exec 是单次同步命令，这一组是常驻
         // 会话——启动即返回、可看输出、可终止、刷新后能重新列出来。
@@ -2749,6 +2754,49 @@ async fn git_diff(
 }
 
 /// GET /api/browser/state — the controlled browser's current page.
+async fn browser_history_go<const DELTA: i32>(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    match state.agent.computer.history_go(DELTA).await {
+        Ok(()) => Json(json!({"ok": true})).into_response(),
+        Err(e) => server_error(e),
+    }
+}
+
+async fn browser_reload(State(state): State<SharedState>, headers: HeaderMap) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    match state.agent.computer.reload().await {
+        Ok(()) => Json(json!({"ok": true})).into_response(),
+        Err(e) => server_error(e),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct BrowserClickReq {
+    x: f64,
+    y: f64,
+}
+
+async fn browser_click(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(r): Json<BrowserClickReq>,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    match state.agent.computer.click_at(r.x, r.y).await {
+        Ok(()) => Json(json!({"ok": true})).into_response(),
+        Err(e) => server_error(e),
+    }
+}
+
 /// GET /browser-boot — 内置浏览器 app 窗口的引导页：--app= 需要真实 URL，
 /// about:blank 会被 Chromium 无视而回退普通窗口。页面本身是惰性占位。
 async fn browser_boot() -> Response {

@@ -194,6 +194,42 @@ impl ComputerBridge {
             .unwrap_or_default()
     }
 
+    /// 历史后退/前进（delta = -1 | 1）：Page.getNavigationHistory 拿条目 id
+    /// 再 navigateToHistoryEntry——比组合键可靠（无头下按键也无焦点问题）。
+    pub async fn history_go(&self, delta: i32) -> Result<(), HarnessError> {
+        let r = self.cmd("Page.getNavigationHistory", json!({})).await?;
+        let idx = r.get("currentIndex").and_then(|v| v.as_i64()).unwrap_or(0);
+        let entries = r
+            .get("entries")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let target = idx + delta as i64;
+        if target < 0 || target as usize >= entries.len() {
+            return Err(HarnessError::Tool(
+                if delta < 0 { "没有更早的历史了" } else { "没有更晚的历史了" }.into(),
+            ));
+        }
+        let entry_id = entries[target as usize]
+            .get("id")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(-1);
+        self.cmd("Page.navigateToHistoryEntry", json!({"entryId": entry_id}))
+            .await?;
+        Ok(())
+    }
+
+    /// 刷新当前页。
+    pub async fn reload(&self) -> Result<(), HarnessError> {
+        self.cmd("Page.reload", json!({"ignoreCache": false})).await?;
+        Ok(())
+    }
+
+    /// 侧栏点击穿透：把面板截图上的坐标换算成的视口物理坐标真实点击。
+    pub async fn click_at(&self, x: f64, y: f64) -> Result<(), HarnessError> {
+        self.click_xy(x, y, "left", 1).await
+    }
+
     /// Screenshot of the current page, base64-encoded PNG.
     pub async fn screenshot_png(&self) -> Result<String, HarnessError> {
         self.screenshot_raw().await

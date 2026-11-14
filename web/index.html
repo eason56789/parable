@@ -826,6 +826,19 @@ body.spmax #sdp{position:fixed;inset:46px 0 0 0;width:100vw;max-width:none;z-ind
 .spbar input:focus{border-color:var(--fg2)}
 .spbtn{border:1px solid var(--line);background:var(--input);color:var(--fg);border-radius:8px;padding:6px 11px;font:12.5px var(--sans);cursor:pointer;flex:none;transition:background-color calc(.2s * var(--animd))}
 .spbtn:hover{background:var(--hov)}
+/* 内置浏览器工具栏：导航钮 + 药丸地址栏 */
+.spbnav{display:flex;align-items:center;gap:6px;padding:8px 10px;border-bottom:.5px solid var(--line);position:sticky;top:0;background:var(--bg);z-index:2}
+.spnav{border:1px solid var(--line);background:var(--input);color:var(--fg2);border-radius:8px;padding:6px 8px;cursor:pointer;flex:none;display:grid;place-items:center;transition:background-color calc(.2s * var(--animd)),color calc(.2s * var(--animd))}
+.spnav:hover{background:var(--hov);color:var(--fg)}
+.spnav:active{transform:scale(.94)}
+.spnav.pri{color:var(--accent);border-color:var(--accent)}
+.spnav svg{width:14px;height:14px}
+#spb-url{flex:1;min-width:0;padding:7px 14px;border:1.5px solid var(--line);border-radius:999px;background:var(--input);color:var(--fg);font:12.5px var(--mono);outline:0;transition:border-color .15s,box-shadow .15s}
+#spb-url:focus{border-color:var(--accent);box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 18%,transparent)}
+.spbhint{padding:6px 10px;color:var(--fg2);font-size:11px;opacity:.75}
+.spbtxt{margin:6px 10px 10px}
+.spbtxt summary{cursor:pointer;color:var(--fg2);font-size:11.5px}
+.spbtxt pre{margin-top:6px;white-space:pre-wrap;word-break:break-word;font-size:11px;opacity:.7;max-height:220px;overflow:auto}
 .spbtn.pri{background:var(--fg);color:var(--bg);border-color:var(--fg)}
 .spbtn:disabled{opacity:.45;cursor:default}
 /* 文件面板 */
@@ -1776,14 +1789,15 @@ const L = {
     auto_no_chat:'当前没有会话，不能投递到当前对话', disc:'Parable 是 AI，可能会出错，请核实重要内容',
     sp_title:'新标签页', sp_title_h:'选择要打开的工具面板。',
     sp_files:'文件', sp_files_h:'浏览工作区目录与文件。',
-    sp_browser:'内置浏览器', sp_browser_h:'Parable 自有浏览器窗口——地址栏与 agent 操作共用同一视图，实况刷新。',
+    sp_browser:'内置浏览器', sp_browser_h:'Parable 自有浏览器——地址栏导航/后退/前进/刷新/点击截图皆与 agent 操作共用同一视图，实况刷新。',
     sp_term:'终端', sp_term_h:'运行命令和查看输出。',
     sp_review:'审查', sp_review_h:'查看代码变更与差异。',
     sp_deploy:'部署', sp_deploy_h:'查看站点、部署记录和用量。',
     sp_sidechat:'辅助对话', sp_sidechat_h:'在侧边面板中继续对话。',
     sp_open:'打开', sp_close:'关闭', sp_max:'全屏', sp_unmax:'退出全屏',
     sp_empty_fs:'选择一个文件查看内容。', sp_empty_git:'没有需要审查的变更。',
-    sp_empty_browser:'还没有打开页面。', sp_empty_term:'在下方输入命令。',
+    sp_empty_browser:'还没有打开页面。', spb_ph:'输入网址，如 example.com', spb_back:'后退', spb_fwd:'前进', spb_rl:'刷新',
+    spb_hint:'点击截图可直接操作页面；agent 的操作会实时反映在这里。', spb_text:'页面文本', sp_empty_term:'在下方输入命令。',
     sp_not_repo:'当前工作区不是 Git 仓库。', sp_no_files:'没有匹配的文件。',
     sp_run:'运行', sp_path_hint:'工作区路径', sp_search_hint:'按文件名搜索…',
     sp_deploy_note:'',
@@ -1986,14 +2000,15 @@ const L = {
     auto_no_chat:'No active chat to deliver to', disc:'Parable is AI and can make mistakes. Please double-check important content',
     sp_title:'New tab', sp_title_h:'Choose a tool panel to open.',
     sp_files:'Files', sp_files_h:'Browse workspace files and folders.',
-    sp_browser:'Built-in browser', sp_browser_h:'A Parable-owned browser window — the address bar and agent actions share the same view, live-refreshed.',
+    sp_browser:'Built-in browser', sp_browser_h:'A Parable-owned browser — address bar, back/forward/reload and click-on-screenshot all share the same view with the agent, live-refreshed.',
     sp_term:'Terminal', sp_term_h:'Run commands and see their output.',
     sp_review:'Review', sp_review_h:'Inspect code changes and diffs.',
     sp_deploy:'Deploy', sp_deploy_h:'Review sites, deploy records and usage.',
     sp_sidechat:'Side conversation', sp_sidechat_h:'Keep chatting in the side panel.',
     sp_open:'Open', sp_close:'Close', sp_max:'Expand', sp_unmax:'Exit full screen',
     sp_empty_fs:'Pick a file to see its contents.', sp_empty_git:'No changes to review.',
-    sp_empty_browser:'No page open yet.', sp_empty_term:'Type a command below.',
+    sp_empty_browser:'No page open yet.', spb_ph:'Enter a URL, e.g. example.com', spb_back:'Back', spb_fwd:'Forward', spb_rl:'Reload',
+    spb_hint:'Click the screenshot to interact with the page; agent actions show up here live.', spb_text:'Page text', sp_empty_term:'Type a command below.',
     sp_not_repo:'The workspace is not a Git repository.', sp_no_files:'No matching files.',
     sp_run:'Run', sp_path_hint:'Workspace path', sp_search_hint:'Search files by name…',
     sp_deploy_note:'',
@@ -10421,27 +10436,45 @@ async function spGitDiff(tab, path) {
 /* ------------------------------------------------------------ 浏览器面板 */
 
 function spRenderBrowser(host, tab) {
-  host.innerHTML = '<div class="spbar"><input id="spb-url" placeholder="https://" spellcheck="false" autocomplete="off">' +
-    '<button class="spbtn pri" id="spb-go">' + esc(t('sp_run')) + '</button></div>' +
-    '<div class="spbrow" id="spb-body"><div class="spempty">' + esc(t('sp_empty_browser')) + '</div></div>';
+  // 工具栏：后退 / 前进 / 刷新 + 药丸地址栏 + 前往
+  host.innerHTML = '<div class="spbnav">' +
+    '<button class="spnav" id="spb-back" title="' + esc(t('spb_back')) + '">' + ic('back') + '</button>' +
+    '<button class="spnav" id="spb-fwd" title="' + esc(t('spb_fwd')) + '">' + ic('fwd') + '</button>' +
+    '<button class="spnav" id="spb-rl" title="' + esc(t('spb_rl')) + '">' + ic('refresh') + '</button>' +
+    '<input id="spb-url" placeholder="' + esc(t('spb_ph')) + '" spellcheck="false" autocomplete="off">' +
+    '<button class="spnav pri" id="spb-go" title="' + esc(t('sp_run')) + '">' + ic('fwd') + '</button>' +
+    '</div>' +
+    '<div class="spbrow" id="spb-body"><div class="spempty">' + esc(t('sp_empty_browser')) + '</div></div>' +
+    '<div class="spbhint">' + esc(t('spb_hint')) + '</div>';
   const url = host.querySelector('#spb-url');
   url.value = tab.st.url || '';
+  const nav = async (path, body) => {
+    try {
+      await api(path, { method: 'POST', body: body || {} });
+      setTimeout(() => spBrowserState(tab), 900);
+    } catch (e) { toast(e.message); }
+  };
+  host.querySelector('#spb-back').onclick = () => nav('/browser/back');
+  host.querySelector('#spb-fwd').onclick = () => nav('/browser/forward');
+  host.querySelector('#spb-rl').onclick = () => nav('/browser/reload');
   const go = host.querySelector('#spb-go');
-  go.onclick = async () => {
-    const u = url.value.trim();
+  const doGo = async () => {
+    let u = url.value.trim();
     if (!u) return;
+    // 补协议：用户习惯裸域名
+    if (!/^https?:\/\//i.test(u)) u = 'https://' + u;
     go.disabled = true;
     try {
       await api('/browser/navigate', { method: 'POST', body: { url: u } });
       tab.st.url = u;
-      // 给浏览器一点时间加载页面再取状态。
       setTimeout(() => spBrowserState(tab), 1200);
     } catch (e) {
       toast(e.message);
     }
     go.disabled = false;
   };
-  url.onkeydown = e => { if (e.key === 'Enter') go.click(); };
+  go.onclick = doGo;
+  url.onkeydown = e => { if (e.key === 'Enter') doGo(); };
   if (tab.st.url) spBrowserState(tab);
   // 实况轮询：内置浏览器是 agent 与用户共用的视图，agent 操作期间面板
   // 跟随刷新。3s 一次（BitBlt + PNG ~100ms，常驻开销可接受）。
@@ -10476,7 +10509,20 @@ async function spBrowserState(tab) {
   const img = res.screenshot
     ? '<img src="data:image/png;base64,' + esc(res.screenshot) + '" alt="">'
     : '';
-  box.innerHTML = img + (res.text ? '<pre>' + esc(res.text) + '</pre>' : '');
+  box.innerHTML = img + (res.text ? '<details class="spbtxt"><summary>' + esc(t('spb_text')) + '</summary><pre>' + esc(res.text) + '</pre></details>' : '');
+  // 点击穿透：截图坐标 → 视口物理坐标（缩放截图按显示尺寸换算）
+  const im = box.querySelector('img');
+  if (im) im.onclick = async e => {
+    const r = im.getBoundingClientRect();
+    const x = (e.clientX - r.left) / r.width * im.naturalWidth;
+    const y = (e.clientY - r.top) / r.height * im.naturalHeight;
+    im.style.opacity = '.6';
+    try {
+      await api('/browser/click', { method: 'POST', body: { x, y } });
+      setTimeout(() => spBrowserState(tab), 900);
+    } catch (e2) { toast(e2.message); }
+    im.style.opacity = '';
+  };
 }
 
 /* ------------------------------------------------------------ 终端面板 */
