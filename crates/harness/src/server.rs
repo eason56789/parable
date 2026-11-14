@@ -237,6 +237,8 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/skills/{scope}/{id}", get(get_skill).delete(delete_skill))
         .route("/skills/{scope}/{id}/enabled", post(toggle_skill))
         .route("/agents/{id}/interrupt", post(interrupt_agent))
+        // 向子代理发消息：运行中=steer 注入；已收尾=在其子会话续开新轮
+        .route("/agents/{id}/say", post(agent_say))
         // 该会话当前是否还有 turn 在跑。前端用它核对"我以为在生成"的状态：
         // 如果服务端说没有在跑，前端就复位 busy（事件丢失时的自愈）。
         .route("/turn/running", get(turn_running))
@@ -2446,6 +2448,54 @@ async fn interrupt_agent(
     }
     let ok = state.subagents.interrupt(&id).await;
     Json(json!({"interrupted": ok})).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct AgentSayReq {
+    text: String,
+    #[serde(default)]
+    attachments: Vec<crate::agent::Attachment>,
+    /// 与 /api/chat 的字段一致：空则按全局配置。
+    #[serde(default)]
+    model: String,
+    #[serde(default)]
+    permission_mode: String,
+    #[serde(default)]
+    thinking_level: Option<u32>,
+    #[serde(default)]
+    plan_mode: bool,
+}
+
+/// POST /api/agents/{id}/say — 向子代理发消息。uid=197610(eason) gid=197121 groups=197121 接受子代理 id 或其
+/// 子会话 id（前端面板手头只有会话 id）。运行中注入 steering，已收尾
+/// 则续开新轮（子会话历史完整保留）。
+async fn agent_say(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(r): Json<AgentSayReq>,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    let mut opts = TurnOptions::default();
+    if !r.model.is_empty() {
+        opts.model_sel = r.model.clone();
+    }
+    if !r.permission_mode.is_empty() {
+        opts.permission_mode = r.permission_mode.clone();
+    }
+    if let Some(l) = r.thinking_level {
+        opts.thinking_level = l;
+    }
+    opts.plan_mode = r.plan_mode;
+    match state.subagents.say(&id, &r.text, r.attachments, opts).await {
+        Ok((agent_id, session_id, delivered)) => Json(json!({
+            "ok": true, "agentId": agent_id, "sessionId": session_id, "delivered": delivered,
+        }))
+        .into_response(),
+        Err(e) => server_error(e),
+    }
 }
 
 // ------------------------------------------------------------------ agent teams

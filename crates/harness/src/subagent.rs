@@ -410,35 +410,67 @@ impl SubagentService {
         let cancel = tokio_util::sync::CancellationToken::new();
         self.running.lock().await.insert(child_id.clone(), cancel.clone());
 
+        // 子 turn 启动：await 的只是 start_turn 的「派发」本身（实际轮在它
+        // 内部的 spawned task 里跑），这里不持有 opaque future，无 E0391。
+        let started = if let Some(opts) = child_opts.clone() {
+            starter.start_child_opts(&child_session, &req.task, opts).await
+        } else {
+            starter.start_child(&child_session, &req.task, &req.model).await
+        };
+        let shared_store = self.store.clone().unwrap_or_else(|| {
+            Arc::new(crate::session::SessionStore::new())
+        });
+        self.spawn_watcher(
+            child_id.clone(),
+            name.clone(),
+            req.label.clone(),
+            parent_session.to_string(),
+            child_session.clone(),
+            cancel,
+            req.delivery.unwrap_or(Delivery::Parent),
+            started,
+            self.store.clone(),
+        );
+
+        Ok(child_id)
+    }
+
+    /// 子代理收尾监视器：轮询子 turn 状态，收尾后更新目录、唤醒等待者
+    /// （agent_wait）、向父会话投递结果。spawn 与 say（续聊）共用。
+    ///
+    /// `started` 携带启动阶段的 `Result`：start_turn 失败时子代理也要落到
+    /// Failed 终态，而不是永远 Running。
+    fn spawn_watcher(
+        &self,
+        cid: String,
+        cname: String,
+        label: String,
+        parent_sid: String,
+        child_sid: String,
+        cancel: tokio_util::sync::CancellationToken,
+        delivery: Delivery,
+        started: Result<String, HarnessError>,
+        shared_store: Option<crate::session::SharedStore>,
+    ) {
         let cat = self.catalog.clone();
         let hub = self.hub.clone();
-        let cid = child_id.clone();
-        let cname = name.clone();
-        let label = req.label.clone();
-        let task = req.task.clone();
-        let model = req.model.clone();
-        let parent_sid = parent_session.to_string();
-        let child_sid = child_session.clone();
-        let delivery = req.delivery.unwrap_or(Delivery::Parent);
         let running = self.running.clone();
         let runtime = self.runtime.clone();
         let outcomes = self.outcomes.clone();
-
         tokio::spawn(async move {
+            let res = started;
             // A child turn is a normal turn on its own session.
             // 一律经由 trait 对象（dyn TurnStarter）启动，保持 future 类型
             // 擦除：直接 await AgentRuntime::start_turn 会让它的 opaque
             // future 经 tokio::spawn 的 Send 检查递归套回自身（E0391）。
-            let res = if let Some(opts) = child_opts.clone() {
-                starter.start_child_opts(&child_sid, &task, opts).await
-            } else {
-                starter.start_child(&child_sid, &task, &model).await
-            };
+            // 子 turn 已由调用方（spawn / say）启动；这里只负责监视收尾。
 
             // 等子 turn 收尾。注入 runtime 后以 `is_running` 为准——流式输出
             // 中途的 assistant 消息也可能带非空 Text，不能只看最后一条消息。
             const POLL_MS: u64 = 500;
-            const MAX_POLLS: u64 = 600; // 600 × 500ms = 300s 超时
+            // 1800s 上限：子代理常被派去干长活（大型重构/多文件检索），
+            // 300s 会把正当运行中的任务误杀成 Failed。仍保留上限防孤儿。
+            const MAX_POLLS: u64 = 3600;
             let mut final_text = String::new();
             let mut tool_calls_seen: u64 = 0;
             let mut timed_out = false;
@@ -502,7 +534,7 @@ impl SubagentService {
                         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                     }
                 }
-                (ChildStatus::Failed, Some("child agent timed out after 300s".to_string()))
+                (ChildStatus::Failed, Some(format!("child agent timed out after {}s", MAX_POLLS * POLL_MS / 1000)))
             } else if cancel.is_cancelled() {
                 (ChildStatus::Cancelled, Some("cancelled by parent".to_string()))
             } else if let Err(e) = res {
@@ -587,8 +619,91 @@ impl SubagentService {
                 );
             }
         });
+    }
 
-        Ok(child_id)
+    /// 向子代理说话。运行中 → 注入 steering（下一个模型步边界生效）；
+    /// 已收尾 → 在其子会话上续开新轮（历史完整保留），目录状态复活并
+    /// 重挂收尾监视器。父会话收到 `subagent.say` 事件。
+    ///
+    /// 带附件时 steer 自动退化为 queue（本轮结束后作为下一轮送达）——
+    /// enqueue_input 内部处理该退化与立即 drain，附件与 opts 全程透传。
+    ///
+    /// `agent` 接受子代理 id 或其子会话 id（前端手头只有会话 id）。
+    pub async fn say(
+        &self,
+        agent: &str,
+        text: &str,
+        attachments: Vec<crate::agent::Attachment>,
+        opts: crate::agent::TurnOptions,
+    ) -> Result<(String, String, String), HarnessError> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err(HarnessError::Other("text must not be empty".into()));
+        }
+        let Some(child) = self.resolve_any(agent).await else {
+            return Err(HarnessError::Other(format!("no such agent: {agent}")));
+        };
+        let Some(rt) = self.runtime.read().await.clone() else {
+            return Err(HarnessError::Other("agent runtime not ready".into()));
+        };
+        let sid = child.session_id.clone();
+        let was_running = matches!(child.status, ChildStatus::Running) && rt.is_running(&sid).await;
+        // steer 失效（子 turn 恰好刚结束）会自动升级为 queue 并立刻 drain 成
+        // 新轮 —— enqueue_input 内部已处理该竞态。
+        let item = rt.enqueue_input(&sid, text, attachments, opts, "steer").await?;
+        if !was_running {
+            self.revive(&child).await;
+        }
+        self.hub.publish(
+            &child.parent_session,
+            "subagent.say",
+            json!({"agentId": child.id, "name": child.name, "label": child.label, "text": text}),
+        );
+        Ok((child.id, sid, item.kind))
+    }
+
+    /// 按 id 或子会话 id 解析子代理。
+    async fn resolve_any(&self, agent: &str) -> Option<Child> {
+        if let Some(c) = self.catalog.get(agent).await {
+            return Some(c);
+        }
+        self.catalog.find_by_session(agent).await
+    }
+
+    /// 复活已收尾的子代理：清终态、重挂完成通道与取消令牌、重启监视器。
+    async fn revive(&self, child: &Child) {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        self.running
+            .lock()
+            .await
+            .insert(child.id.clone(), cancel.clone());
+        let (tx, _rx) = watch::channel(None);
+        self.outcomes.write().await.insert(child.id.clone(), tx);
+        self.catalog.update(&child.id, |c| {
+            c.status = ChildStatus::Running;
+            c.ended_at = None;
+            c.error = None;
+        })
+        .await;
+        self.hub.publish(
+            &child.parent_session,
+            "subagent.start",
+            json!({"agentId": child.id, "name": child.name, "label": child.label}),
+        );
+        let shared_store = self.store.clone().unwrap_or_else(|| {
+            Arc::new(crate::session::SessionStore::new())
+        });
+        self.spawn_watcher(
+            child.id.clone(),
+            child.name.clone(),
+            child.label.clone(),
+            child.parent_session.clone(),
+            child.session_id.clone(),
+            cancel,
+            Delivery::Parent,
+            Ok(String::new()),
+            self.store.clone(),
+        );
     }
 
     /// Wait for one child of `parent_session`'s tree to finish.

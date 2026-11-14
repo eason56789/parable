@@ -939,7 +939,9 @@ body.spmax #sdp{position:fixed;inset:46px 0 0 0;width:100vw;max-width:none;z-ind
 .spag .rl,.spag .ro{font:11px var(--sans);color:var(--fg2);border:.5px solid var(--line);border-radius:20px;padding:1px 7px;white-space:nowrap}
 .spag .ro{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 40%,transparent)}
 .spag .tk{flex:1 0 100%;font:12px/1.5 var(--sans);color:var(--fg2);white-space:pre-wrap;word-break:break-word;max-height:4.5em;overflow:hidden}
-.spagm{flex:1;min-height:0;overflow:auto;padding:14px 16px 48px}
+.spagm{flex:1;min-height:0;overflow:auto;padding:14px 16px 10px}
+#spbody .spag .box{width:calc(100% - 28px);max-width:none;margin:0 auto 12px}
+#spbody .spag .box textarea{height:24px;max-height:110px;font:13px/1.5 var(--sans)}
 .spagm .msg{animation:none}
 .spagm .a{font-size:calc(var(--fs) - 1px)}
 .dag{cursor:pointer}
@@ -1850,7 +1852,7 @@ const L = {
     dep_build:'构建入口', dep_build_none:'未检测到构建配置', dep_terms:'后台终端',
     dep_hint:'这里只展示工作区的真实状态：仓库分支、未提交改动、检测到的构建命令，以及正在跑的后台终端。',
     sp_perm:'需要你的许可', sp_sidechat_placeholder:'给辅助对话发消息…',
-    sp_agent:'后台智能体', sp_agent_h:'子智能体的完整对话，只读；在这里不能发消息。', sp_agent_empty:'这个智能体还没有输出。', sp_agent_ro:'只读',
+    sp_agent:'后台智能体', sp_agent_h:'子智能体的完整对话，可在下方输入框与它对话。', sp_agent_empty:'这个智能体还没有输出。',
     g:['夜深了，','早上好，','下午好，','晚上好，'],
     chips:['写作','学习','编程','生活','Parable 的选择'],
     cp:['帮我写一封措辞得体的邮件','用通俗的话讲讲量子纠缠','帮我修个 bug','周末在家做点什么好','给我一个惊喜'],
@@ -2068,7 +2070,7 @@ const L = {
     dep_build:'Build entry', dep_build_none:'no build config found', dep_terms:'Terminals',
     dep_hint:'Real workspace state only: branch, uncommitted changes, the detected build command and running background terminals.',
     sp_perm:'Needs your permission', sp_sidechat_placeholder:'Message the side conversation…',
-    sp_agent:'Background agent', sp_agent_h:'Full sub-agent transcript — read only, you cannot send messages here.', sp_agent_empty:'This agent has not produced output yet.', sp_agent_ro:'read-only',
+    sp_agent:'Background agent', sp_agent_h:'Full sub-agent transcript — message it from the input box below.', sp_agent_empty:'This agent has not produced output yet.',
     g:['Burning the midnight oil, ','Good morning, ','Good afternoon, ','Good evening, '],
     chips:['Write','Learn','Code','Life stuff','Parable’s choice'],
     cp:['Help me write a polite email','Explain quantum entanglement simply','Help me fix a bug','What to do at home this weekend','Surprise me'],
@@ -11566,15 +11568,27 @@ async function spAgentFetch(tab) {
   body.scrollTop = atBottom ? body.scrollHeight : keep;
 }
 
-/** 侧栏里的智能体对话：头部信息 + 只读消息流。 */
+/** 侧栏里的智能体对话：头部信息 + 消息流 + 输入框（与主对话/辅助对话同一套）。 */
 function spRenderAgent(host, tab) {
   const st = tab.st;
+  st.atts = st.atts || [];
   host.innerHTML = '<div class="spag"><div class="spagh">' +
-    '<span class="nm"></span><span class="rl"></span><span class="ro"></span>' +
-    '<div class="tk"></div></div><div class="spagm"></div></div>';
+    '<span class="nm"></span><span class="rl"></span>' +
+    '<div class="tk"></div></div><div class="spagm"></div>' +
+    '<div class="box spag-box">' +
+      '<div id="spa-atts"></div>' +
+      '<textarea id="spa-in" rows="1" placeholder="' + esc((S.lang === 'zh' ? '回复 ' : 'Reply to ') + (st.name || 'agent') + '…') + '"></textarea>' +
+      '<div class="tools">' +
+        '<button class="ib" id="spa-att" title="' + esc(S.lang === 'zh' ? '添加附件' : 'Add attachment') + '">' + ic('clip') + '</button>' +
+        '<button class="ms" id="spa-pm">' + ic('tune') + '<span id="spa-pml"></span></button>' +
+        '<span class="fl"></span>' +
+        '<button class="ms" id="spa-lv"><span id="spa-lvl"></span>' + ic('chev') + '</button>' +
+        '<button class="ms" id="spa-ml"><span id="spa-mltx"></span>' + ic('chev') + '</button>' +
+        '<button class="send" id="spa-send"></button>' +
+      '</div>' +
+    '</div></div>';
   host.querySelector('.spag .nm').textContent = st.name || st.sid;
   host.querySelector('.spag .rl').textContent = st.status || '';
-  host.querySelector('.spag .ro').textContent = t('sp_agent_ro');
   host.querySelector('.spag .tk').textContent = st.task || '';
   const body = host.querySelector('.spagm');
   if (st.msgs) {
@@ -11584,6 +11598,164 @@ function spRenderAgent(host, tab) {
     body.innerHTML = '<div class="spempty">' + esc(st.err || t('sp_agent_empty')) + '</div>';
     spAgentFetch(tab);
   }
+  spAgentBind(host, tab);
+  spAgentChrome(host, tab);
+  spAgentAtts(host, tab);
+}
+
+/** 输入区状态同步：与 spSideChrome 同构（模型/权限/思考档位/发送态）。 */
+function spAgentChrome(host, tab) {
+  if (!host || !tab) return;
+  if (host.id === 'spbody' && tab.id !== SP.active) return;
+  const st = tab.st;
+  const pml = host.querySelector('#spa-pml');
+  if (pml) pml.textContent = t('p_' + S.perm);
+  const mtx = host.querySelector('#spa-mltx');
+  if (mtx) {
+    mtx.textContent = modelLabel();
+    mtx.parentElement.classList.toggle('todo', !modelOk());
+  }
+  const lvx = host.querySelector('#spa-lvl');
+  if (lvx) lvx.textContent = t('l' + S.lvl);
+  const sd = host.querySelector('#spa-send');
+  const inp = host.querySelector('#spa-in');
+  if (sd && inp) {
+    sd.innerHTML = ic(st.sending ? 'stop' : 'send');
+    sd.disabled = !st.sending && !inp.value.trim() && !(st.atts || []).length;
+  }
+}
+
+/** 输入区绑定：自适应高度 / Enter 发送 / 模型与档位菜单 / 附件上传。 */
+function spAgentBind(host, tab) {
+  const st = tab.st;
+  const inp = host.querySelector('#spa-in');
+  const fit = () => { inp.style.height = 'auto'; inp.style.height = Math.min(150, inp.scrollHeight || 24) + 'px'; };
+  inp.addEventListener('input', () => { fit(); spAgentChrome(host, tab); });
+  inp.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); spAgentSend(host, tab); }
+  });
+  host.querySelector('#spa-send').onclick = () => spAgentSend(host, tab);
+  // 与辅助对话同一套浮动菜单：模型分组下拉 / 权限模式 / 思考档位。
+  host.querySelector('#spa-ml').onclick = ev => {
+    ev.stopPropagation();
+    pkRenderInto(floatMenu(ev.currentTarget));
+  };
+  host.querySelector('#spa-pm').onclick = ev => {
+    ev.stopPropagation();
+    pickMenu(ev.currentTarget, [{
+      title: t('permT'),
+      items: PK.map(k => ({ v: k, label: t('p_' + k), sub: t('d_' + k), on: S.perm === k }))
+    }], v => {
+      S.perm = v;
+      apply();
+      tpRender();
+      renderMM();
+      spAgentChrome(host, tab);
+    });
+  };
+  host.querySelector('#spa-lv').onclick = ev => {
+    ev.stopPropagation();
+    pickMenu(ev.currentTarget, [{
+      title: t('lvlT'),
+      items: [0, 1, 2, 3].map(n => ({ v: n, label: t('l' + n), on: S.lvl === n }))
+    }], v => {
+      S.lvl = +v;
+      apply();
+      renderMM();
+      spAgentChrome(host, tab);
+    });
+  };
+  // 附件走与主输入框同一个上传接口，落在本标签自己的 st.atts 里。
+  const fi = document.createElement('input');
+  fi.type = 'file'; fi.multiple = true; fi.style.display = 'none';
+  host.append(fi);
+  host.querySelector('#spa-att').onclick = () => fi.click();
+  fi.onchange = () => { spAgentAddFiles(host, tab, fi.files); fi.value = ''; };
+  fit();
+}
+
+function spAgentAtts(host, tab) {
+  if (!host || !tab) return;
+  if (host.id === 'spbody' && tab.id !== SP.active) return;
+  const el = host.querySelector('#spa-atts');
+  if (!el) return;
+  const st = tab.st;
+  el.innerHTML = (st.atts || []).map((a, i) =>
+    '<span class="att' + (a.loading ? ' upl' : '') + '">' + ic('file') + '<b>' + esc(a.name) + '</b>' +
+    (a.loading ? '<span class="upltxt">…</span>' : '') +
+    '<span class="x" data-sx="' + i + '">×</span></span>').join('');
+  el.querySelectorAll('[data-sx]').forEach(x => {
+    x.onclick = () => { st.atts.splice(+x.dataset.sx, 1); spAgentAtts(host, tab); spAgentChrome(host, tab); };
+  });
+}
+
+async function spAgentAddFiles(host, tab, files) {
+  const st = tab.st;
+  for (const f of [...files]) {
+    if ((st.atts || []).length >= 6) break;
+    const att = { name: f.name, size: f.size, path: '', loading: true };
+    st.atts.push(att);
+    spAgentAtts(host, tab);
+    try {
+      const res = await fetch('/api/attachments?name=' + encodeURIComponent(f.name), {
+        method: 'POST', headers: { 'X-Parable-Token': TOKEN }, body: f
+      });
+      const d = await res.json().catch(() => null);
+      if (!res.ok || !d || !d.path) throw new Error((d && d.error) || (res.status + ' ' + res.statusText));
+      att.path = d.path;
+      att.loading = false;
+    } catch (e) {
+      att.loading = false;
+      att.error = e.message;
+    }
+    spAgentAtts(host, tab);
+    spAgentChrome(host, tab);
+  }
+}
+
+/** 发消息：/agents/{session}/say —— 运行中=steer 注入，已收尾=续开新轮。 */
+async function spAgentSend(host, tab) {
+  const st = tab.st;
+  if (!modelOk()) { toast(t('select_model')); spAgentChrome(host, tab); return; }
+  const inp = host.querySelector('#spa-in');
+  const text = (inp.value || '').trim();
+  if (st.sending) return;
+  if (!text && !(st.atts || []).length) return;
+  inp.value = '';
+  inp.style.height = '24px';
+  const atts = (st.atts || []).filter(a => a.path).map(a => ({ path: a.path, name: a.name, size: a.size }));
+  st.atts = [];
+  st.sending = true;
+  spAgentAtts(host, tab);
+  spAgentChrome(host, tab);
+  try {
+    const r = await api('/agents/' + encodeURIComponent(st.sid) + '/say', {
+      method: 'POST',
+      body: {
+        text: text,
+        attachments: atts,
+        model: S.model,
+        permission_mode: S.perm,
+        thinking_level: Math.max(0, Math.min(3, +S.lvl || 0))
+      }
+    });
+    if (r && r.delivered === 'steer') {
+      // steering 在下一个模型步边界生效，消息落库要等那一步——先提示，别让人
+      // 以为发送失败。step.persisted 事件会触发面板重拉。
+      toast(S.lang === 'zh' ? '已注入引导，子代理下一步生效' : 'Guidance injected — applies at the next step');
+    }
+    st.msgs = null;
+    await spAgentFetch(tab);
+  } catch (e) {
+    st.atts = atts;
+    inp.value = text;
+    inp.dispatchEvent(new Event('input'));
+    toast(e.message);
+  }
+  st.sending = false;
+  spAgentAtts(host, tab);
+  spAgentChrome(host, tab);
+  if (inp) inp.focus();
 }
 
 /**
@@ -11647,6 +11819,9 @@ function spAgentTranscript(host, msgs) {
       }
     }
   }
+  // 与主对话同步：连续工具卡折叠成「已运行N条命令，调用M个工具」。
+  // 面板每次 fetch 都整块重建，这里做一次后处理即可，无需观察者。
+  [...host.querySelectorAll(':scope > .a > .ab')].forEach(ab => compactToolRuns(ab));
 }
 
 /**
@@ -11996,7 +12171,8 @@ function spOnEvent(ev) {
   SP.tabs.forEach(tab => {
     if (tab.kind !== 'agent' || ev.sessionId !== tab.st.sid) return;
     if (ev.type !== 'text.delta' && ev.type !== 'reasoning.delta' &&
-        ev.type !== 'tool.result' && ev.type !== 'turn.end' && ev.type !== 'error') return;
+        ev.type !== 'tool.result' && ev.type !== 'turn.end' && ev.type !== 'error' &&
+        ev.type !== 'step.persisted' && ev.type !== 'pending.changed') return;
     if (ev.type === 'turn.end') tab.st.status = 'completed';
     clearTimeout(tab.st.t);
     tab.st.t = setTimeout(() => {
