@@ -873,6 +873,11 @@ async fn patch_config(
     merge_config(&mut cfg, &v);
     // 历史遗留非法值归一（如 context=0），写盘前统一修复
     cfg.normalize();
+    // 浏览器无头开关即时生效（切到可见/无头都重建实例）
+    state
+        .agent
+        .computer
+        .set_headless(cfg.browser_headless);
     // 代理设置即时生效（下次请求用新 client）
     crate::config::set_proxy(cfg.http_proxy.clone(), cfg.http_no_proxy.clone());
     if let Err(e) = cfg.save() {
@@ -970,6 +975,9 @@ fn merge_config(cfg: &mut Config, v: &Value) {
                 }
                 "ctxWarnPct" | "ctx_warn_pct" => {
                     cfg.ctx_warn_pct = val.as_u64().unwrap_or(80).clamp(50, 95) as u32;
+                }
+                "browserHeadless" | "browser_headless" => {
+                    cfg.browser_headless = val.as_bool().unwrap_or(true);
                 }
                 // ---- 通知 ----
                 "notify" => cfg.notify = val.as_bool().unwrap_or(true),
@@ -3119,10 +3127,14 @@ pub async fn serve_in(
         store.clone(),
     )
     .with_usage(usage.clone());
-    // 内置浏览器 app 模式引导页：注入 harness 自身的端口
+    // 内置浏览器：app 引导页 + 无头开关（默认隐藏窗口，侧栏实况即视图）
     agent_base
         .computer
         .set_boot_url(&format!("http://127.0.0.1:{port}/browser-boot"));
+    {
+        let cfg = config.read().await;
+        agent_base.computer.set_headless(cfg.browser_headless);
+    }
 
     let subagents: crate::subagent::SharedSubagents = Arc::new(
         crate::subagent::SubagentService::new(hub.clone()).with_store(store.clone()),

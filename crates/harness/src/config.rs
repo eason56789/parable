@@ -226,6 +226,10 @@ pub struct Config {
     /// 上下文用量告警阈值（前端用量条变色点，50-95）。
     #[serde(default = "default_ctx_warn")]
     pub ctx_warn_pct: u32,
+    /// 内置浏览器无头运行（桌面零窗口，侧栏实况截图即视图）。
+    /// 关闭 = 可见 app 窗口（围观 agent 操作）。
+    #[serde(default = "default_true")]
+    pub browser_headless: bool,
 
     // ---- 通知 ---------------------------------------------------------
     /// turn 结束且页面在后台时弹系统通知。
@@ -457,6 +461,7 @@ impl Default for Config {
             ask_auto_resolve: false,
             keep_awake: false,
             ctx_warn_pct: default_ctx_warn(),
+            browser_headless: true,
             notify: true,
             notify_sound: false,
             auto_archive_days: 0,

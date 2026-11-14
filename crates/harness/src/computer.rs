@@ -121,6 +121,8 @@ pub struct ComputerBridge {
     ax_nodes: Mutex<HashMap<i64, AxNode>>,
     /// app 窗口标题只设置一次。
     titled_once: std::sync::OnceLock<bool>,
+    /// 无头运行开关（默认开 = 桌面零窗口，侧栏实况截图即视图）。
+    headless: std::sync::RwLock<bool>,
     /// app 模式引导页 URL（--app= 需要真实 URL，about:blank 会被 Edge 无视
     /// 而回退普通窗口）。由 serve_in 注入 harness 自身的 /browser-boot 页。
     boot_url: std::sync::RwLock<String>,
@@ -133,6 +135,22 @@ impl ComputerBridge {
         if let Ok(mut g) = self.boot_url.write() {
             *g = url.to_string();
         }
+    }
+
+    /// 无头开关（默认 true）。false 时回到可见 app 窗口（围观 agent 操作）。
+    /// 开关切换后需重建浏览器才生效：杀掉现有实例，下次调用按新模式拉起。
+    pub fn set_headless(&self, on: bool) {
+        let changed = self.headless.read().map(|g| *g != on).unwrap_or(false);
+        if changed {
+            if let Ok(mut g) = self.headless.write() {
+                *g = on;
+            }
+            self.kill_browser();
+        }
+    }
+
+    fn is_headless(&self) -> bool {
+        self.headless.read().map(|g| *g).unwrap_or(true)
     }
 
     pub fn new() -> Self {
@@ -149,6 +167,7 @@ impl ComputerBridge {
             target_id: Mutex::new(None),
             ax_nodes: Mutex::new(HashMap::new()),
             titled_once: std::sync::OnceLock::new(),
+            headless: std::sync::RwLock::new(true),
             boot_url: std::sync::RwLock::new(String::new()),
             pending: Mutex::new(None),
         }
@@ -279,6 +298,19 @@ impl ComputerBridge {
     // Browser lifecycle & CDP plumbing
     // ---------------------------------------------------------------
 
+    /// 杀掉当前受控浏览器实例（模式切换后重建用）。
+    async fn kill_browser(&self) {
+        let mut cdp = self.cdp.lock().await;
+        if let Some(c) = cdp.as_mut() {
+            let _ = c.ws.close(None).await;
+        }
+        *cdp = None;
+        *self.target_id.lock().await = None;
+        if let Some(mut child) = self.child.lock().await.take() {
+            let _ = child.kill().await;
+        }
+    }
+
     /// Ensure a CDP session to a page target. Launches a browser if none is
     /// listening on the debug port.
     async fn ensure(&self) -> Result<(), HarnessError> {
@@ -333,7 +365,8 @@ impl ComputerBridge {
             .to_string();
         let tid = chosen["id"].as_str().unwrap_or("").to_string();
         let mut cdp = Cdp::connect(&ws_url).await?;
-        // app 窗口的标题 = 页面标题：首次连接时占名，窗口一眼可辨是内置浏览器
+        // 首次连接：占标题（可见模式的窗口一眼可辨）；无头时改写 UA，
+        // 防站点按 HeadlessChrome 拦截（bot 检测）。
         if self.titled_once.set(true).is_ok() {
             let _ = cdp
                 .cmd(
@@ -344,6 +377,26 @@ impl ComputerBridge {
                     }),
                 )
                 .await;
+            if self.is_headless() {
+                if let Ok(r) = cdp
+                    .cmd(
+                        "Runtime.evaluate",
+                        json!({"expression": "navigator.userAgent", "returnByValue": true}),
+                    )
+                    .await
+                {
+                    let ua = r
+                        .pointer("/result/value")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if ua.contains("Headless") {
+                        let fixed = ua.replace("HeadlessChrome", "Chrome");
+                        let _ = cdp
+                            .cmd("Network.setUserAgentOverride", json!({"userAgent": fixed}))
+                            .await;
+                    }
+                }
+            }
         }
         *self.cdp.lock().await = Some(cdp);
         *self.target_id.lock().await = if tid.is_empty() { None } else { Some(tid) };
@@ -388,26 +441,35 @@ impl ComputerBridge {
         // SingletonLock——共用目录时第二个实例会静默失联（端口永远起不来）。
         let dir = std::env::temp_dir().join(format!("parable-cua-{}", self.port));
         let _ = std::fs::create_dir_all(&dir);
-        let child = tokio::process::Command::new(exe)
-            .arg(format!("--remote-debugging-port={}", self.port))
-            .arg(format!("--user-data-dir={}", dir.display()))
+        let mut cmd = tokio::process::Command::new(exe);
+        cmd.arg(format!("--remote-debugging-port={}", self.port))
+            .arg(format!("--user-data-dir={}", dir.display()));
+        if self.is_headless() {
+            // 无头（new headless = 完整 Chromium）：桌面零窗口，侧栏实况
+            // 截图即视图。--hide-scrollbars 让截图更干净。
+            cmd.arg(format!(
+                "--app={}",
+                self.boot_url.read().map(|g| g.clone()).unwrap_or_default()
+            ))
+            .arg("--headless=new")
+            .arg("--hide-scrollbars");
+        } else {
+            // 可见模式：app 窗口（无地址栏/书签/标签栏），可围观 agent 操作
+            cmd.arg(format!(
+                "--app={}",
+                self.boot_url.read().map(|g| g.clone()).unwrap_or_default()
+            ));
+        }
+        let child = cmd
             .args([
-                "--no-first-run",
-                "--no-default-browser-check",
-                "--force-device-scale-factor=1",
-                "--restore-last-session=false",
-                "--window-size=1440,900",
-                // app 模式：无边框应用窗口（无地址栏/书签/标签栏）——
-                // Parable 拥有的内置浏览器观感。--app 需要真实 URL
-                // （about:blank 会被 Edge 无视而回退普通窗口），所以用
-                // harness 自己的惰性引导页。
-                &format!(
-                    "--app={}",
-                    self.boot_url.read().map(|g| g.clone()).unwrap_or_default()
-                ),
-            ])
-            .spawn()
-            .map_err(|e| HarnessError::Tool(format!("启动浏览器失败: {e}")))?;
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--force-device-scale-factor=1",
+            "--restore-last-session=false",
+            "--window-size=1440,900",
+        ])
+        .spawn()
+        .map_err(|e| HarnessError::Tool(format!("启动浏览器失败: {e}")))?;
         *self.child.lock().await = Some(child);
         // 轮询调试端口就绪:必须等到 /json/version 报出一个 Chromium 系 Browser
         // 才算数,避免被同端口的其他进程糊弄过去。

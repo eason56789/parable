@@ -1628,6 +1628,7 @@ const L = {
     maxSteps:'单轮步数上限', maxStepsH:'一轮对话最多执行的工具步数，达到后收尾并说明',
     askAuto:'提问自动裁决', askAutoH:'ask_user 提问 120 秒无应答时自动选第一项（适合无人值守/定时任务）',
     keepAwake:'运行中阻止休眠', keepAwakeH:'turn 运行期间阻止系统进入睡眠',
+    bhHeadless:'隐藏浏览器窗口', bhHeadlessH:'内置浏览器无头运行——桌面零窗口，侧栏「内置浏览器」面板的实况截图就是视图；关闭后弹出可见 app 窗口可围观操作',
     ctxWarn:'上下文告警阈值', ctxWarnH:'状态栏的上下文占用百分比达到该值时变警示色（+10% 转红色）',
     notify:'后台完成通知', notifySound:'通知提示音', notifyH:'页面在后台时，一轮结束弹系统通知',
     notifySoundH:'通知伴随一声短提示音（需要允许通知）',
@@ -1832,6 +1833,7 @@ const L = {
     maxSteps:'Max steps per turn', maxStepsH:'Tool steps a single turn may take before wrapping up',
     askAuto:'Auto-resolve questions', askAutoH:'After 120s without an answer, pick the first option (good for unattended runs)',
     keepAwake:'Keep system awake', keepAwakeH:'Prevent system sleep while a turn is running',
+    bhHeadless:'Hide browser window', bhHeadlessH:'Run the built-in browser headless — no window on your desktop; the side-pane live screenshots ARE the view. Off = visible app window to watch the agent',
     ctxWarn:'Context warn threshold', ctxWarnH:'The status-bar context percentage turns warning-colored at this percent (red at +10%)',
     notify:'Background notifications', notifySound:'Notification sound', notifyH:'System notification when a turn finishes while the page is hidden',
     notifySoundH:'Play a short beep with the notification (permission required)',
@@ -2032,7 +2034,7 @@ const DEF = {
   compactionEnabled:true, compactionPct:85, maxSteps:100, askAutoResolve:false, keepAwake:false, ctxWarnPct:80,
   notify:true, notifySound:false, autoArchiveDays:0,
   codeLineNumbers:true, codeWrap:false,
-  httpProxy:'', httpNoProxy:'', modelIoLog:false, enterMode:'enter',
+  httpProxy:'', httpNoProxy:'', modelIoLog:false, enterMode:'enter', browserHeadless:true,
   sessionRetentionDays:0, hooks:[], profiles:[], activeProfile:''
 };
 let S = { ...DEF };
@@ -2153,7 +2155,7 @@ function apply(pushToServer) {
         askAutoResolve: S.askAutoResolve, keepAwake: S.keepAwake, ctxWarnPct: S.ctxWarnPct,
         notify: S.notify, notifySound: S.notifySound, autoArchiveDays: S.autoArchiveDays,
         codeLineNumbers: S.codeLineNumbers, codeWrap: S.codeWrap,
-        httpProxy: S.httpProxy, httpNoProxy: S.httpNoProxy, modelIoLog: S.modelIoLog, enterMode: S.enterMode,
+        httpProxy: S.httpProxy, httpNoProxy: S.httpNoProxy, modelIoLog: S.modelIoLog, enterMode: S.enterMode, browserHeadless: S.browserHeadless,
         sessionRetentionDays: S.sessionRetentionDays, hooks: S.hooks, profiles: S.profiles, activeProfile: S.activeProfile
       }}).catch(() => {});
     }
@@ -7553,7 +7555,8 @@ const SC = {
     { k:'maxSteps', t:'rg', l:'maxSteps', h:'maxStepsH', min:20, max:500, step:10, u:'' },
     { k:'askAutoResolve', t:'tg', l:'askAuto', h:'askAutoH' },
     { k:'keepAwake', t:'tg', l:'keepAwake', h:'keepAwakeH' },
-    { k:'ctxWarnPct', t:'rg', l:'ctxWarn', h:'ctxWarnH', min:50, max:95, step:5, u:'%' }
+    { k:'ctxWarnPct', t:'rg', l:'ctxWarn', h:'ctxWarnH', min:50, max:95, step:5, u:'%' },
+    { k:'browserHeadless', t:'tg', l:'bhHeadless', h:'bhHeadlessH' }
   ],
   net:[
     { k:'httpProxy', t:'tx', l:'proxy', h:'proxyH' },
