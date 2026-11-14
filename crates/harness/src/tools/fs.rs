@@ -385,6 +385,11 @@ pub fn list_dir(path: &Path) -> Result<ToolOutcome, HarnessError> {
 // ------------------------------------------------------------------ diff
 
 pub fn diff_lines(old: &str, new: &str) -> (usize, usize, Vec<DiffLine>) {
+    diff_lines_ex(old, new, true)
+}
+
+/// `compact = false` 时保留全部行（改动审查视图要展示完整文件）。
+pub fn diff_lines_ex(old: &str, new: &str, compact: bool) -> (usize, usize, Vec<DiffLine>) {
     use similar::{ChangeTag, TextDiff};
     let diff = TextDiff::from_lines(old, new);
     let mut added = 0usize;
@@ -424,7 +429,11 @@ pub fn diff_lines(old: &str, new: &str) -> (usize, usize, Vec<DiffLine>) {
         });
     }
     // Collapse long runs of unchanged lines to keep the card readable.
-    (added, removed, compact_diff(out))
+    if compact {
+        (added, removed, compact_diff(out))
+    } else {
+        (added, removed, out)
+    }
 }
 
 fn compact_diff(lines: Vec<DiffLine>) -> Vec<DiffLine> {

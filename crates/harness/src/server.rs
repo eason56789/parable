@@ -1854,7 +1854,9 @@ async fn checkpoint_diff(
     let Some(path) = q.get("path").cloned() else {
         return server_error("checkpoint-diff: missing path");
     };
-    match state.agent.checkpoints.diff_for(&id, &turn, &path).await {
+    // full=1：不折叠未变更区，改动审查侧栏展示完整文件 + 增减行标记
+    let full = q.get("full").map(|v| v == "1" || v == "true").unwrap_or(false);
+    match state.agent.checkpoints.diff_for(&id, &turn, &path, full).await {
         Some((status, added, removed, lines)) => {
             Json(json!({"status": status, "added": added, "removed": removed, "lines": lines}))
                 .into_response()

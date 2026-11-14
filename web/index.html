@@ -178,32 +178,18 @@ body.chat #chat{opacity:1;pointer-events:auto}
 /* ---- 轮末改动摘要条（对标 ZCode files-changed bar）---- */
 .chgbar{margin:10px 0 2px;border:1px solid var(--line);border-radius:12px;background:color-mix(in srgb,var(--hov) 40%,transparent);font:13px var(--sans);overflow:hidden}
 .chg-r1{display:flex;align-items:center;gap:6px;padding:8px 12px;min-width:0}
-.chg-t{display:flex;align-items:center;gap:8px;min-width:0;background:none;border:0;padding:0;color:var(--fg);font:600 13px var(--sans);cursor:pointer}
-.chg-t>svg{flex:none;width:14px;height:14px;color:var(--fg2);transition:transform calc(.45s * var(--animd)) cubic-bezier(.32,.72,0,1)}
-.chgbar.open .chg-t>svg{transform:rotate(180deg)}
+.chg-t{display:flex;align-items:center;gap:7px;min-width:0;color:var(--fg);font:600 13px var(--sans)}
 .chg-t b{font-weight:600;white-space:nowrap}
+.chg-names{font:12.5px var(--sans);font-weight:400;color:var(--fg2);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .chg-t .add,.chg-r2 .add{color:#4ade80;font-weight:600}
 .chg-t .del,.chg-r2 .del{color:#f87171;font-weight:600}
-.chg-u{margin-left:auto;display:flex;align-items:center;gap:5px;flex:none;background:none;border:0;color:var(--fg2);font:13px var(--sans);cursor:pointer;padding:3px 9px;border-radius:8px;transition:color calc(.2s * var(--animd)),background-color calc(.2s * var(--animd))}
+.chg-btn{margin-left:auto;flex:none;font:12.5px var(--sans);border:1px solid var(--line);background:none;color:var(--fg2);padding:3px 11px;border-radius:8px;cursor:pointer;transition:color calc(.2s * var(--animd)),background-color calc(.2s * var(--animd))}
+.chg-btn:hover{color:var(--fg);background:var(--hov)}
+.chg-u{display:flex;align-items:center;gap:5px;flex:none;background:none;border:0;color:var(--fg2);font:13px var(--sans);cursor:pointer;padding:3px 9px;border-radius:8px;transition:color calc(.2s * var(--animd)),background-color calc(.2s * var(--animd))}
 .cbu:hover{color:var(--fg);background:var(--hov)}
 .cbu svg{width:14px;height:14px}
 .chgbar.undone .chg-u{pointer-events:none;opacity:.55;color:var(--fg2)}
 .chgbar.undone .chg-t b{color:var(--fg2);font-weight:500}
-.chg-b{display:grid;grid-template-rows:0fr;opacity:0;transition:grid-template-rows calc(.5s * var(--animd)) cubic-bezier(.32,.72,0,1),opacity calc(.4s * var(--animd))}
-.chgbar.open .chg-b{grid-template-rows:1fr;opacity:1}
-.chg-b>div{overflow:hidden}
-.chg-r2{display:flex;align-items:center;gap:7px;padding:7px 12px;min-width:0;border-top:1px solid color-mix(in srgb,var(--line) 55%,transparent);flex-wrap:wrap;position:relative}
-.chg-r2 .chg-fic{flex:none;display:flex}
-.chg-r2 .chg-fic svg{width:15px;height:15px}
-.chg-r2 .chg-nm{color:var(--fg);font-weight:500;white-space:nowrap}
-.chg-r2 .chg-dir{color:var(--fg2);font:12px var(--mono);min-width:40px;flex:1 1 60px;max-width:46%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.chg-r2 .chg-st{flex:none;font:11.5px var(--sans);color:var(--fg2);border:1px solid var(--line);border-radius:6px;padding:1px 7px}
-.chg-r2 .chg-acts{margin-left:auto;display:flex;gap:6px;flex:none}
-.chg-btn{font:12px var(--sans);border:1px solid var(--line);background:none;color:var(--fg2);padding:3px 11px;border-radius:8px;cursor:pointer;transition:color calc(.2s * var(--animd)),background-color calc(.2s * var(--animd))}
-.chg-btn:hover{color:var(--fg);background:var(--hov)}
-.cbr2 .chg-d{flex-basis:100%;min-width:0}
-.chg-r2 .chg-d:empty{display:none}
-.chg-r2 .chg-d .df{max-height:300px;margin:4px 0 8px;padding:6px 0;border:0;background:color-mix(in srgb,var(--bg) 55%,transparent);border-radius:8px}
 .chgbar .df .ad{background:color-mix(in srgb,#4ade80 12%,transparent)}
 .chgbar .df .rm{background:color-mix(in srgb,#f87171 12%,transparent)}
 /* agent 消息的操作条靠左（用户消息的 .macts 靠右） */
@@ -903,6 +889,20 @@ body.spmax #sdp{position:fixed;inset:46px 0 0 0;width:100vw;max-width:none;z-ind
 .spdiff .dl.p{background:color-mix(in srgb,var(--uch2) 14%,transparent)}
 .spdiff .dl.p .sg{color:var(--uch2)}
 .spdiff .dl.m{background:color-mix(in srgb,var(--uch4) 14%,transparent)}
+.spdiff .dl .no{flex:none;width:3.2em;text-align:right;padding-right:10px;color:var(--code-ln);user-select:none}
+.spch-files{display:flex;gap:6px;flex-wrap:wrap;padding:10px 14px 0}
+.spch-file{display:flex;align-items:center;gap:6px;font:12.5px var(--sans);border:1px solid var(--line);background:none;color:var(--fg2);padding:4px 11px;border-radius:8px;cursor:pointer;max-width:100%}
+.spch-file:hover{color:var(--fg);background:var(--hov)}
+.spch-file.on{color:var(--fg);border-color:color-mix(in srgb,var(--accent) 55%,var(--line));background:color-mix(in srgb,var(--accent) 12%,transparent)}
+.spch-file .nm{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.spch-file .add{color:#4ade80}.spch-file .del{color:#f87171}
+.spch-head{display:flex;align-items:center;gap:8px;padding:10px 14px 0;min-width:0}
+.spch-head .nm{flex:none;white-space:nowrap}
+.spch-head .p{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:12px var(--mono);color:var(--fg2)}
+.spch-head .st{flex:none;font:11.5px var(--sans);color:var(--fg2);border:1px solid var(--line);border-radius:6px;padding:1px 7px}
+.spch-head .btns{margin-left:auto;flex:none}
+.spdiff .dl.nowrap{white-space:pre;overflow-x:auto}
+
 .spdiff .dl.m .sg{color:var(--uch4)}
 /* 终端面板 */
 .spterm{padding:0;display:flex;flex-direction:column;height:100%}
@@ -1651,6 +1651,9 @@ const L = {
     chg_files:'{n} 个文件已更改', chg_file1:'1 个文件已更改',
     chg_review:'审查', chg_open:'打开', chg_undo:'撤销', chg_undone:'已撤销',
     chg_created:'新建', chg_modified:'修改', chg_deleted:'已删除',
+    sp_changes:'改动审查', sp_changes_h:'在侧边栏查看本轮文件改动的完整内容与增减行',
+    sp_changes_empty:'本轮没有文件改动（可能已全部撤销）',
+    sp_changes_open:'打开文件',
     chg_undo_done:'已回退 {n} 个文件', chg_undone_tip:'本轮改动已回退',
     dk_agents:'后台智能体', dk_terms:'后台终端', dk_goal:'目标与阶段',
     dk_idle:'空闲', dk_thinking:'思考中', dk_writing:'输出中', dk_tool:'执行工具',
@@ -1861,6 +1864,9 @@ const L = {
     chg_files:'{n} files changed', chg_file1:'1 file changed',
     chg_review:'Review', chg_open:'Open', chg_undo:'Revert', chg_undone:'Reverted',
     chg_created:'new', chg_modified:'modified', chg_deleted:'deleted',
+    sp_changes:'Changes', sp_changes_h:'Review full file contents with add/del markers for this turn',
+    sp_changes_empty:'No file changes in this turn (possibly all reverted)',
+    sp_changes_open:'Open file',
     chg_undo_done:'Reverted {n} file(s)', chg_undone_tip:'Turn changes reverted',
     dk_agents:'Agents', dk_terms:'Terminals', dk_goal:'Goal & stage',
     dk_idle:'Idle', dk_thinking:'Thinking', dk_writing:'Writing', dk_tool:'Running tool',
@@ -3811,7 +3817,9 @@ function buildChangeBar(ck, sid) {
   const A = files.reduce((s, f) => s + f.added, 0);
   const B = files.reduce((s, f) => s + f.removed, 0);
   const n = files.length;
-  // 公共目录前缀（按字符逐段比较，带 / 边界）
+  const label = zh ? n + ' 个文件已更改'
+    : (n === 1 ? '1 file changed' : n + ' files changed');
+  // 文件名内联展示（去公共目录前缀），一眼可见本轮动了什么；多文件截断
   const dirs = files.map(f => String(f.path).replace(/\\/g, '/').slice(0, String(f.path).replace(/\\/g, '/').lastIndexOf('/') + 1));
   let prefix = dirs[0] || '';
   for (const d of dirs.slice(1)) {
@@ -3821,47 +3829,31 @@ function buildChangeBar(ck, sid) {
     prefix = prefix.slice(0, i);
     if (!prefix) break;
   }
-  // 前缀必须收在 / 边界，避免半截目录名
   const slash = prefix.lastIndexOf('/');
   prefix = slash >= 0 ? prefix.slice(0, slash + 1) : '';
-  const label = zh ? n + ' 个文件已更改'
-    : (n === 1 ? '1 file changed' : n + ' files changed');
+  const names = files.map(f => {
+    const p = String(f.path).replace(/\\/g, '/');
+    const d = p.slice(0, p.lastIndexOf('/') + 1);
+    return (d.startsWith(prefix) ? d.slice(prefix.length) : d) +
+      p.slice(p.lastIndexOf('/') + 1);
+  }).join(zh ? '、' : ', ');
   const bar = document.createElement('div');
   bar.className = 'chgbar';
   bar.dataset.turn = ck.turn || '';
   bar.innerHTML =
     '<div class="chg-r1">' +
-      '<button class="chg-t" type="button">' + ic('chev') + '<b>' + esc(label) + '</b>' +
+      '<span class="chg-t"><b>' + esc(label) + '</b>' +
+        '<span class="chg-names">' + esc(noEmoji(names)) + '</span>' +
         (A ? '<span class="add">+' + A + '</span>' : '') +
-        (B ? '<span class="del">-' + B + '</span>' : '') + '</button>' +
+        (B ? '<span class="del">-' + B + '</span>' : '') + '</span>' +
+      '<button class="chg-btn" data-a="side-review">' + esc(t('chg_review')) + '</button>' +
       '<button class="chg-u" type="button">' + ic('retry') + '<span>' + t('chg_undo') + '</span></button>' +
-    '</div>' +
-    '<div class="chg-b"><div class="chg-bi">' + files.map(f => {
-      const norm = String(f.path).replace(/\\/g, '/');
-      const nm = norm.slice(norm.lastIndexOf('/') + 1);
-      const dir = norm.slice(0, norm.length - nm.length);
-      // 目录列剥公共前缀：绝对路径太长会把按钮挤换行；同一轮的文件几乎都在
-      // 同一个工作区里，公共前缀没有信息量，留尾段就够了。
-      const dirRel = dir.startsWith(prefix) ? dir.slice(prefix.length) : dir;
-      const stTxt = { created: t('chg_created'), modified: t('chg_modified'),
-        deleted: t('chg_deleted') }[f.status] || '';
-      return '<div class="chg-r2" data-path="' + esc(f.path) + '">' +
-        '<span class="chg-fic" style="color:' + extTint(f.path) + '">' + ic('file') + '</span>' +
-        '<b class="chg-nm">' + esc(nm) + '</b>' +
-        (dir ? '<span class="chg-dir">' + esc(dirRel) + '</span>' : '') +
-        (stTxt ? '<span class="chg-st">' + esc(stTxt) + '</span>' : '') +
-        (f.added ? '<span class="add">+' + f.added + '</span>' : '') +
-        (f.removed ? '<span class="del">-' + f.removed + '</span>' : '') +
-        '<span class="chg-acts">' +
-          (f.status !== 'deleted'
-            ? '<button class="chg-btn" data-a="review">' + esc(t('chg_review')) + '</button>' : '') +
-          '<button class="chg-btn" data-a="open">' + esc(t('chg_open')) + '</button>' +
-        '</span>' +
-        '<div class="chg-d"></div>' +
-      '</div>';
-    }).join('') + '</div></div>';
+    '</div>';
 
-  bar.querySelector('.chg-t').onclick = () => bar.classList.toggle('open');
+  bar.querySelector('[data-a="side-review"]').onclick = () => {
+    // 审查在侧边栏打开：完整文件内容 + 增减行标记
+    spOpen('changes', { sid: sid, turn: ck.turn });
+  };
   const undoBtn = bar.querySelector('.chg-u');
   undoBtn.onclick = async ev => {
     ev.stopPropagation();
@@ -3880,44 +3872,6 @@ function buildChangeBar(ck, sid) {
       toast(e.message);
     }
   };
-
-  bar.querySelectorAll('.chg-r2').forEach(row => {
-    const path = row.dataset.path;
-    const cbd = row.querySelector('.chg-d');
-    const rv = row.querySelector('[data-a="review"]');
-    if (rv) rv.onclick = async () => {
-      if (row.classList.contains('reviewing')) {
-        row.classList.remove('reviewing');
-        cbd.innerHTML = '';
-        return;
-      }
-      bar.querySelectorAll('.chg-r2.reviewing').forEach(o => {
-        o.classList.remove('reviewing');
-        o.querySelector('.chg-d').innerHTML = '';
-      });
-      row.classList.add('reviewing');
-      cbd.innerHTML = '<div class="spempty">…</div>';
-      try {
-        const d = await api('/sessions/' + sid + '/checkpoint-diff?turn=' +
-          encodeURIComponent(ck.turn || '') + '&path=' + encodeURIComponent(path));
-        cbd.innerHTML = '<div class="df">' + (d.lines || []).map(l => {
-          const cls = l.sign === '+' ? 'ad' : l.sign === '-' ? 'rm' : '';
-          const no = l.old != null ? l.old : (l.new != null ? l.new : '');
-          return '<div class="' + cls + '"><i class="ln">' + no + '</i>' + esc(l.text) + '</div>';
-        }).join('') + '</div>';
-      } catch (e) {
-        row.classList.remove('reviewing');
-        cbd.innerHTML = '';
-        toast(e.message);
-      }
-    };
-    const ob = row.querySelector('[data-a="open"]');
-    if (ob) ob.onclick = () => {
-      const dirP = path.replace(/[\\/][^\\/]*$/, '');
-      const tab = spOpen('files', { path: dirP });
-      spFilesOpen(tab, path);
-    };
-  });
   return bar;
 }
 
@@ -10465,6 +10419,7 @@ const SP = { tabs: [], active: null, seq: 0, open: false };
 
 /** 每个面板类型的展示信息：图标、标题键、描述键。 */
 const SP_KIND = {
+  changes:  { ic: 'edit',     t: 'sp_changes',  d: 'sp_changes_h' },
   files:    { ic: 'folder',   t: 'sp_files',    d: 'sp_files_h' },
   browser:  { ic: 'globe',    t: 'sp_browser',  d: 'sp_browser_h' },
   terminal: { ic: 'terminal', t: 'sp_term',     d: 'sp_term_h' },
@@ -10654,6 +10609,7 @@ function spRender() {
 /** 各面板的渲染函数。 */
 const spRenderers = {
   launcher: (host, tab) => spRenderLauncher(host, tab),
+  changes: (host, tab) => spRenderChanges(host, tab),
   files: (host, tab) => spRenderFiles(host, tab),
   browser: (host, tab) => spRenderBrowser(host, tab),
   terminal: (host, tab) => spRenderTerminal(host, tab),
@@ -10804,6 +10760,94 @@ async function spFilesOpen(tab, path) {
 }
 
 /* ------------------------------------------------------------ 审查面板 */
+
+/**
+ * 改动审查面板：某 turn 的文件改动 —— 完整文件内容 + 增减行标记。
+ * 顶部文件切换章（多个文件时），正文是「当前文件全行 + 删除行以红色标位」
+ * 的完整视图（后端 full=1 不折叠未变更区）；已撤销/无改动的回合给空态。
+ */
+async function spRenderChanges(host, tab) {
+  const st = tab.st;
+  host.innerHTML = '<div class="spch-files"></div>' +
+    '<div class="spch-view"><div class="spempty">…</div></div>';
+  const filesBox = host.querySelector('.spch-files');
+  const view = host.querySelector('.spch-view');
+
+  let ck = null;
+  try {
+    const r = await api('/sessions/' + st.sid + '/checkpoints');
+    ck = (r.checkpoints || []).find(c => c.turn === st.turn);
+  } catch (e) {
+    view.innerHTML = '<div class="spempty">' + esc(e.message) + '</div>';
+    return;
+  }
+  if (SP.active !== tab.id) return;
+  const files = ((ck && ck.files) || []).filter(f => f.status !== 'unchanged' && f.status !== 'gone');
+  if (!files.length) {
+    filesBox.style.display = 'none';
+    view.innerHTML = '<div class="spempty">' + esc(t('sp_changes_empty')) + '</div>';
+    return;
+  }
+
+  const zh = S.lang === 'zh';
+  const stTxt = f => ({ created: t('chg_created'), modified: t('chg_modified'),
+    deleted: t('chg_deleted') }[f.status] || f.status);
+  let active = st.path && files.find(f => f.path === st.path) ? st.path : files[0].path;
+
+  const paintFiles = () => {
+    filesBox.innerHTML = files.map(f => {
+      const norm = String(f.path).replace(/\\/g, '/');
+      const nm = norm.slice(norm.lastIndexOf('/') + 1);
+      return '<button class="spch-file' + (f.path === active ? ' on' : '') + '" data-p="' + esc(f.path) + '">' +
+        '<span class="fic" style="color:' + extTint(f.path) + '">' + ic('file') + '</span>' +
+        '<span class="nm">' + esc(nm) + '</span>' +
+        (f.added ? '<span class="add">+' + f.added + '</span>' : '') +
+        (f.removed ? '<span class="del">-' + f.removed + '</span>' : '') +
+        '</button>';
+    }).join('');
+    filesBox.querySelectorAll('.spch-file').forEach(b => {
+      b.onclick = () => { active = b.dataset.p; paintFiles(); paintView(); };
+    });
+  };
+
+  const paintView = async () => {
+    const f = files.find(x => x.path === active);
+    const norm = String(active).replace(/\\/g, '/');
+    const nm = norm.slice(norm.lastIndexOf('/') + 1);
+    view.innerHTML = '<div class="spch-head">' +
+        '<b class="nm">' + esc(nm) + '</b>' +
+        '<span class="p">' + esc(norm) + '</span>' +
+        '<span class="st">' + esc(stTxt(f)) + '</span>' +
+        '<span class="btns"><button class="spbtn" data-a="open">' + esc(t('sp_changes_open')) + '</button></span>' +
+      '</div><div class="spch-body"><div class="spempty">…</div></div>';
+    view.querySelector('[data-a="open"]').onclick = () => {
+      const t2 = spOpen('files', { path: norm.slice(0, norm.lastIndexOf('/')) });
+      spFilesOpen(t2, active);
+    };
+    const body = view.querySelector('.spch-body');
+    try {
+      const d = await api('/sessions/' + st.sid + '/checkpoint-diff?full=1&turn=' +
+        encodeURIComponent(st.turn) + '&path=' + encodeURIComponent(active));
+      if (SP.active !== tab.id) return;
+      // 完整文件视图：上下文行带当前行号，删除行以旧行号红标位（不折叠）
+      body.innerHTML = '<div class="spdiff"><div class="hh">' +
+        esc(zh ? '快照 → 当前' : 'snapshot → current') + ' · +' + d.added + ' -' + d.removed +
+        '</div>' + (d.lines || []).map(l => {
+          const cls = l.sign === '+' ? 'p' : l.sign === '-' ? 'm' : '';
+          const no = l.new_no != null ? l.new_no : (l.old_no != null ? l.old_no : '');
+          return '<div class="dl ' + cls + ' nowrap">' +
+            '<span class="sg">' + esc(l.sign) + '</span>' +
+            '<span class="no">' + no + '</span>' +
+            '<span>' + esc(l.text) + '</span></div>';
+        }).join('') + '</div>';
+    } catch (e) {
+      body.innerHTML = '<div class="spempty">' + esc(e.message) + '</div>';
+    }
+  };
+
+  paintFiles();
+  await paintView();
+}
 
 async function spRenderReview(host, tab) {
   host.innerHTML = '<div class="spbar"><button class="spbtn" id="spg-ref">↻</button>' +

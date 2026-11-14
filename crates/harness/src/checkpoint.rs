@@ -305,13 +305,15 @@ impl CheckpointStore {
         }
     }
 
-    /// 单文件的审查 diff：快照 vs 当前盘上内容，行级（已折叠长段未变更区）。
-    /// 返回 (状态, 增, 删, 行)。turn/路径没有对应检查点时返回 None。
+    /// 单文件的审查 diff：快照 vs 当前盘上内容，行级。`full = true` 时不折叠
+    /// 未变更区（改动审查侧栏要展示完整文件 + 增减行标记）；false 折叠长段
+    /// 保持摘要卡可读。返回 (状态, 增, 删, 行)。turn/路径无对应检查点时 None。
     pub async fn diff_for(
         &self,
         session: &str,
         turn: &str,
         path: &str,
+        full: bool,
     ) -> Option<(String, usize, usize, Vec<crate::tools::DiffLine>)> {
         safe_id(session).ok()?;
         safe_id(turn).ok()?;
@@ -328,9 +330,9 @@ impl CheckpointStore {
                 .unwrap_or_default()
         };
         let lines = match (&stat.status[..], cur) {
-            ("modified", Some(new)) => crate::tools::fs::diff_lines(&old(), &new).2,
-            ("created", Some(new)) => crate::tools::fs::diff_lines("", &new).2,
-            ("deleted", _) => crate::tools::fs::diff_lines(&old(), "").2,
+            ("modified", Some(new)) => crate::tools::fs::diff_lines_ex(&old(), &new, !full).2,
+            ("created", Some(new)) => crate::tools::fs::diff_lines_ex("", &new, !full).2,
+            ("deleted", _) => crate::tools::fs::diff_lines_ex(&old(), "", !full).2,
             _ => Vec::new(),
         };
         Some((stat.status, stat.added, stat.removed, lines))
