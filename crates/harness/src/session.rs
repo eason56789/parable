@@ -66,6 +66,10 @@ pub struct SessionSummary {
     pub permission_mode: String,
     #[serde(default)]
     pub thinking_level: u32,
+    /// 最近一轮的结局：""（还没跑过）| "ok" | "failed"。finalize_turn 记账，
+    /// 侧栏会话状态小球按它上色（失败红 / 完成蓝）。
+    #[serde(default)]
+    pub outcome: String,
 }
 
 /// A message the user sent while a turn was already running.
@@ -177,6 +181,7 @@ impl Default for SessionSummary {
             model: String::new(),
             permission_mode: "ask".into(),
             thinking_level: 2,
+            outcome: String::new(),
         }
     }
 }
@@ -1464,6 +1469,7 @@ mod tests {
                 model: String::new(),
                 permission_mode: "ask".into(),
                 thinking_level: 2,
+                outcome: String::new(),
             },
             messages: Vec::new(),
             pending: Vec::new(),

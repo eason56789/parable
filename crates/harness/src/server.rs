@@ -1340,7 +1340,24 @@ async fn list_sessions(
         .clamp(1, 1000);
     let total = list.len();
     list.truncate(limit);
-    Json(json!({"sessions": list, "total": total, "limited": total > list.len()})).into_response()
+    // 侧栏状态小球：待提问（淡黄）> 运行中（转圈）> 最近一轮结局
+    // （失败红 / 完成蓝）。state 是按会话实时算的，不在存储里。
+    let mut out = Vec::with_capacity(list.len());
+    for s in list {
+        let mut v = serde_json::to_value(&s).unwrap_or_default();
+        let st = if state.questions.has_pending_for(&s.id).await {
+            "waiting"
+        } else if state.agent.is_running(&s.id).await {
+            "running"
+        } else if s.outcome == "failed" {
+            "failed"
+        } else {
+            "ok"
+        };
+        v["state"] = json!(st);
+        out.push(v);
+    }
+    Json(json!({"sessions": out, "total": total, "limited": total > out.len()})).into_response()
 }
 
 /// GET /api/search/messages?q=… —— 全文搜索所有会话里的消息正文。

@@ -31,9 +31,10 @@ struct TurnCfg {
 // ---------------------------------------------------------------- questions
 
 pub struct QuestionBroker {
-    /// call_id -> (sender, token)：token 用于过期等待者清理时识别"自己的"
-    /// 那一项，避免误删后来者的等待项。
-    pending: Mutex<HashMap<String, (oneshot::Sender<String>, u64)>>,
+    /// call_id -> (sender, token, session_id)：token 用于过期等待者清理时识别
+    /// "自己的"那一项，避免误删后来者的等待项；session_id 让会话列表能按会话
+    /// 查询「有待回答提问」（侧栏黄色小球）。
+    pending: Mutex<HashMap<String, (oneshot::Sender<String>, u64, String)>>,
     next_token: std::sync::atomic::AtomicU64,
 }
 
@@ -56,7 +57,7 @@ impl QuestionBroker {
     ///
     /// 同一 call_id 重复 ask 会被去重拒绝（立即返回 None），避免新 sender
     /// 覆盖旧 sender 后旧等待者永远悬挂。
-    pub async fn ask(&self, call_id: &str) -> Option<String> {
+    pub async fn ask(&self, call_id: &str, session_id: &str) -> Option<String> {
         let (tx, rx) = oneshot::channel();
         let token = self
             .next_token
@@ -67,13 +68,13 @@ impl QuestionBroker {
                 // 去重拒绝：该 call_id 已有等待者在排队。
                 return None;
             }
-            p.insert(call_id.to_string(), (tx, token));
+            p.insert(call_id.to_string(), (tx, token, session_id.to_string()));
         }
         let res = tokio::time::timeout(std::time::Duration::from_secs(600), rx).await;
         // 只清理自己那一项：若已被 interrupt 清空后又被新 ask 占用，不能误删。
         {
             let mut p = self.pending.lock().await;
-            if matches!(p.get(call_id), Some((_, t)) if *t == token) {
+            if matches!(p.get(call_id), Some((_, t, _)) if *t == token) {
                 p.remove(call_id);
             }
         }
@@ -83,9 +84,18 @@ impl QuestionBroker {
     pub async fn answer(&self, call_id: &str, answer: &str) -> bool {
         let entry = self.pending.lock().await.remove(call_id);
         match entry {
-            Some((tx, _)) => tx.send(answer.to_string()).is_ok(),
+            Some((tx, _, _)) => tx.send(answer.to_string()).is_ok(),
             None => false,
         }
+    }
+
+    /// 该会话是否有待回答的提问（侧栏状态小球的淡黄色态）。
+    pub async fn has_pending_for(&self, session_id: &str) -> bool {
+        self.pending
+            .lock()
+            .await
+            .values()
+            .any(|(_, _, s)| s == session_id)
     }
 
     /// 清理全部 pending questions 并唤醒等待者（drop sender → 等待方立即
@@ -1923,6 +1933,14 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
         self.store
             .add_usage(session_id, turn_usage, 1, steps, wall)
             .await;
+        // 侧栏会话状态小球按最近一轮结局上色：失败红 / 完成蓝。
+        {
+            let outcome = if stop_reason == "error" { "failed" } else { "ok" };
+            let _ = self
+                .store
+                .update_meta(session_id, |m| m.outcome = outcome.to_string())
+                .await;
+        }
         // 用量日志：一轮一条记录，供「使用统计」页按天/按模型聚合。
         if let Some(j) = &self.usage {
             let ts = crate::event::now_ms();
@@ -2564,7 +2582,7 @@ mod tests {
         let b = Arc::new(QuestionBroker::new());
         let waiter = {
             let b = b.clone();
-            tokio::spawn(async move { b.ask("call-1").await })
+            tokio::spawn(async move { b.ask("call-1", "s1").await })
         };
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         assert!(b.answer("call-1", "项目").await);
