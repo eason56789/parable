@@ -132,6 +132,7 @@ pub async fn bash(
     hub: &crate::event::EventHub,
     sid: &str,
     cid: &str,
+    description: &str,
 ) -> Result<ToolOutcome, HarnessError> {
     let (prog, args) = shell_pair();
     let mut cmd = tokio::process::Command::new(&prog);
@@ -279,7 +280,12 @@ pub async fn bash(
     let stderr = err_buf.lock().unwrap().clone();
     let code = status.code().unwrap_or(-1);
 
-    let title = if code == 0 {
+    // 标题优先用模型给的调用意图（入参 description），没有才回退命令原文——
+    // 界面摘要行展示的是「这一步要干什么」，不是命令文本（ZCode 同款语义）。
+    let intent = description.trim();
+    let title = if !intent.is_empty() {
+        format!("{} · exit {code}", truncate(intent, 64))
+    } else if code == 0 {
         format!("Ran `{}` · exit 0", truncate(command, 48))
     } else {
         format!("Ran `{}` · exit {code}", truncate(command, 48))

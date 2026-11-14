@@ -3767,7 +3767,7 @@ function fmtWhen(ts) {
   return (d.getMonth() + 1) + '-' + d.getDate() + ' ' + hm;
 }
 
-function uMsg(q, idx, atts, ts) {
+function uMsg(q, idx, atts) {
   const d = document.createElement('div');
   d.className = 'u msg';
   if (idx != null) d.dataset.mi = idx;
@@ -3804,12 +3804,8 @@ function uMsg(q, idx, atts, ts) {
     '<button class="ib" data-uc="' + idx + '" title="' + t('copy') + '">' + ic('copy') + '</button>' +
     '<button class="ib danger" data-ud="' + idx + '" title="' + t('delmsg') + '">' + ic('trash') + '</button>';
   d.append(b, acts);
-  if (ts) {
-    const w = document.createElement('div');
-    w.className = 'ts uts';
-    w.textContent = fmtWhen(ts);
-    d.append(w);
-  }
+  // 用户气泡不渲染时间戳：实时视图从不显示，历史重放一显示就成了
+  // 「来回切换会多出来」的多余时间（回答侧的时间戳 + 计时条已足够定位）。
   feed.append(d);
   return d;
 }
@@ -3872,13 +3868,6 @@ function stopSpin(a, ms) {
     if (tx) tx.textContent = t('worked_done').replace('{t}', fmtDur(total));
   }
   wkStart = 0;
-  // 这一轮是在实时视图里跑完的：时间戳在实时视图里本来就是隐藏的
-  // （它表示「这轮开始的时间」，跑着的轮次显示它只会误导）。
-  // 定格后若它又冒出来，界面就自相矛盾了——「工作中 x 秒」和开始时间
-  // 同时出现。切会话重放时这条尤其明显：重放出来的是历史气泡（时间戳
-  // 默认显示），随后 turn.end 走 stopSpin 定格，时间戳必须继续隐藏。
-  const ts = a.querySelector('.ts');
-  if (ts) ts.classList.add('hide');
 }
 
 /**
@@ -4316,6 +4305,26 @@ function toolCard(host, callId, tool, title) {
   e.querySelector('.st-tx').classList.add('run');
   host.append(e);
   return e;
+}
+
+/**
+ * 建卡即渲染入参体：结果到达前 fillToolCard 不会画 body，运行中的卡片展开
+ * 只能看到一片空白（看起来像「展不开」）。这里先把完整工具调用画进去，
+ * 与 ZCode 同款语义——「详情仍从原始 input 读取命令」。结果到达时
+ * fillToolCard 会清空重建，不会重复。
+ */
+function showArgsBody(e) {
+  const toolName = e.dataset.tool || '';
+  const raw = e.dataset.args;
+  if (!raw || toolName.startsWith('doc_') || e.querySelector('.rawargs')) return;
+  let pretty = raw;
+  try { pretty = JSON.stringify(JSON.parse(raw), null, 2); } catch (err) {}
+  // 超大入参（write_file 的全文）截断展示，避免运行期刷出几十 KB 噪音。
+  const cut = pretty.length > 2000 ? pretty.slice(0, 2000) + '\n…' : pretty;
+  const d = document.createElement('div');
+  d.className = 'df rawargs';
+  d.textContent = toolName + '(' + cut + ')';
+  e.querySelector('.dc-in').append(d);
 }
 
 function labelFor(d, tool) {
@@ -5010,7 +5019,10 @@ function replayEvent(ev) {
       curThinkEl = null;
       thinkStart = 0;
       curStream = null;
-      const card = toolCard(curA.querySelector('.ab'), ev.callId, ev.tool, ev.title || ev.tool);
+      // 摘要用模型意图/关键词概括，而不是裸工具名（ev.title 只是 name 的副本）。
+      const card = toolCard(curA.querySelector('.ab'), ev.callId, ev.tool, toolDesc(ev.tool, ev.args || {}));
+      card.dataset.args = JSON.stringify(ev.args || {});
+      showArgsBody(card);
       toolEls[ev.callId] = card;
       break;
     }
@@ -5339,6 +5351,7 @@ function dispatch(ev) {
         const desc = ev.desc || toolDesc(ev.tool, ev.args);
         const card = toolCard(curA.querySelector('.ab'), ev.callId, ev.tool, desc);
         card.dataset.args = JSON.stringify(ev.args || {});
+        showArgsBody(card);
         toolEls[ev.callId] = card;
         follow();
       }
@@ -7119,11 +7132,10 @@ function ensureWorkBar(a) {
 
 /**
  * 一轮在别的会话里跑完、之后才切回来的补正：给那个气泡补出「已工作 x 秒」
- * 的定格计时条，并隐藏它的时间戳（时间戳是「这轮开始的时间」，实时视图
- * 里跑着的轮次本来就隐藏它，定格后也该保持隐藏）。
+ * 的定格计时条。回答侧的时间戳保持可见——它是「输出完毕才出现」的完成态
+ * 标记，与实时跑完的视图一致（setActs 收尾时显形）。
  *
- * 没有这一步，切回来的视图会说「这轮从没跑过」：时间戳照常显示、
- * 计时条从未出现，打断键退回发送键——尽管那一轮确实跑过并结束了。
+ * 没有这一步，切回来的视图会说「这轮从没跑过」：计时条从未出现。
  */
 function applyDoneTurn(bubble, done) {
   if (!bubble || !done) return;
@@ -7140,8 +7152,6 @@ function applyDoneTurn(bubble, done) {
   const tx = el.querySelector('.wtx');
   const total = typeof done.ms === 'number' ? done.ms : 0;
   if (tx) tx.textContent = t('worked_done').replace('{t}', fmtDur(total));
-  const ts = bubble.querySelector('.ts');
-  if (ts) ts.classList.add('hide');
 }
 
 /**
@@ -7306,7 +7316,7 @@ async function openSession(id, focusMsg) {
         // A user message is either the human's question, or a batch of tool results.
         if (texts.length) {
           closeA();
-          uMsg(texts.map(x => x.text).join('\n\n'), null, [], m.created_at);
+          uMsg(texts.map(x => x.text).join('\n\n'), null, []);
         }
         results.forEach((r, i) => {
           const display = (m.displays && m.displays[i]) ||
@@ -7347,6 +7357,7 @@ async function openSession(id, focusMsg) {
           aHasTool = true;
           const card = toolCard(ensureA(), p.id, p.name, toolDesc(p.name, p.args || {}));
           card.dataset.args = JSON.stringify(p.args || {});
+          showArgsBody(card);
           cardById[p.id] = card;
           // ask_user 落库的是 tool_use（问题/选项在 args 里）。如果它还在
           // 等回答（后面没有对应 tool_result），切回会话时要把底部问答面板
@@ -7729,6 +7740,10 @@ function normParts(v) {
 function toolDesc(name, args) {
   args = args || {};
   const clean = v => String(v == null ? '' : v).replace(/\s+/g, ' ').trim();
+  // 模型给的调用意图优先（ZCode 同款语义：摘要行展示「这一步要干什么」）；
+  // 下面的关键词概括只做模型没填 description 时的兜底。
+  const intent = clean(args.description);
+  if (intent) return intent.length > 60 ? intent.slice(0, 59) + '…' : intent;
   const base = p => {
     const s = clean(p).replace(/\\/g, '/');
     const b = s.split('/').filter(Boolean).pop() || s;
@@ -7737,7 +7752,12 @@ function toolDesc(name, args) {
   const tail = (s, n) => { s = clean(s); return s.length > n ? s.slice(0, n) + '…' : s; };
   const cmd = clean(args.command || args.cmd || '');
   if (name === 'bash' || name === 'shell') {
-    const c = ' ' + cmd.toLowerCase() + ' ';
+    // 关键词只看「主体命令段」：跳过 cd/export 之类的前置铺垫，取第一个真动作。
+    // `sleep 20; echo x` 的主体是 sleep——不能被收尾的 echo 抢走描述。
+    const segs = cmd.split(/&&|\|\||[;|]/).map(s => s.trim()).filter(Boolean);
+    const trivial = /^(?:cd|export|set|true|false|exit|:)\b/;
+    const subject = segs.find(s => !trivial.test(s)) || segs[0] || cmd;
+    const c = ' ' + subject.toLowerCase() + ' ';
     const has = re => re.test(c);
     let d = '';
     if (has(/\bdate\b|get-date/)) d = '查看系统时间';
@@ -7767,7 +7787,7 @@ function toolDesc(name, args) {
     else if (has(/whoami/)) d = '查看当前用户';
     else if (has(/ping /)) d = '测试网络连通';
     else {
-      const tok = cmd.split(/[\s|;&]+/)[0].replace(/[^\w.-]/g, '');
+      const tok = subject.split(/[\s|;&]+/)[0].replace(/[^\w.-]/g, '');
       d = tok ? ('执行 ' + tok.slice(0, 8) + ' 命令') : '执行终端命令';
     }
     return d;

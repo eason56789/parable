@@ -106,7 +106,7 @@ impl TerminalRegistry {
         let cid = call_id.clone();
         let cmd = command.clone();
         let handle = tokio::spawn(async move {
-            let res = crate::tools::shell::bash(&cmd, &cwd, TERM_TIMEOUT_MS, &hub2, "", &cid).await;
+            let res = crate::tools::shell::bash(&cmd, &cwd, TERM_TIMEOUT_MS, &hub2, "", &cid, "").await;
             let (exit, stdout, ok) = match res {
                 Ok(out) => match &out.display {
                     crate::tools::DisplayKind::Shell { stdout, exit, .. } => {

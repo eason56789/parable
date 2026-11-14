@@ -321,6 +321,16 @@ fn obj(props: Value, required: &[&str]) -> Value {
     })
 }
 
+/// 工具卡摘要的「调用意图」字段说明。做法照 ZCode：模型在工具入参里写一句
+/// 人话说明这一步要干什么，界面摘要行展示它——用户读的是这句话，而且常常
+/// 看不到命令/参数本身，所以禁止复述命令文本、参数或文件路径。关键词概括
+/// （toolDesc）只做模型没填时的兜底。
+const DESC_PROMPT_BASH: &str = "One-line description of what this command does, in the language the user is speaking. The user reads this line in the interface and often never sees the command itself: say what it does in plain words, active voice - never echo the command text, its flags, or file paths. Keep simple commands to a few words (ls -> \"List files in current directory\", git status -> \"Show working tree status\"). Give piped or obscure commands enough context (find . -name \"*.tmp\" -exec rm {} \\; -> \"Find and delete all .tmp files recursively\").";
+const DESC_PROMPT_READ: &str =
+    "One-line description of what you are looking for and why, in the language the user is speaking. Do not restate the file path - it is shown separately.";
+const DESC_PROMPT_WRITE: &str = "One-line description of what this write achieves and why, in the language the user is speaking. Do not restate the path or the content.";
+const DESC_PROMPT_EDIT: &str = "One-line description of what this edit changes and why, in the language the user is speaking. Do not restate the path or the old/new text.";
+
 fn str_prop(desc: &str) -> Value {
     json!({"type":"string","description": desc})
 }
@@ -539,6 +549,7 @@ impl Registry {
                     "path": str_prop("Absolute or workspace-relative file path"),
                     "offset": int_prop("1-based start line (optional, text files only)"),
                     "limit": int_prop("Max lines to return (optional, default 2000, text files only)"),
+                    "description": str_prop(DESC_PROMPT_READ),
                 }), &["path"]),
             },
             ToolSpec {
@@ -547,6 +558,7 @@ impl Registry {
                 input_schema: obj(json!({
                     "path": str_prop("Absolute or workspace-relative file path"),
                     "content": str_prop("Full file content"),
+                    "description": str_prop(DESC_PROMPT_WRITE),
                 }), &["path", "content"]),
             },
             ToolSpec {
@@ -557,6 +569,7 @@ impl Registry {
                     "old_string": str_prop("Exact text to find"),
                     "new_string": str_prop("Replacement text"),
                     "replace_all": bool_prop("Replace every occurrence (default false)"),
+                    "description": str_prop(DESC_PROMPT_EDIT),
                 }), &["path", "old_string", "new_string"]),
             },
             ToolSpec {
@@ -590,8 +603,9 @@ impl Registry {
                 description: "Run a shell command in the workspace and return stdout/stderr/exit code. Output is streamed and truncated if very long.".into(),
                 input_schema: obj(json!({
                     "command": str_prop("Command line to run"),
-                    "cwd": str_prop("Working directory (defaults to workspace root)"),
+                    "cwd": str_prop("Working directory (defaults to workspace base)"),
                     "timeout_ms": int_prop("Timeout in milliseconds (default 120000)"),
+                    "description": str_prop(DESC_PROMPT_BASH),
                 }), &["command"]),
             },
             ToolSpec {
@@ -1384,6 +1398,8 @@ impl Registry {
             _ => self.workspace.clone(),
         };
         let timeout = a["timeout_ms"].as_u64().unwrap_or(120_000);
+        // 模型写的调用意图（可选）：进工具卡标题与 hooks 载荷。
+        let description = a["description"].as_str().unwrap_or_default();
         // 命令原文进权限链:面板上能看到真正要执行的命令,Always 规则按命令精确匹配
         ctx.authorize_shell("bash", &cwd.to_string_lossy(), Risk::Shell, command)
             .await?;
@@ -1394,6 +1410,7 @@ impl Registry {
             &ctx.hub,
             &ctx.session_id,
             &ctx.call_id,
+            description,
         )
         .await
     }
@@ -2500,6 +2517,26 @@ pub async fn plugin_admin(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 工具卡摘要的「调用意图」字段必须在 schema 里：模型靠它写这一步要干什么，
+    /// 界面摘要行优先展示它（ZCode 同款语义），关键词概括只做兜底。
+    #[test]
+    fn execution_tools_carry_model_description_field() {
+        let reg = Registry::new(std::path::PathBuf::from("."));
+        let specs = reg.build_specs();
+        for name in ["bash", "read_file", "write_file", "edit_file"] {
+            let spec = specs
+                .iter()
+                .find(|s| s.name == name)
+                .unwrap_or_else(|| panic!("{name} spec missing"));
+            assert!(
+                spec.input_schema
+                    .pointer("/properties/description")
+                    .is_some(),
+                "{name} schema must carry the model-authored description field"
+            );
+        }
+    }
 
     #[test]
     fn base64_known_vectors() {
