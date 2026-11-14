@@ -54,6 +54,10 @@ chrono-tz = "0.10"
 # 浏览器 cookie 导入：读 Firefox cookies.sqlite / Chromium cookie 库（计数）。
 # bundled = 自带 sqlite3 源码，不依赖系统 SQLite DLL。
 rusqlite = { version = "0.32", features = ["bundled"] }
+# OpenCode 免费通道的 TLS 指纹伪装（BoringSSL，JA4=Chrome/Bun 密码表）。
+# 门禁按 ClientHello 的 JA4 指纹放行，reqwest/rustls 的指纹会被 429 拒掉，
+# 只能用 wreq（wreq-js 的 Rust 内核）配 cipher_list 伪装。
+wreq = { version = "6.0.0-rc.31", features = ["stream"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [

@@ -3,6 +3,7 @@
 
 pub mod anthropic;
 pub mod openai;
+pub mod opencode_free;
 
 use crate::error::HarnessError;
 use crate::token::Usage;
@@ -103,6 +104,9 @@ pub struct ChatRequest {
     /// 思考档位:0 = 显式关闭(不发送任何 thinking/reasoning 参数),1 = low,
     /// 2 = medium,3 = high。各 provider 自行映射到线上协议的具体字段。
     pub thinking_level: u32,
+    /// 工作区目录（wire 无关的元数据；OpenCode 免费通道拿它拼 `<env>` 块，
+    /// 其他 provider 忽略）。
+    pub workspace: String,
 }
 
 /// One item coming back from a streaming completion.
@@ -159,6 +163,7 @@ pub fn build(cfg: &crate::config::ProviderConfig) -> Result<Box<dyn Provider>, H
         "anthropic" => Ok(Box::new(anthropic::AnthropicProvider::new(cfg))),
         "openai" => Ok(Box::new(openai::chat(cfg))),
         "responses" => Ok(Box::new(openai::responses(cfg))),
+        "opencode-free" => Ok(Box::new(opencode_free::OpenCodeFree::new(cfg))),
         other => Err(HarnessError::Config(format!("unknown api format: {other}"))),
     }
 }

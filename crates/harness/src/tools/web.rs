@@ -399,17 +399,26 @@ pub async fn multi_search(a: &Value, ctx: &ToolCtx) -> Result<ToolOutcome, Harne
 
     ctx.authorize("web_search", &query, Risk::Network).await?;
 
-    // 搜索来源只保留真实的引擎抓取。
-    // 原 AnySearch 聚合源实测返回的是裁判文书库（与网络搜索无关，任何关键词都返回判决书），
-    // 已整体移除；历史配置里的 "anysearch" 与 "multi" 现在等价，都走下面这组引擎。
+    // 偏好裁剪查询源：anysearch → 只查 AnySearch 聚合 API；multi → 只跑引擎
+    // 抓取；其余（auto/deepseek/空）→ AnySearch 先行 + 引擎补齐。
+    // AnySearch 匿名可调（服务端按 IP 限流），配了 key 走 bearer。2026-11 实测
+    // /v1/search 不带 tag 即通用搜索、返回真实网络结果；老实现撞上的
+    // 「裁判文书库」是当时 API 的默认垂直域行为，不再复现。
+    let pref = ctx.search_pref.as_str();
+    let anysearch_on = pref != "multi";
+    let engines_on = pref != "anysearch";
     // (label, search url)
-    let engines: Vec<(&str, String)> = vec![
-        ("必应 (Bing)", format!("https://www.bing.com/search?q={}", urlencode(&query))),
-        ("百度 (Baidu)", format!("https://www.baidu.com/s?wd={}", urlencode(&query))),
-        ("360搜索", format!("https://www.so.com/s?q={}", urlencode(&query))),
-        ("DuckDuckGo", format!("https://html.duckduckgo.com/html/?q={}", urlencode(&query))),
-        ("搜狗 (Sogou)", format!("https://www.sogou.com/web?query={}", urlencode(&query))),
-    ];
+    let engines: Vec<(&str, String)> = if engines_on {
+        vec![
+            ("必应 (Bing)", format!("https://www.bing.com/search?q={}", urlencode(&query))),
+            ("百度 (Baidu)", format!("https://www.baidu.com/s?wd={}", urlencode(&query))),
+            ("360搜索", format!("https://www.so.com/s?q={}", urlencode(&query))),
+            ("DuckDuckGo", format!("https://html.duckduckgo.com/html/?q={}", urlencode(&query))),
+            ("搜狗 (Sogou)", format!("https://www.sogou.com/web?query={}", urlencode(&query))),
+        ]
+    } else {
+        Vec::new()
+    };
 
     let client = crate::config::apply_proxy(reqwest::Client::builder())
         .connect_timeout(std::time::Duration::from_secs(12))
@@ -418,12 +427,29 @@ pub async fn multi_search(a: &Value, ctx: &ToolCtx) -> Result<ToolOutcome, Harne
         .redirect(reqwest::redirect::Policy::limited(5))
         .build()?;
 
-    let total_platforms = engines.len();
+    let total_platforms = engines.len() + usize::from(anysearch_on);
     let mut out = format!(
-        "=== 多平台搜索结果 === 关键词: {query} 搜索平台: {} 个\n",
+        "=== {} === 关键词: {query} 搜索平台: {} 个\n",
+        if engines_on { "多平台搜索结果" } else { "AnySearch 搜索结果" },
         total_platforms
     );
     let mut ok_count = 0usize;
+
+    // AnySearch 聚合源先行：POST JSON API，匿名按 IP 限流，配 key 走 bearer。
+    // 失败不影响后面的平台抓取，按原样如实报告。
+    if anysearch_on {
+        out.push_str("\n【AnySearch】\n");
+        let key = anysearch_key(ctx);
+        match anysearch_call(&client, &key, &query, 8, "", "", "", None, false).await {
+            Ok((n, text)) if n > 0 => {
+                ok_count += 1;
+                out.push_str(&text);
+                out.push('\n');
+            }
+            Ok(_) => out.push_str("(无结果)\n"),
+            Err(e) => out.push_str(&format!("(请求失败: {e})\n")),
+        }
+    }
 
     for (label, url) in &engines {
         out.push_str(&format!("\n【{label}】\nURL: {url}\n"));
@@ -580,6 +606,182 @@ pub async fn deepseek_search(a: &Value, ctx: &ToolCtx) -> Result<ToolOutcome, Ha
     })
 }
 
+/// AnySearch API key：设置里的 `anysearch_key` 优先，其次 `ANYSEARCH_API_KEY`
+/// 环境变量；都没有则匿名调用（服务端按 IP 限流）。API 对错误 key 不回退
+/// 匿名，所以只有非空 key 才带 Authorization 头。
+fn anysearch_key(ctx: &ToolCtx) -> String {
+    let k = ctx.anysearch_key.trim();
+    if !k.is_empty() {
+        return k.to_string();
+    }
+    std::env::var("ANYSEARCH_API_KEY").unwrap_or_default().trim().to_string()
+}
+
+/// 错误文本脱敏：AnySearch 402 匿名配额响应可能内嵌自动生成的凭据
+/// （`username=` / `password=` / `api_key=`）。官方文档明确禁止把该原文
+/// 写进日志或模型上下文，含凭据的行一律剪掉再呈现。
+fn sanitize_anysearch_msg(msg: &str) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    for line in msg.lines() {
+        let lower = line.to_lowercase();
+        if lower.contains("api_key=") || lower.contains("password=") || lower.contains("username=") {
+            continue;
+        }
+        out.push(line);
+    }
+    let joined = out.join("\n");
+    if joined.trim().is_empty() {
+        "<响应含凭据，已整体隐藏>".to_string()
+    } else {
+        joined
+    }
+}
+
+/// One AnySearch call: `POST https://api.anysearch.com/v1/search`.
+/// Returns (result count, rendered text). `tag` 是 `{domain}.{sub_domain}`
+/// 垂直域能力标签（如 `finance.quote`），留空即通用搜索；`params` 是标签
+/// 专属能力参数。`need_content` 打开时附清洗后的页面正文。
+async fn anysearch_call(
+    client: &reqwest::Client,
+    key: &str,
+    query: &str,
+    max_results: u32,
+    tag: &str,
+    zone: &str,
+    language: &str,
+    params: Option<&Value>,
+    need_content: bool,
+) -> Result<(usize, String), HarnessError> {
+    let mut body = serde_json::json!({ "query": query, "max_results": max_results });
+    if !tag.is_empty() {
+        body["tag"] = serde_json::json!(tag);
+    }
+    if !zone.is_empty() {
+        body["zone"] = serde_json::json!(zone);
+    }
+    if !language.is_empty() {
+        body["language"] = serde_json::json!(language);
+    }
+    if let Some(p) = params {
+        if p.as_object().map(|o| !o.is_empty()).unwrap_or(false) {
+            body["params"] = p.clone();
+        }
+    }
+    let mut req = client
+        .post("https://api.anysearch.com/v1/search")
+        .json(&body);
+    if !key.is_empty() {
+        req = req.bearer_auth(key);
+    }
+    let resp = req.send().await?;
+    let status = resp.status();
+    let v: Value = resp.json().await.map_err(|e| {
+        HarnessError::Tool(format!("anysearch 响应不是 JSON (HTTP {status}): {e}"))
+    })?;
+    if !status.is_success() {
+        let raw = v.get("message").and_then(|m| m.as_str()).unwrap_or("unknown error");
+        let msg = sanitize_anysearch_msg(raw);
+        let rid = v.get("request_id").and_then(|r| r.as_str()).unwrap_or("");
+        let hint = match status.as_u16() {
+            402 => "（匿名配额已用尽——可在设置中填入 AnySearch API key，或稍后重试）",
+            429 => "（触发限流，请稍后重试）",
+            401 | 403 => "（API key 无效或已过期，请检查设置）",
+            _ => "",
+        };
+        return Err(HarnessError::Tool(format!(
+            "anysearch HTTP {status}: {msg}{hint}{}",
+            if rid.is_empty() { String::new() } else { format!(" [request_id: {rid}]") }
+        )));
+    }
+    parse_anysearch(&v, need_content)
+}
+
+/// Render an AnySearch `/v1/search` envelope into readable text.
+/// 文档字段：`data.results[].{title,url,snippet,content}`、
+/// `data.metadata.{total_results,search_time_ms}`。snippet 恒输出（截 600），
+/// content 仅在 `need_content` 时输出（截 2500）。
+fn parse_anysearch(v: &Value, need_content: bool) -> Result<(usize, String), HarnessError> {
+    if v.get("code").and_then(|c| c.as_i64()) != Some(0) {
+        let raw = v
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("unknown error");
+        return Err(HarnessError::Tool(format!(
+            "anysearch: {}",
+            sanitize_anysearch_msg(raw)
+        )));
+    }
+    let results = v.pointer("/data/results").and_then(|r| r.as_array());
+    let n = results.map(|r| r.len()).unwrap_or(0);
+    let mut out = String::new();
+    if let Some(results) = results {
+        for (i, r) in results.iter().enumerate() {
+            let title = r.get("title").and_then(|t| t.as_str()).unwrap_or("");
+            let url = r.get("url").and_then(|u| u.as_str()).unwrap_or("");
+            let snippet = r.get("snippet").and_then(|s| s.as_str()).unwrap_or("");
+            let content = r.get("content").and_then(|c| c.as_str()).unwrap_or("");
+            out.push_str(&format!("\n{}. {}\nURL: {}\n", i + 1, title, url));
+            if !snippet.trim().is_empty() {
+                out.push_str(&clip(snippet, 600));
+                out.push('\n');
+            }
+            if need_content && !content.trim().is_empty() {
+                out.push_str(&clip(content, 2500));
+                out.push('\n');
+            }
+        }
+    }
+    Ok((n, out))
+}
+
+/// AnySearch API (`POST /v1/search`) —— 面向智能体的聚合搜索，22+ 垂直域
+/// （general/finance/code/legal/academic/…），结构化结果（title/url/snippet/
+/// content）。匿名可用（按 IP 限流）；在设置里填 AnySearch API key 走配额。
+/// `tag` 传完整 `{domain}.{sub_domain}` 能力标签（如 `finance.quote` 配
+/// `params: {"type":"stock"}`）；留空即通用搜索。
+pub async fn anysearch_search(a: &Value, ctx: &ToolCtx) -> Result<ToolOutcome, HarnessError> {
+    let query = a["query"].as_str().unwrap_or("").trim().to_string();
+    if query.is_empty() || query.chars().count() > 256 {
+        return Err(HarnessError::Tool("`query` 必填，1-256 字符".into()));
+    }
+    let count = a["count"].as_u64().unwrap_or(8).clamp(1, 10) as u32;
+    let tag = a["tag"].as_str().unwrap_or("").trim().to_string();
+    let zone = a["zone"].as_str().unwrap_or("").trim().to_string();
+    if !zone.is_empty() && zone != "cn" && zone != "intl" {
+        return Err(HarnessError::Tool("`zone` 只能是 cn 或 intl".into()));
+    }
+    let language = a["language"].as_str().unwrap_or("").trim().to_string();
+    let params = a.get("params");
+    let need_content = a["need_content"].as_bool().unwrap_or(false);
+
+    ctx.authorize("anysearch_search", &query, Risk::Network).await?;
+
+    let key = anysearch_key(ctx);
+    let client = crate::config::apply_proxy(reqwest::Client::builder())
+        .connect_timeout(std::time::Duration::from_secs(12))
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?;
+
+    let (n, text) = anysearch_call(
+        &client, &key, &query, count,
+        &tag, &zone, &language, params, need_content,
+    )
+    .await?;
+
+    let mut out = format!("=== AnySearch 搜索 === 关键词: {query} · {n} 条结果\n");
+    if n == 0 {
+        out.push_str("(无结果)\n");
+    } else {
+        out.push_str(&text);
+    }
+    Ok(ToolOutcome {
+        ok: n > 0,
+        title: format!("Searched “{query}” · AnySearch · {n} 条"),
+        display: DisplayKind::Plain(out.clone()),
+        for_model: out,
+    })
+}
+
 /// Anti-bot interstitials that carry no results.
 fn is_blocked(text: &str) -> bool {
     const MARKERS: [&str; 6] = [
@@ -723,5 +925,53 @@ mod tests {
         assert!(text.contains("'x'y 'z'"), "got {text:?}");
         assert!(text.contains("&copy;"), "unknown entity stays literal");
         assert!(text.contains("a&b"), "got {text:?}");
+    }
+
+    #[test]
+    fn parses_anysearch_envelope() {
+        let v = serde_json::json!({
+            "code": 0, "message": "success",
+            "request_id": "7d6f4e91-2a83-4c5b-9f10-6e8a3d27b541",
+            "data": {
+                "results": [
+                    {"title": "Go 1.26 Release Notes", "url": "https://go.dev/doc/go1.26",
+                     "snippet": "Go 1.26 is released."},
+                    {"title": "Rust", "url": "https://www.rust-lang.org",
+                     "snippet": "Rust is a language.", "content": "Rust content body."}
+                ],
+                "metadata": {"total_results": 2, "search_time_ms": 312}
+            }
+        });
+        let (n, text) = parse_anysearch(&v, false).unwrap();
+        assert_eq!(n, 2);
+        assert!(text.contains("Go 1.26 Release Notes"));
+        assert!(text.contains("https://www.rust-lang.org"));
+        assert!(text.contains("Rust is a language."));
+        // need_content=false 不带正文
+        assert!(!text.contains("Rust content body."));
+        let (_, text2) = parse_anysearch(&v, true).unwrap();
+        assert!(text2.contains("Rust content body."));
+
+        // 错误信封：code != 0 一律报错
+        let bad = serde_json::json!({"code": -1, "message": "Query is required."});
+        assert!(parse_anysearch(&bad, false).is_err());
+    }
+
+    #[test]
+    fn anysearch_credentials_never_leak() {
+        // 402 匿名配额响应可能内嵌自动生成的账号（官方警告：不得进日志/模型上下文）
+        let msg = "Quota exhausted.\nusername=auto-user\npassword=hunter2\napi_key=sk-secret-123\ncontact: ops@example.com";
+        let clean = sanitize_anysearch_msg(msg);
+        assert!(!clean.contains("hunter2"), "password must be cut: {clean:?}");
+        assert!(!clean.contains("sk-secret-123"), "api key must be cut: {clean:?}");
+        assert!(!clean.contains("auto-user"), "username must be cut: {clean:?}");
+        assert!(clean.contains("Quota exhausted."));
+        assert!(clean.contains("contact: ops@example.com"));
+        // 大小写变体同样被剪
+        let clean2 = sanitize_anysearch_msg("API_KEY=abc");
+        assert!(!clean2.contains("abc"), "got {clean2:?}");
+        // 全是凭据行时给占位提示而不是空串
+        let clean3 = sanitize_anysearch_msg("password=x");
+        assert!(!clean3.trim().is_empty());
     }
 }

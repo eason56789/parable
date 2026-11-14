@@ -197,6 +197,11 @@ pub struct Config {
     /// `deepseek_search` tool. Stored locally, masked in the API echo.
     #[serde(default)]
     pub search_key: String,
+    /// AnySearch API key (`POST /v1/search`). Empty lets the tool fall back to
+    /// anonymous calls (IP-rate-limited by the service). Stored locally,
+    /// masked in the API echo.
+    #[serde(default)]
+    pub anysearch_key: String,
     /// Which search the user prefers: "auto" | "deepseek" | "anysearch" | "multi".
     /// Steers tool exposure and what `web_search` queries.
     #[serde(default = "default_search_pref")]
@@ -449,10 +454,15 @@ impl Default for Config {
             permission_mode: default_perm(),
             thinking_level: default_lvl(),
             workspace: String::new(),
-            providers: default_providers(),
+            providers: {
+                let mut ps = default_providers();
+                ps.push(free_provider());
+                ps
+            },
             system_prompt: String::new(),
             system_prompt_raw: String::new(),
             search_key: String::new(),
+            anysearch_key: String::new(),
             search_pref: default_search_pref(),
             followup_mode: default_followup_mode(),
             compaction_enabled: true,
@@ -525,6 +535,38 @@ pub fn default_providers() -> Vec<ProviderConfig> {
     }]
 }
 
+/// 内置的「OpenCode 免费模型」供应商条目。
+///
+/// 匿名可用（上游按 OpenCode 客户端指纹放行免费额度），无需 API key。
+/// 模型清单由后台任务从免费目录端点拉取后填入，这里先放一个已知可用的
+/// 兜底模型，保证「配置里就有一个能用的免费模型」。
+pub fn free_provider() -> ProviderConfig {
+    ProviderConfig {
+        id: "opencode-free".into(),
+        name: "OpenCode 免费模型".into(),
+        color: "#5BC67A".into(),
+        icon: "O".into(),
+        enabled: true,
+        base_url: String::new(),
+        api: "opencode-free".into(),
+        key: String::new(),
+        models: vec![ModelConfig {
+            id: "deepseek-v4.1-flash-free".into(),
+            name: "DeepSeek V4.1 Flash Free".into(),
+            context: 200_000,
+            vision: false,
+            tools: true,
+            thinking: true,
+            max_output: 0,
+            levels: Vec::new(),
+            mapping: String::new(),
+            structured: false,
+            native_search: false,
+            enabled: true,
+        }],
+    }
+}
+
 impl Config {
     /// The data directory: config, sessions, permissions, logs, plugins.
     ///
@@ -572,6 +614,20 @@ impl Config {
         if fixed > 0 {
             tracing::info!("config: normalized {fixed} model(s) with context=0 to 128000");
         }
+        self.ensure_free_provider();
+    }
+
+    /// 内置「OpenCode 免费模型」供应商：匿名可用、无需 key。
+    ///
+    /// 只在缺失时注入（用户删掉后不会被 normalize 复活）；模型清单在后台
+    /// 拉取（免费目录端点免鉴权），拉到后写回配置。
+    fn ensure_free_provider(&mut self) {
+        const FREE_ID: &str = "opencode-free";
+        if self.providers.iter().any(|p| p.id == FREE_ID) {
+            return;
+        }
+        self.providers.push(free_provider());
+        tracing::info!("config: injected built-in free provider (opencode-free)");
     }
 
     pub fn load() -> Self {
@@ -634,7 +690,8 @@ impl Config {
         self.resolve_model("").or_else(|| {
             self.providers
                 .iter()
-                .filter(|p| p.enabled && !p.key.is_empty())
+                // OpenCode 免费通道匿名可用（无 key）；其余供应商要有 key 才算可用。
+                .filter(|p| p.enabled && (!p.key.is_empty() || p.api == "opencode-free"))
                 .find_map(|p| {
                     p.models
                         .iter()
@@ -795,4 +852,49 @@ pub fn http_client() -> reqwest::Client {
     .unwrap_or_else(|_| reqwest::Client::new());
     *cache = Some((sig, client.clone()));
     client
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 免费通道匿名可用：没有 key 也必须能被选为活动模型。
+    /// 这条不变量一旦破掉，用户会看到「provider 没有 API key」而完全不知道
+    /// 免费模型根本不需要 key。
+    #[test]
+    fn free_provider_is_usable_without_a_key() {
+        let mut cfg = Config::default();
+        // 只留免费通道，其余供应商剥掉。
+        cfg.providers.retain(|p| p.api == "opencode-free");
+        cfg.model = String::new();
+        let (p, m) = cfg.active_model().expect("free provider must be selectable");
+        assert_eq!(p.api, "opencode-free");
+        assert!(p.key.is_empty());
+        assert_eq!(m.id, "deepseek-v4.1-flash-free");
+    }
+
+    /// 普通供应商没有 key 时不该被当成可用模型。
+    #[test]
+    fn keyless_normal_provider_is_not_selectable() {
+        let mut cfg = Config::default();
+        cfg.providers.retain(|p| p.api != "opencode-free");
+        for p in &mut cfg.providers {
+            p.key = String::new();
+        }
+        cfg.model = String::new();
+        assert!(cfg.active_model().is_none());
+    }
+
+    /// normalize 注入免费 provider；已存在时不重复注入（用户删掉也不复活）。
+    #[test]
+    fn normalize_injects_free_provider_once() {
+        let mut cfg = Config::default();
+        cfg.providers.retain(|p| p.api != "opencode-free");
+        cfg.normalize();
+        let n = cfg.providers.iter().filter(|p| p.api == "opencode-free").count();
+        assert_eq!(n, 1);
+        cfg.normalize();
+        let n = cfg.providers.iter().filter(|p| p.api == "opencode-free").count();
+        assert_eq!(n, 1);
+    }
 }

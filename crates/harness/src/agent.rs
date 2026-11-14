@@ -190,6 +190,7 @@ impl AgentRuntime {
         call_id: &str,
         search_key: &str,
         search_pref: &str,
+        anysearch_key: &str,
     ) -> ToolCtx {
         ToolCtx {
             workspace: workspace.clone(),
@@ -205,6 +206,7 @@ impl AgentRuntime {
             store: self.store.clone(),
             runtime: Some(Arc::new(self.clone()) as Arc<dyn crate::tools::TurnStarter>),
             search_key: search_key.to_string(),
+            anysearch_key: anysearch_key.to_string(),
             search_pref: search_pref.to_string(),
             computer: Some(self.computer.clone()),
             desktop: Some(self.desktop.clone()),
@@ -722,7 +724,8 @@ impl AgentRuntime {
                     "no usable model for `{model_sel}`. Open Settings → Model, add a provider and paste an API key."
                 ))
             })?;
-        if p.key.is_empty() {
+        // OpenCode 免费通道匿名可用，不需要 key；其他供应商仍要求填 key。
+        if p.key.is_empty() && p.api != "opencode-free" {
             return Err(HarnessError::Config(format!(
                 "provider `{}` has no API key. Open Settings → Model and paste one.",
                 p.name
@@ -1111,7 +1114,7 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
         );
 
         // ---- resolve model + workspace + turn 级行为开关
-        let (workspace, model_sel, ctx_limit, search_key, search_pref, tcfg, opts) = {
+        let (workspace, model_sel, ctx_limit, search_key, search_pref, anysearch_key, tcfg, opts) = {
             let cfg = self.config.read().await;
             let ws = if cfg.workspace.is_empty() {
                 std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
@@ -1170,7 +1173,7 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
             if let Some(plan) = overlay.as_ref().and_then(|v| v.get("plan_mode")).and_then(|x| x.as_bool()) {
                 o.plan_mode = plan;
             }
-            (ws, sel, limit, cfg.search_key.clone(), cfg.search_pref.clone(), tcfg, o)
+            (ws, sel, limit, cfg.search_key.clone(), cfg.search_pref.clone(), cfg.anysearch_key.clone(), tcfg, o)
         };
 
         // 防休眠看门狗：独立线程周期性持锁，turn 结束即归还
@@ -1251,7 +1254,7 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
 
         // 每轮一个 Registry（带 search 配置），specs() 与工具执行共用同一实例，
         // 修复搜索配置到不了执行现场的问题。
-        let registry = Arc::new(Registry::new(workspace.clone()).with_search(&search_pref, &search_key));
+        let registry = Arc::new(Registry::new(workspace.clone()).with_search(&search_pref, &search_key, &anysearch_key));
         // MCP 工具清单刷新（≤8s）：写入共享缓存供 specs() 同步读取；
         // 没配 MCP 时 all_tools 立即返回空。
         {
@@ -1407,6 +1410,7 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
                 // 这里必须原样透传（0 不得被当作"未指定"替换成配置值），
                 // provider 侧按 0 关闭思考。
                 thinking_level: opts.thinking_level,
+                workspace: workspace.to_string_lossy().to_string(),
             };
             // 调试：请求体落盘（设置 → 网络与隐私 → 记录模型请求）。只记请求侧。
             if tcfg.model_io_log {
@@ -1667,7 +1671,7 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
                             }
                         }
                         let reg = Arc::clone(&registry);
-                        let ctx = self.tool_ctx(&workspace, &opts, session_id, turn_id, &id, &search_key, &search_pref).await;
+                        let ctx = self.tool_ctx(&workspace, &opts, session_id, turn_id, &id, &search_key, &search_pref, &anysearch_key).await;
                         let cancel_tool = cancel.clone();
                         let t0 = std::time::Instant::now();
                         handles.push((id.clone(), name.clone(), tokio::spawn(async move {
@@ -1738,7 +1742,7 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
                         }
                     }
                     let reg = Arc::clone(&registry);
-                    let ctx = self.tool_ctx(&workspace, &opts, session_id, turn_id, &id, &search_key, &search_pref).await;
+                    let ctx = self.tool_ctx(&workspace, &opts, session_id, turn_id, &id, &search_key, &search_pref, &anysearch_key).await;
                     let t0 = std::time::Instant::now();
                     let r = tokio::select! {
                         biased;
@@ -2276,6 +2280,7 @@ async fn summarize(
         tools: std::sync::Arc::new(Vec::new()),
         max_tokens: 1500,
         thinking_level: 0,
+        workspace: String::new(),
     };
     let mut stream = provider.stream_chat(req).await?;
     let mut out = String::new();
@@ -2360,6 +2365,9 @@ fn build_bound(cfg: &crate::config::ProviderConfig, model_id: &str, thinking: bo
             provider::anthropic::AnthropicProvider::new(cfg).with_model(model_id, thinking),
         ),
         "openai" => Box::new(provider::openai::chat(cfg).with_model(model_id)),
+        "opencode-free" => Box::new(
+            provider::opencode_free::OpenCodeFree::new(cfg).with_model(model_id),
+        ),
         _ => Box::new(provider::openai::responses(cfg).with_model(model_id)),
     }
 }

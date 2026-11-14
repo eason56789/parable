@@ -803,6 +803,9 @@ select.mp-in{appearance:none;background-image:linear-gradient(45deg,transparent 
 .mp-mn{font:12.5px var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .mp-row .fl{flex:1}
 .mp-badge{flex:none;padding:1px 5px;border:.5px solid var(--line);border-radius:4px;color:var(--fg2);font:10.5px var(--sans)}
+/* OpenCode 免费通道：免密钥徽标 + 说明块 */
+.mp-free{border-color:#5BC67A55;color:#5BC67A;background:#5BC67A1a;align-self:center}
+.mp-freenote{margin:-4px 0 14px;padding:9px 11px;border:.5px solid var(--line);border-radius:8px;background:var(--bg2);color:var(--fg2);font:12px/1.6 var(--sans)}
 .mp-row .ib{width:26px;height:26px}
 .mp-row .ib svg{width:14px;height:14px}
 .mp-row .tg{width:34px;height:20px;border-radius:10px}
@@ -1853,6 +1856,7 @@ const L = {
     mp_more:'更多', mp_refresh:'刷新', mp_edit:'编辑', mp_del:'删除', mp_enabled:'启用', mp_vision:'视觉',
     mp_empty:'还没有模型，点击“添加模型”', mp_test:'测试连接', mp_base:'Base URL',
     mp_models:'模型列表', mp_addm:'添加模型', mp_addp:'添加供应商', mp_getkey:'获取 API Key',
+    mp_free_badge:'免密钥', mp_free_note:'OpenCode 免费模型：无需 API Key，匿名使用官方免费额度。模型列表会在启动时自动更新。',
     mp_upstream:'从上游获取', mp_upstreaming:'正在获取…', mp_upstream_none:'上游没有返回模型',
     mp_fetch:'拉取', mp_fetched:'已拉取 {n} 个模型，选择要添加的：',
     mp_ctx:'上下文窗口', mp_maxout:'最大输出 Token', mp_maxout_ph:'由供应商决定',
@@ -2088,6 +2092,7 @@ const L = {
     mp_more:'More', mp_refresh:'Refresh', mp_edit:'Edit', mp_del:'Delete', mp_enabled:'Enabled',
     mp_vision:'Vision', mp_empty:'No models yet. Click “Add model”.', mp_test:'Test connection', mp_base:'Base URL',
     mp_models:'Models', mp_addm:'Add model', mp_addp:'Add provider', mp_getkey:'Get API Key',
+    mp_free_badge:'No key needed', mp_free_note:'OpenCode free models: no API key required — anonymous access to the official free tier. The model list refreshes automatically at startup.',
     mp_upstream:'Fetch from upstream', mp_upstreaming:'Fetching…', mp_upstream_none:'Upstream returned no models',
     mp_fetch:'Fetch', mp_fetched:'Fetched {n} models — pick the ones to add:',
     mp_ctx:'Context window', mp_maxout:'Max output tokens', mp_maxout_ph:'provider default',
@@ -9089,7 +9094,8 @@ $('#modal').onclick = e => { if (e.target.id === 'modal') closeSet(); };
 const MPAPI = [
   ['anthropic', 'Anthropic Messages (/v1/messages)'],
   ['openai', 'OpenAI Chat Completions (/v1/chat/completions)'],
-  ['responses', 'OpenAI Responses (/v1/responses)']
+  ['responses', 'OpenAI Responses (/v1/responses)'],
+  ['opencode-free', 'OpenCode 免费模型（免密钥 / opencode.ai）']
 ];
 let MPROV = [];
 let mpSel = null;
@@ -9138,23 +9144,30 @@ function mpDetail() {
       ).join('')
     : '<div class="mp-empty">' + t('mp_empty') + '</div>';
 
+  // OpenCode 免费通道：匿名可用，Base URL / API Key 都没有意义——
+  // 隐藏这两个字段，免得用户去填一个根本用不到的东西。
+  const isFree = p.api === 'opencode-free';
+
   el.innerHTML =
     '<div class="mp-ph">' +
       '<span class="mp-ic" style="background:' + esc(p.color || '#4d6bfe') + '">' + esc(p.icon || 'S') + '</span>' +
       '<h3 id="mpname">' + esc(mpName(p)) + '</h3>' +
+      (isFree ? '<span class="mp-badge mp-free">' + t('mp_free_badge') + '</span>' : '') +
       '<button class="ib" data-mpren title="' + t('mp_rename') + '">' + ic('edit') + '</button>' +
       '<button class="ib danger" data-mppdel="1" title="' + t('mp_del') + '">' + ic('trash') + '</button>' +
       '<button class="tg' + (p.enabled ? ' on' : '') + '" data-mpp="1" title="' + t('mp_enabled') + '"></button>' +
     '</div>' +
+    (isFree ? '' :
     '<div class="mp-field"><label>' + t('mp_base') + '</label>' +
-      '<input class="mp-in" data-mpf="baseUrl" value="' + esc(p.base_url || '') + '" placeholder="https://api.example.com/v1" spellcheck="false"></div>' +
+      '<input class="mp-in" data-mpf="baseUrl" value="' + esc(p.base_url || '') + '" placeholder="https://api.example.com/v1" spellcheck="false"></div>') +
     '<div class="mp-field"><label>' + t('mp_api') + '</label>' +
       '<select class="mp-in" data-mpf="api">' + MPAPI.map(([v, l]) =>
         '<option value="' + v + '"' + (p.api === v ? ' selected' : '') + '>' + l + '</option>').join('') +
       '</select></div>' +
+    (isFree ? '<div class="mp-field mp-freenote">' + t('mp_free_note') + '</div>' :
     '<div class="mp-field"><label><span>API Key</span><a href="#" data-mpgetkey="1">' + t('mp_getkey') + '</a></label>' +
       '<div class="mp-key"><input class="mp-in" type="password" data-mpf="key" value="' + esc(p.key || '') + '" placeholder="sk-..." spellcheck="false">' +
-      '<button class="mp-eye" data-mpeye="1" title="API Key">' + ic('eye') + '</button></div></div>' +
+      '<button class="mp-eye" data-mpeye="1" title="API Key">' + ic('eye') + '</button></div></div>') +
     '<div class="mp-field"><label>' + t('mp_name') + '</label>' +
       '<input class="mp-in" data-mpf="name" value="' + esc(mpName(p)) + '" placeholder="' + t('mp_sample') + '"></div>' +
     '<div style="display:flex;gap:8px;margin:14px 0">' +
@@ -10327,6 +10340,8 @@ $('#sp').addEventListener('click', async e => {
     const apiFmt = (p && p.api) || 'anthropic';
     const url = apiFmt === 'anthropic'
       ? 'https://console.anthropic.com/settings/keys'
+      : apiFmt === 'opencode-free'
+      ? 'https://opencode.ai/docs'
       : 'https://platform.openai.com/api-keys';
     try { window.open(url, '_blank', 'noopener'); } catch (err) {}
     return;
@@ -10446,6 +10461,31 @@ $('#sp').addEventListener('click', async e => {
   }
 
   if (e.target.closest('[data-mprefresh]')) {
+    const p = mpCur();
+    if (p && p.api === 'opencode-free') {
+      // 免费通道：刷新 = 重新拉上游免费目录并合并进模型表。
+      toast(t('mp_upstreaming'));
+      api('/providers/' + encodeURIComponent(p.id) + '/models')
+        .then(r => {
+          const list = (r && r.models) || [];
+          if (!list.length) { toast(t('mp_upstream_none')); return; }
+          const have = new Set((p.models || []).map(m => m.id));
+          const add = list
+            .filter(m => !have.has(m.id))
+            .map(m => ({
+              id: m.id, name: m.name || m.id,
+              context: m.context || 128000, vision: !!m.vision, tools: true,
+              thinking: !!m.thinking, enabled: true,
+              max_output: 0, levels: [], mapping: '',
+              structured: false, native_search: false,
+            }));
+          if (!add.length) { toast(t('mp_refreshed')); return; }
+          pushProvider({ id: p.id, models: add });
+          toast(t('mp_refreshed'));
+        })
+        .catch(err => toast(err.message));
+      return;
+    }
     loadProviders().then(() => { mpList(); mpDetail(); toast(t('mp_refreshed') || 'ok'); });
     return;
   }

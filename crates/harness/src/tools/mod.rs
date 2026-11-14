@@ -171,6 +171,8 @@ pub struct ToolCtx {
     pub runtime: Option<Arc<dyn TurnStarter>>,
     /// DeepSeek Search API key; empty disables `deepseek_search`.
     pub search_key: String,
+    /// AnySearch API key; empty = anonymous (IP-rate-limited) `anysearch_search`.
+    pub anysearch_key: String,
     /// User's preferred search source: "auto" | "deepseek" | "anysearch" | "multi".
     pub search_pref: String,
     /// Computer-use bridge (CDP); present when the runtime mounts it.
@@ -415,10 +417,10 @@ fn read_image(path: &Path, mime: &str) -> Result<ToolOutcome, HarnessError> {
 /// Process-wide memo for the tool schema list. Keyed by everything the
 /// schemas depend on (search preference, key presence, plugin count).
 fn specs_cache() -> &'static std::sync::Mutex<
-    Option<((String, bool, usize, u64), std::sync::Arc<Vec<crate::provider::ToolSpec>>)>,
+    Option<((String, bool, bool, usize, u64), std::sync::Arc<Vec<crate::provider::ToolSpec>>)>,
 > {
     static CACHE: std::sync::OnceLock<
-        std::sync::Mutex<Option<((String, bool, usize, u64), std::sync::Arc<Vec<crate::provider::ToolSpec>>)>>,
+        std::sync::Mutex<Option<((String, bool, bool, usize, u64), std::sync::Arc<Vec<crate::provider::ToolSpec>>)>>,
     > = std::sync::OnceLock::new();
     CACHE.get_or_init(|| std::sync::Mutex::new(None))
 }
@@ -451,6 +453,9 @@ pub struct Registry {
     pub search_pref: String,
     /// DeepSeek Search API key; empty means the `deepseek_search` tool is off.
     pub search_key: String,
+    /// AnySearch API key; empty = `anysearch_search` falls back to anonymous
+    /// (IP-rate-limited) calls where the preference exposes it.
+    pub anysearch_key: String,
 }
 
 impl Registry {
@@ -461,6 +466,7 @@ impl Registry {
             plugin_tools: std::sync::RwLock::new(plugin_tools),
             search_pref: String::new(),
             search_key: String::new(),
+            anysearch_key: String::new(),
         }
     }
 
@@ -476,11 +482,12 @@ impl Registry {
         *cache = None;
     }
 
-    /// Attach the search preference + key so `specs()` can tailor the search
+    /// Attach the search preference + keys so `specs()` can tailor the search
     /// tools to what the user picked in Settings.
-    pub fn with_search(mut self, pref: &str, key: &str) -> Self {
+    pub fn with_search(mut self, pref: &str, key: &str, anysearch_key: &str) -> Self {
         self.search_pref = pref.to_string();
         self.search_key = key.to_string();
+        self.anysearch_key = anysearch_key.to_string();
         self
     }
 
@@ -496,6 +503,7 @@ impl Registry {
         let cache_key = (
             self.search_pref.clone(),
             !self.search_key.trim().is_empty(),
+            !self.anysearch_key.trim().is_empty(),
             self.plugin_tools
                 .read()
                 .map(|g| g.len())
@@ -612,6 +620,8 @@ impl Registry {
                 name: "web_search".into(),
                 description: if self.search_pref == "deepseek" {
                     "Search the web across several engines at once (Bing, Sogou, 360, DuckDuckGo, Baidu). FALLBACK ONLY — the user prefers deepseek_search; use that first and reach for this only when it errors or is unavailable.".into()
+                } else if self.search_pref == "anysearch" {
+                    "Search the web via the AnySearch aggregated API plus engine scraping (Bing, Baidu, 360, DuckDuckGo, Sogou). FALLBACK ONLY — the user prefers anysearch_search; use that first and reach for this only when it errors or is unavailable.".into()
                 } else if self.search_pref == "multi" {
                     "Search the web across several engines at once (Bing, Sogou, 360, DuckDuckGo, Baidu) and return each platform's results. The user prefers the multi-engine comparison view — use this for web searches.".into()
                 } else {
@@ -654,6 +664,25 @@ skill matches the current request, then follow the steps it contains. Read-only.
                     "count": int_prop("Number of results, 1-50 (default 8)"),
                     "need_content": json!({"type":"boolean","description":"Also return full page content per result (heavier, default false)"}),
                     "ori_question": str_prop("The user's original question (optional, aids ranking)"),
+                }), &["query"]),
+            },
+            ToolSpec {
+                name: "anysearch_search".into(),
+                // 显式偏好 anysearch 时不因缺 key 收走工具——匿名可调（按 IP
+                // 限流），调用报错会给配置提示。multi 偏好=纯引擎抓取，不给。
+                description: if self.search_pref == "anysearch" {
+                    "Search the web via the AnySearch aggregated API (POST /v1/search) across 22+ verticals (general, finance, code, legal, academic …). Returns structured titles/URLs/snippets with optional page content. The user's PREFERRED search — use this before web_search.".into()
+                } else {
+                    "Search the web via the AnySearch aggregated API (POST /v1/search) across 22+ verticals (general, finance, code, legal, academic …). Returns structured titles/URLs/snippets with optional page content. Higher quality than web_search's engine scraping — prefer it when available.".into()
+                },
+                input_schema: obj(json!({
+                    "query": str_prop("Search keywords, 1-256 chars"),
+                    "count": int_prop("Number of results, 1-10 (default 8)"),
+                    "tag": str_prop("Optional vertical capability tag, a full {domain}.{sub_domain} pair like \"finance.quote\", \"code.snippet\", \"academic.paper\". Omit for general search"),
+                    "zone": str_prop("Optional region: \"cn\" or \"intl\""),
+                    "language": str_prop("Optional language code like \"zh-CN\" or \"en\""),
+                    "params": json!({"type":"object","description":"Tag-specific capability parameters (e.g. finance.quote takes {\"type\":\"stock\",\"symbol\":\"AAPL\"}). See the tag's capability docs","additionalProperties": true}),
+                    "need_content": json!({"type":"boolean","description":"Also return cleaned page content per result (heavier, default false)"}),
                 }), &["query"]),
             },
             // ---- scheduled tasks (reference: DeepSeek Harness `schedule`) ----
@@ -1068,14 +1097,21 @@ skill matches the current request, then follow the steps it contains. Read-only.
             });
         }
         // 用户在设置里挑选的搜索来源决定工具暴露：
-        // - auto：web_search 始终可用；deepseek_search 仅在配了 key 时暴露
-        // - deepseek：两个都暴露，描述里写明优先级（key 缺失时调用会报配置提示）
-        // - anysearch / multi：只要 web_search，且 multi_search 按偏好裁剪查询源
+        // - auto：web_search 始终可用；deepseek_search / anysearch_search 仅在
+        //   配了对应 key 时暴露
+        // - deepseek：web_search + deepseek_search（key 缺失时调用报配置提示）
+        // - anysearch：web_search + anysearch_search（匿名可调，缺 key 不收走）
+        // - multi：只要 web_search（纯引擎抓取），且 multi_search 按偏好裁剪查询源
         if self.search_pref != "deepseek" && self.search_key.trim().is_empty() {
             specs.retain(|s| s.name != "deepseek_search");
         }
         if self.search_pref == "deepseek" && self.search_key.trim().is_empty() {
             specs.retain(|s| s.name != "web_search");
+        }
+        if self.search_pref == "multi"
+            || (self.search_pref != "anysearch" && self.anysearch_key.trim().is_empty())
+        {
+            specs.retain(|s| s.name != "anysearch_search");
         }
         specs
     }
@@ -1128,6 +1164,7 @@ skill matches the current request, then follow the steps it contains. Read-only.
             "read_skill" => self.read_skill(args).await,
             "web_search" => web::multi_search(args, ctx).await,
             "deepseek_search" => web::deepseek_search(args, ctx).await,
+            "anysearch_search" => web::anysearch_search(args, ctx).await,
             "computer_snapshot" => crate::computer::snapshot(args, ctx).await,
             "computer_screenshot" => crate::computer::screenshot(args, ctx).await,
             "computer_axtree" => crate::computer::axtree(args, ctx).await,

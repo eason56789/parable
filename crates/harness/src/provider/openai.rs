@@ -145,7 +145,7 @@ fn flush_pending(out: &mut Vec<Value>, pending: &mut Vec<Value>) {
     pending.clear();
 }
 
-fn build_chat_body(req: &ChatRequest) -> Value {
+pub(crate) fn build_chat_body(req: &ChatRequest) -> Value {
     let tools: Vec<Value> = req
         .tools
         .iter()
@@ -302,11 +302,13 @@ fn flush_calls(
         .collect()
 }
 
-fn stream_chat_completions<S>(
+/// chat-completions 的 SSE 解析。错误流统一为 `HarnessError`，好让
+/// OpenCode 免费通道（wreq 传输）与 reqwest 传输共用同一套解析。
+pub(crate) fn stream_chat_completions<S>(
     byte_stream: S,
 ) -> impl Stream<Item = Result<StreamChunk, HarnessError>> + Send
 where
-    S: Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
+    S: Stream<Item = Result<Bytes, HarnessError>> + Send + 'static,
 {
     async_stream::stream! {
         futures::pin_mut!(byte_stream);
@@ -318,7 +320,7 @@ where
         while let Some(item) = byte_stream.next().await {
             let chunk = match item {
                 Ok(c) => c,
-                Err(e) => { yield Err(HarnessError::Http(e)); return; }
+                Err(e) => { yield Err(e); return; }
             };
             buf.extend_from_slice(&chunk);
             for raw in take_frames(&mut buf) {
@@ -606,7 +608,9 @@ impl Provider for OpenAiBase {
             });
         } else {
             tokio::spawn(async move {
-                let s = stream_chat_completions(resp.bytes_stream());
+                let s = stream_chat_completions(
+                    resp.bytes_stream().map(|r| r.map_err(HarnessError::Http)),
+                );
                 futures::pin_mut!(s);
                 while let Some(item) = s.next().await {
                     if tx.send(item).await.is_err() {

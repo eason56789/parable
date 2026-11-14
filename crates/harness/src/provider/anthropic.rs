@@ -575,6 +575,7 @@ mod tests {
             }]),
             max_tokens: 4096,
             thinking_level: 2,
+            workspace: String::new(),
         };
         let body = build_body(&req, true);
         assert_eq!(body["thinking"]["type"], "enabled");

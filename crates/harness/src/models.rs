@@ -38,6 +38,12 @@ pub struct UpstreamModel {
 
 /// Fetch the model list for one provider.
 pub async fn list_upstream(cfg: &ProviderConfig) -> Result<Vec<UpstreamModel>, HarnessError> {
+    // OpenCode 免费通道：目录在专属端点（免鉴权），形状同 OpenAI 列表
+    // 加 cost/capabilities 扩展字段，解析走 opencode_free 的专用过滤
+    // （只留免费且支持 chat 的模型）。
+    if cfg.api == "opencode-free" {
+        return crate::provider::opencode_free::list_free_models().await;
+    }
     let client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(15))
         .timeout(std::time::Duration::from_secs(30))

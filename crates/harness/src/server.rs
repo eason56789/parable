@@ -880,6 +880,12 @@ async fn get_config(State(state): State<SharedState>, headers: HeaderMap) -> Res
         *k = json!(masked);
         v["hasSearchKey"] = json!(has);
     }
+    if let Some(k) = v.get_mut("anysearch_key") {
+        let masked = k.as_str().map(mask_key).unwrap_or_default();
+        let has = !masked.is_empty();
+        *k = json!(masked);
+        v["hasAnySearchKey"] = json!(has);
+    }
     Json(v).into_response()
 }
 
@@ -967,6 +973,12 @@ fn merge_config(cfg: &mut Config, v: &Value) {
                     let s = val.as_str().unwrap_or("").to_string();
                     if !s.contains('…') && !s.contains('•') {
                         cfg.search_key = s;
+                    }
+                }
+                "anysearchKey" | "anysearch_key" => {
+                    let s = val.as_str().unwrap_or("").to_string();
+                    if !s.contains('…') && !s.contains('•') {
+                        cfg.anysearch_key = s;
                     }
                 }
                 "searchPref" | "search_pref" => {
@@ -1203,7 +1215,8 @@ async fn get_providers(State(state): State<SharedState>, headers: HeaderMap) -> 
         .iter()
         .map(|p| {
             let mut v = serde_json::to_value(p.masked()).unwrap_or_default();
-            v["hasKey"] = json!(!p.key.is_empty());
+            // 免费通道不需要 key（匿名），hasKey=true 以免 UI 把它标成缺配置。
+            v["hasKey"] = json!(!p.key.is_empty() || p.api == "opencode-free");
             v
         })
         .collect();
@@ -1273,6 +1286,9 @@ async fn test_provider(
                 .with_model(&model_id, thinking),
         ),
         "openai" => Box::new(crate::provider::openai::chat(&probe).with_model(&model_id)),
+        "opencode-free" => Box::new(
+            crate::provider::opencode_free::OpenCodeFree::new(&probe).with_model(&model_id),
+        ),
         _ => Box::new(crate::provider::openai::responses(&probe).with_model(&model_id)),
     };
     match bound.test().await {
@@ -3484,11 +3500,11 @@ async fn tools(State(state): State<SharedState>, headers: HeaderMap) -> Response
     }
     // Same search-preference tailoring as a real turn, so the UI listing
     // matches what the model actually gets.
-    let (pref, key) = {
+    let (pref, key, akey) = {
         let cfg = state.config.read().await;
-        (cfg.search_pref.clone(), cfg.search_key.clone())
+        (cfg.search_pref.clone(), cfg.search_key.clone(), cfg.anysearch_key.clone())
     };
-    let reg = crate::tools::Registry::new(std::path::PathBuf::from(".")).with_search(&pref, &key);
+    let reg = crate::tools::Registry::new(std::path::PathBuf::from(".")).with_search(&pref, &key, &akey);
     let specs = reg.specs();
     Json(json!({"tools": specs.as_ref()})).into_response()
 }
@@ -3526,6 +3542,48 @@ pub async fn serve_in(
     {
         let cfg = config.read().await;
         crate::config::set_proxy(cfg.http_proxy.clone(), cfg.http_no_proxy.clone());
+    }
+    // 免费模型目录后台补全：启动时拉一次 OpenCode 免费模型清单，填进内置
+    // provider 的模型表并落盘。失败不阻塞启动（目录端点偶发不通）。
+    {
+        let config = config.clone();
+        tokio::spawn(async move {
+            let models = match crate::provider::opencode_free::list_free_models().await {
+                Ok(m) => m,
+                Err(e) => {
+                    tracing::warn!("free model list unavailable: {e}");
+                    return;
+                }
+            };
+            let mut cfg = config.write().await;
+            let Some(p) = cfg.providers.iter_mut().find(|p| p.id == "opencode-free") else {
+                return;
+            };
+            let mut changed = false;
+            for m in models {
+                if !p.models.iter().any(|x| x.id == m.id) {
+                    p.models.push(crate::config::ModelConfig {
+                        id: m.id.clone(),
+                        name: m.name.clone().unwrap_or_else(|| m.id.clone()),
+                        context: m.context.unwrap_or(128_000),
+                        vision: m.vision.unwrap_or(false),
+                        tools: true,
+                        thinking: m.thinking.unwrap_or(false),
+                        max_output: 0,
+                        levels: Vec::new(),
+                        mapping: String::new(),
+                        structured: false,
+                        native_search: false,
+                        enabled: true,
+                    });
+                    changed = true;
+                }
+            }
+            if changed {
+                tracing::info!("free provider: model list refreshed");
+                let _ = cfg.save();
+            }
+        });
     }
     // 自动归档：N 天未活跃的非置顶会话移入归档（设置 → 会话管理；0 = 关闭）。
     {
