@@ -68,6 +68,8 @@ pub fn build_messages(messages: &[Msg]) -> Value {
             Msg::User(parts) => {
                 let content: Vec<Value> = parts
                     .iter()
+                    // 附件芯片元数据只服务界面；模型侧内容已注入 Text。
+                    .filter(|p| !matches!(p, UserPart::File { .. }))
                     .map(|p| match p {
                         UserPart::Text(t) => json!({"type":"text","text": t}),
                         UserPart::Image { media_type, data } => json!({
@@ -81,6 +83,7 @@ pub fn build_messages(messages: &[Msg]) -> Value {
                             }
                             v
                         }
+                        UserPart::File { .. } => unreachable!("filtered above"),
                     })
                     .collect();
                 out.push(json!({"role":"user","content": content}));

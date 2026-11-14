@@ -29,6 +29,15 @@ pub enum UserPart {
         #[serde(default)]
         is_error: bool,
     },
+    /// 用户附件的 UI 元数据（芯片行 + 点击打开文件所在位置）。模型侧不发：
+    /// 附件内容已由 inline_attachments 注入 Text，这里只服务界面重放——
+    /// 否则刷新后附件芯片消失、无处可点。
+    File {
+        name: String,
+        path: String,
+        #[serde(default)]
+        size: u64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,6 +80,8 @@ impl Msg {
                     // 视觉图按固定价估算（截图约一张 ~1100 tok 量级）。
                     UserPart::Image { .. } => 1100,
                     UserPart::ToolResult { content, .. } => crate::token::estimate(content) + 8,
+                    // 附件芯片只服务界面，模型侧看到的是 Text 注记。
+                    UserPart::File { .. } => 0,
                 })
                 .sum(),
             Msg::Assistant(parts) => parts

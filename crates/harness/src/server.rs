@@ -277,6 +277,7 @@ pub fn build_router(state: SharedState) -> Router {
         // 断线重连后恢复权限面板;聊天附件上传
         .route("/pending", get(pending_permissions))
         .route("/attachments", post(upload_attachment))
+        .route("/files/reveal", post(reveal_file))
         // 侧边栏(side pane):文件浏览 / git 审查 / 浏览器 / 终端
         .route("/fs/tree", get(fs_tree))
         .route("/fs/file", get(fs_file))
@@ -821,6 +822,48 @@ async fn upload_attachment(
         "size": body.len(),
     }))
     .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct RevealReq {
+    path: String,
+}
+
+/// POST /api/files/reveal:在系统文件管理器里打开文件所在位置
+/// （Windows 资源管理器定位到文件、macOS Finder、Linux 目录管理器）。
+/// 附件芯片点击用——文件在 `~/.parable/uploads/` 或工作区内。
+async fn reveal_file(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(r): Json<RevealReq>,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    let p = std::path::PathBuf::from(r.path.trim());
+    if r.path.trim().is_empty() {
+        return bad_request("path is required");
+    }
+    if !p.exists() {
+        return bad_request("file not found");
+    }
+    #[cfg(windows)]
+    let spawned = std::process::Command::new("explorer")
+        .arg(format!("/select,{}", p.display()))
+        .spawn();
+    #[cfg(target_os = "macos")]
+    let spawned = std::process::Command::new("open")
+        .arg("-R")
+        .arg(&p)
+        .spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let spawned = std::process::Command::new("xdg-open")
+        .arg(p.parent().unwrap_or(std::path::Path::new("/")))
+        .spawn();
+    match spawned {
+        Ok(_) => Json(json!({"ok": true})).into_response(),
+        Err(e) => server_error(crate::error::HarnessError::Io(e)),
+    }
 }
 
 /// 只取最后一段文件名(剥掉任何目录成分),替换文件系统非法字符,去掉结尾

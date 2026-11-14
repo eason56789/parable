@@ -89,6 +89,8 @@ fn build_chat_messages(system: &str, messages: &[Msg]) -> Value {
                         UserPart::ToolResult { id, content, .. } => {
                             out.push(json!({"role":"tool","tool_call_id": id,"content": content}));
                         }
+                        // 附件芯片元数据只服务界面；模型侧内容已注入 Text。
+                        UserPart::File { .. } => {}
                     }
                 }
             }
@@ -420,6 +422,8 @@ fn build_responses_body(req: &ChatRequest) -> Value {
                         UserPart::ToolResult { id, content, .. } => input.push(json!({
                             "type":"function_call_output","call_id": id,"output": content
                         })),
+                        // 附件芯片元数据只服务界面；模型侧内容已注入 Text。
+                        UserPart::File { .. } => {}
                     }
                 }
             }

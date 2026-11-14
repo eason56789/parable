@@ -105,7 +105,7 @@ body.chat #chat{opacity:1;pointer-events:auto}
 .uacts{display:flex;gap:1px;padding-top:3px;opacity:0;transform:translateY(2px);transition:opacity calc(.25s * var(--animd)),transform calc(.3s * var(--animd));flex:none}
 .u:hover .uacts{opacity:1;transform:none}
 .uacts .ib{width:26px;height:26px}.uacts .ib svg{width:15px;height:15px}
-.uatt{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 8px}
+.uatt{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 8px;justify-content:flex-end}
 .uatt .att{background:var(--input);border:.5px solid var(--line)}
 .a{margin:14px 0 18px;font-family:var(--chat);font-size:var(--fs);line-height:var(--lh,1.5)}
 /* 密度：只动消息之间的留白，不动字号——ZCode 的 compact 也是这样。 */
@@ -1181,14 +1181,17 @@ body.spmax #sdp{position:fixed;inset:46px 0 0 0;width:100vw;max-width:none;z-ind
 /* ============ 附件 ============ */
 #atts{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
 #atts:empty{display:none}
-.att{display:inline-flex;align-items:center;gap:6px;background:var(--hov);border-radius:8px;padding:4px 8px;font:12.5px var(--sans);max-width:230px}
-.att svg{width:14px;height:14px;color:var(--fg2);flex:none}
-.att b{font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.att .x{cursor:pointer;color:var(--fg2);display:grid;place-items:center;border-radius:4px;padding:0 1px;font-size:13px;line-height:1}
+/* 附件芯片：圆角药丸 + 类型色块图标（参考 ZCode 附件排版）。点击打开
+   文件所在位置（revealFile），composer 里的芯片另有 × 可移除。 */
+.att{display:inline-flex;align-items:center;gap:9px;background:var(--input);border:.5px solid var(--line);border-radius:999px;padding:4px 13px 4px 5px;font:13px var(--sans);max-width:320px;cursor:pointer;transition:background-color calc(.2s * var(--animd))}
+.att:hover{background:var(--hov)}
+.att b{font-weight:450;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.att .atic{width:26px;height:26px;border-radius:8px;background:var(--c,#7c87a8);display:grid;place-items:center;flex:none}
+.att .atic svg{width:14px;height:14px;stroke:#fff;fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
+.att .x{cursor:pointer;color:var(--fg2);display:grid;place-items:center;border-radius:50%;width:18px;height:18px;font-size:13px;line-height:1;flex:none}
 .att .x:hover{color:var(--fg);background:var(--line)}
 /* 图片附件的小缩略图（输入框 chip 与用户气泡共用） */
-.att .attimg{width:18px;height:18px;border-radius:4px;object-fit:cover;flex:none}
-.uatt .att .attimg{width:34px;height:34px;border-radius:6px}
+.att .attimg{width:26px;height:26px;border-radius:8px;object-fit:cover;flex:none}
 .att.upl{opacity:.6}
 body.dragging #main{outline:2px dashed var(--accent);outline-offset:-8px}
 
@@ -1919,7 +1922,7 @@ const L = {
     tk_title:'Token 用量', tk_cache:'缓存命中', tk_uncached:'未缓存输入', tk_cache_read:'缓存读取', tk_output:'输出',
     cx_title:'上下文已用', cx_sys:'系统提示词', cx_tools:'工具定义', cx_msgs:'对话消息',
     cache_hit:'缓存命中', u_turns:'轮', u_steps:'步', u_ms:'毫秒',
-    att_uploading:'上传中…', att_fail:'附件上传失败：',
+    att_uploading:'上传中…', att_fail:'附件上传失败：', att_reveal:'点击打开文件所在位置',
     sysprev_empty:'（空 — 下一轮会话将没有 system 提示词）', sysprev_fail:'预览失败：',
     plan_mode:'计划模式', plan_mode_h:'先制定计划，经确认后再执行', plan_badge:'计划',
     auto_no_chat:'当前没有会话，不能投递到当前对话', disc:'Parable 是 AI，可能会出错，请核实重要内容',
@@ -2156,7 +2159,7 @@ const L = {
     tk_title:'Token usage', tk_cache:'Cache hit', tk_uncached:'Uncached input', tk_cache_read:'Cache read', tk_output:'Output',
     cx_title:'Context used', cx_sys:'System prompt', cx_tools:'Tool definitions', cx_msgs:'Messages',
     cache_hit:'cache hit', u_turns:'turns', u_steps:'steps', u_ms:'ms',
-    att_uploading:'Uploading…', att_fail:'Attachment upload failed: ',
+    att_uploading:'Uploading…', att_fail:'Attachment upload failed: ', att_reveal:'Open file location',
     sysprev_empty:'(empty — the next turn will have no system prompt)', sysprev_fail:'Preview failed: ',
     plan_mode:'Plan mode', plan_mode_h:'Draft a plan first and wait for approval before running', plan_badge:'Plan',
     auto_no_chat:'No active chat to deliver to', disc:'Parable is AI and can make mistakes. Please double-check important content',
@@ -3797,6 +3800,41 @@ function fmtWhen(ts) {
   return (d.getMonth() + 1) + '-' + d.getDate() + ' ' + hm;
 }
 
+/** 附件芯片的类型图标：圆角色块 + 白色字形（压缩包黄绿拉链、图片山、PDF…）。 */
+function attIcon(name) {
+  const n = String(name || '').toLowerCase();
+  const ext = n.includes('.') ? n.split('.').pop() : '';
+  const G = {
+    zip: '<svg viewBox="0 0 16 16"><path d="M8 1.5v13M5 3.5h6M5 6.5h6M5 9.5h6M5 12.5h6"/></svg>',
+    img: '<svg viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="10" rx="1.6"/><circle cx="5.6" cy="6.4" r="1.1"/><path d="M3.2 11.6l3.1-3 2.2 2.1 2-1.9 2.3 2.2"/></svg>',
+    pdf: '<svg viewBox="0 0 16 16"><path d="M4 2h5l3 3v9H4z"/><path d="M9 2v3h3"/><path d="M6 9.2h4M6 11.4h4"/></svg>',
+    code: '<svg viewBox="0 0 16 16"><path d="M5.5 5L2.5 8l3 3M10.5 5l3 3-3 3"/></svg>',
+    doc: '<svg viewBox="0 0 16 16"><path d="M4 2h5l3 3v9H4z"/><path d="M9 2v3h3"/><path d="M6 8.6h4M6 10.8h4M6 13h2.4"/></svg>',
+    file: '<svg viewBox="0 0 16 16"><path d="M4 2h5l3 3v9H4z"/><path d="M9 2v3h3"/></svg>',
+  };
+  let k = 'file', c = '#7c87a8';
+  if (['zip', '7z', 'rar', 'tar', 'gz', 'tgz', 'bz2', 'xz', 'zst', 'ota'].includes(ext)) {
+    k = 'zip'; c = '#9aac2b';
+  } else if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'ico'].includes(ext)) {
+    k = 'img'; c = '#5b8def';
+  } else if (ext === 'pdf') {
+    k = 'pdf'; c = '#e5484d';
+  } else if (['js', 'jsx', 'ts', 'tsx', 'rs', 'py', 'go', 'java', 'c', 'h', 'cpp', 'css', 'html', 'json', 'sh', 'ps1', 'toml', 'yaml', 'yml'].includes(ext)) {
+    k = 'code'; c = '#2f9e6b';
+  } else if (['doc', 'docx', 'txt', 'md', 'rtf', 'csv'].includes(ext)) {
+    k = 'doc'; c = '#8a93b0';
+  }
+  return '<span class="atic" data-k="' + k + '" style="--c:' + c + '">' + G[k] + '</span>';
+}
+
+/** 点击附件芯片 → 在系统文件管理器里定位到该文件。 */
+function revealFile(path) {
+  if (!path) return;
+  api('/files/reveal', { method: 'POST', body: { path } })
+    .then(() => toast(S.lang === 'zh' ? '已打开文件所在位置' : 'Opened file location'))
+    .catch(e => toast(e.message));
+}
+
 function uMsg(q, idx, atts) {
   const d = document.createElement('div');
   d.className = 'u msg';
@@ -3809,11 +3847,16 @@ function uMsg(q, idx, atts) {
     atts.forEach(a => {
       const s = document.createElement('span');
       s.className = 'att';
-      // 图片附件带本地预览缩略图（URL.createObjectURL，随消息一起传入）
-      s.innerHTML = (a && a.url ? '<img class="attimg" alt="">' : ic('file')) + '<b></b>';
+      // 图片附件带本地预览缩略图（URL.createObjectURL，随消息一起传入）；
+      // 非图片按扩展名渲染类型色块图标。点击 → 打开文件所在位置。
+      s.innerHTML = (a && a.url ? '<img class="attimg" alt="">' : attIcon(a.name)) + '<b></b>';
       const im = s.querySelector('.attimg');
       if (im) im.src = a.url;
       s.querySelector('b').textContent = a.name || '';
+      if (a.path) {
+        s.title = t('att_reveal');
+        s.onclick = () => revealFile(a.path);
+      }
       row.append(s);
     });
     b.append(row);
@@ -6903,7 +6946,7 @@ function renderAtts() {
   const el = $('#atts');
   el.innerHTML = ATTS.map((a, i) =>
     '<span class="att' + (a.loading ? ' upl' : '') + '">' +
-    (a.url ? '<img class="attimg" alt="">' : ic('file')) +
+    (a.url ? '<img class="attimg" alt="">' : attIcon(a.name)) +
     '<b></b>' + (a.loading ? '<span class="upltxt">…</span>' : '') +
     '<span class="x" data-ax="' + i + '">×</span></span>'
   ).join('');
@@ -6912,6 +6955,13 @@ function renderAtts() {
     const im = s.querySelector('.attimg');
     if (im) im.src = a.url;
     s.querySelector('b').textContent = a.name + (a.loading ? ' · ' + t('att_uploading') : '');
+    // 点击芯片 → 打开文件所在位置；× 只做移除。
+    if (a.path && !a.loading) {
+      s.title = t('att_reveal');
+      s.onclick = e => {
+        if (!e.target.closest('[data-ax]')) revealFile(a.path);
+      };
+    }
   });
 }
 $('#atts').onclick = e => {
@@ -7507,10 +7557,17 @@ async function openSession(id, focusMsg) {
 
       if (m.role === 'user') {
         // A user message is either the human's question, or a batch of tool results.
-        if (texts.length) {
+        // 附件芯片（File 部件）重放；inline_attachments 的散文注记由芯片
+        // 替代，不再进正文——否则刷新后正文多一段「The user attached…」。
+        const files = parts.filter(p => p.k === 'file')
+          .map(f => ({ name: f.name, path: f.path, size: f.size }));
+        const shown = texts
+          .map(x => x.text)
+          .filter(t => !/^The user attached the following files:/.test(String(t).trim()));
+        if (shown.length || files.length) {
           closeA();
           curTurnTs = m.created_at || curTurnTs;
-          uMsg(texts.map(x => x.text).join('\n\n'), null, []);
+          uMsg(shown.join('\n\n'), null, files);
         }
         results.forEach((r, i) => {
           const display = (m.displays && m.displays[i]) ||
@@ -7949,6 +8006,9 @@ function normParts(v) {
         text: p.ToolResult.content || '',
         error: !!p.ToolResult.is_error
       });
+    } else if (p.File) {
+      // 附件芯片元数据（重放渲染 + 点击打开文件所在位置）
+      out.push({ k: 'file', name: p.File.name || '', path: p.File.path || '', size: p.File.size || 0 });
     }
   }
   return out;

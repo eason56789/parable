@@ -1244,6 +1244,15 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
         if !user_text.is_empty() {
             user_parts.push(UserPart::Text(user_text.to_string()));
         }
+        // 附件芯片元数据进消息（界面重放用，点击可打开文件所在位置）。
+        // 模型侧在 wire 构建时跳过：附件内容已由 attach_note 注入文本。
+        for a in &attachments {
+            user_parts.push(UserPart::File {
+                name: a.name.clone(),
+                path: a.path.clone(),
+                size: a.size,
+            });
+        }
         if !user_parts.is_empty() {
             // Persist the user's own words too — without this a restored session
             // has tool results but no question that prompted them.
@@ -2336,6 +2345,9 @@ fn render_for_summary(msgs: &[Msg]) -> String {
                             let head = content.lines().take(20).collect::<Vec<_>>().join("\n");
                             let tag = if *is_error { "error" } else { "ok" };
                             out.push_str(&format!("TOOL RESULT ({tag}):\n{head}\n"));
+                        }
+                        UserPart::File { name, .. } => {
+                            out.push_str(&format!("USER: [attached file: {name}]\n"));
                         }
                     }
                 }
