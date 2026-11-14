@@ -619,11 +619,14 @@ impl SubagentService {
             if delivery == Delivery::Parent {
                 // 把结果写进父会话的历史，父代理下一轮就能看到；本轮内要立刻
                 // 看到则用 agent_wait（它把结果作为 tool_result 回填给模型）。
+                // 首行是前端标识行（回答上方 60% 透明度的小字）；第二行起是
+                // 给模型的指令 —— 明确「汇报要点、勿复述派出经过」，否则空
+                // prompt 的唤醒轮会把派出公告再念一遍。
                 let text = format!(
-                    "[subagent `{}` (task: {}) finished]\n\n{}",
-                    cname,
-                    label,
-                    payload["result"].as_str().unwrap_or_default()
+                    "子代理 `{cname}` 已完成工作。\n[系统] 它的任务是「{label}」，结果如下 —— 请把要点汇报给用户（不要复述派出经过），并按需继续：\n\n{result}",
+                    cname = cname,
+                    label = label,
+                    result = payload["result"].as_str().unwrap_or_default()
                 );
                 let deliver_store = shared_store.clone().unwrap_or_else(|| {
                     Arc::new(crate::session::SessionStore::new())
