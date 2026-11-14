@@ -696,11 +696,12 @@ skill matches the current request, then follow the steps it contains. Read-only.
             // ---- subagents (reference: DeepSeek Harness `subagent`) ----
             ToolSpec {
                 name: "spawn_agent".into(),
-                description: "Delegate a task to an isolated child agent with its own context. Use for independent research or parallel work. Returns immediately; call agent_wait to collect the child's result.".into(),
+                description: "Delegate a task to an isolated child agent with its own context. Use for independent research or parallel work. Returns immediately; call agent_wait to collect the child's result. Pass `agent` to spawn a saved profile from the 智能体库 (see Saved agents in your system prompt) — its persona, model and tool allowlist then apply.".into(),
                 input_schema: obj(json!({
                     "label": str_prop("Short task label for the catalogue"),
                     "task": str_prop("The task the child should carry out"),
                     "name": str_prop("REQUIRED. Give the child a fitting short Chinese name (≤32 chars), e.g. 文档整理师 / 测试跑腿 / 情报搜集员 — it is the agent's identity in the roster. Also accepts letters/digits/hyphens."),
+                    "agent": str_prop("Name of a saved agent profile (智能体库). Its system prompt, model and tool allowlist apply to the child; `model` is ignored when the profile pins one."),
                     "cwd": str_prop("Initial working directory (defaults to the workspace)"),
                     "seed_history": bool_prop("Start the child with this conversation as context"),
                     "model": str_prop("Model selector for the child (defaults to the parent's)"),
@@ -1721,13 +1722,36 @@ impl Registry {
                 // 拉起子 agent 等于委托一批不可预知的操作:按 shell 级送确认
                 // (plan 模式下也会被 authorize 拒掉)。
                 ctx.authorize("spawn_agent", label, Risk::Shell).await?;
+                // 智能体库 profile：按名（或 id）解析。命中则人设/模型/工具
+                // 白名单落到子轮上；名字与模型仍以显式传参优先。
+                let mut system_prompt = String::new();
+                let mut tools_filter: Vec<String> = Vec::new();
+                let mut model = a["model"].as_str().unwrap_or("").to_string();
+                if let Some(an) = a["agent"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+                    match crate::agents::find(&self.workspace, an) {
+                        Some(p) => {
+                            if model.is_empty() {
+                                model = p.model.clone();
+                            }
+                            system_prompt = p.system_prompt;
+                            tools_filter = p.tools;
+                        }
+                        None => {
+                            return Err(HarnessError::Tool(format!(
+                                "no saved agent named `{an}` (智能体库); check the Saved agents section of your system prompt"
+                            )));
+                        }
+                    }
+                }
                 let req = crate::subagent::SpawnRequest {
                     label: a["label"].as_str().unwrap_or("task").to_string(),
                     name: a["name"].as_str().map(String::from),
                     task: a["task"].as_str().unwrap_or("").to_string(),
                     cwd: a["cwd"].as_str().map(String::from),
                     seed_history: a["seed_history"].as_bool().unwrap_or(false),
-                    model: a["model"].as_str().unwrap_or("").to_string(),
+                    model,
+                    system_prompt,
+                    tools: tools_filter,
                     delivery: Some(crate::subagent::Delivery::Parent),
                 };
                 let id = sub

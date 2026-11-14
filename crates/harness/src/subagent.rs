@@ -63,6 +63,13 @@ pub struct SpawnRequest {
     pub seed_history: bool,
     #[serde(default)]
     pub model: String,
+    /// Saved-agent persona (智能体库 profile)：追加到子代理系统提示词的人设。
+    /// 由 `spawn_agent` 从 profile 解析后填入；空 = 用默认提示词。
+    #[serde(default)]
+    pub system_prompt: String,
+    /// 限定子代理可调用的工具名清单（空 = 全部工具）。
+    #[serde(default)]
+    pub tools: Vec<String>,
     #[serde(default)]
     pub delivery: Option<Delivery>,
 }
@@ -432,6 +439,14 @@ impl SubagentService {
                     .unwrap_or_else(crate::agent::TurnOptions::default);
                 if !req.model.is_empty() {
                     o.model_sel = req.model.clone();
+                }
+                // 智能体库 profile：人设追加 + 工具白名单。spawn_agent 与
+                // 团队页「启动」都通过这两个字段把 profile 落到子轮上。
+                if !req.system_prompt.is_empty() {
+                    o.system_extra = req.system_prompt.clone();
+                }
+                if !req.tools.is_empty() {
+                    o.tool_filter = req.tools.clone();
                 }
                 Some(o)
             }
@@ -1111,6 +1126,8 @@ mod tests {
                         cwd: None,
                         seed_history: false,
                         model: String::new(),
+                        system_prompt: String::new(),
+                        tools: Vec::new(),
                         delivery: Some(Delivery::Parent),
                     },
                 )
@@ -1134,6 +1151,8 @@ mod tests {
                     cwd: None,
                     seed_history: false,
                     model: String::new(),
+                    system_prompt: String::new(),
+                    tools: Vec::new(),
                     delivery: Some(Delivery::Parent),
                 },
             )

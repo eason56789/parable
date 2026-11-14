@@ -470,6 +470,23 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 .taskrow.col{display:block}
 .skl .pempty{padding:30px;text-align:center}
 .skl .taskrow.col .tk-prompt{background:color-mix(in srgb,var(--bg) 62%,transparent)}
+/* 智能体库（agent definitions）：徽标、颜色圆点、工具勾选网格 */
+.agb{font-style:normal;font:11px var(--sans);padding:1px 8px;border-radius:99px;background:var(--hov);color:var(--fg2);margin-left:8px;vertical-align:2px;white-space:nowrap;font-weight:400}
+.agdots{display:inline-flex;gap:8px;align-items:center}
+.agdot{width:26px;height:26px;border-radius:8px;cursor:pointer;border:2px solid transparent;padding:1px;background:none;display:grid;place-items:center;transition:transform calc(.15s * var(--animd)),border-color calc(.15s * var(--animd))}
+.agdot:hover{transform:scale(1.12)}
+.agdot.on{border-color:var(--fg)}
+.mp-row2{display:grid;grid-template-columns:1fr auto;gap:10px}
+.mp-inline{display:flex;gap:10px;align-items:center}
+.agtnote{color:var(--fg2);font-size:12px}
+.agtgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(128px,1fr));gap:4px;border:.5px solid var(--line);border-radius:10px;padding:6px;margin-top:8px;max-height:190px;overflow-y:auto}
+.agtool{display:flex;gap:7px;align-items:center;font:12px var(--mono);padding:5px 8px;border-radius:8px;cursor:pointer;color:var(--fg2);user-select:none}
+.agtool:hover{background:var(--hov)}
+.agtool.on{color:var(--fg)}
+.agtool i{width:14px;height:14px;border:1.5px solid var(--line);border-radius:4px;display:inline-flex;align-items:center;justify-content:center;font-size:10px;font-style:normal;color:transparent;flex:none;line-height:1}
+.agtool.on i{background:var(--accent);border-color:var(--accent);color:#fff}
+.agr-head{display:flex;gap:12px;align-items:center;color:var(--fg2);font-size:13px;margin-bottom:6px}
+.agr-head .sktile{width:34px;height:34px;border-radius:9px}
 .tk-main{flex:1;min-width:0}
 .tk-top{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .tk-name{font-size:14px;font-weight:600}
@@ -2636,23 +2653,68 @@ function teamMemberStatus(st) {
     : st === 'Cancelled' ? (z ? '已取消' : 'Cancelled') : st;
 }
 
+/* -------- 智能体库（agent definitions，参照 ZCode SubagentsSection） --------
+   一个 Markdown 文件一份人设：名字即子代理在名册里的身份，spawn_agent + agent
+   或团队页「启动」都能按 profile 派生。与成员/任务板不同，智能体库不需要会话。 */
+let AG = { defs: [], problems: [], roots: {}, scope: 'user' };
+const AG_COLORS = [
+  ['red', '#EA4045'], ['blue', '#3C82F6'], ['green', '#5BC67A'], ['yellow', '#F19D38'],
+  ['purple', '#885CF5'], ['orange', '#ED712E'], ['pink', '#EB4699'], ['cyan', '#54B9A6']
+];
+const AG_TOOLS = ['read_file', 'write_file', 'edit_file', 'list_dir', 'glob', 'grep', 'bash',
+  'web_search', 'web_fetch', 'todo_write', 'read_skill', 'ask_user', 'spawn_agent'];
+const agColor = k => (AG_COLORS.find(c => c[0] === k) || AG_COLORS[1])[1];
+/* ZCode 瓦片脸：rx=7 圆角机身 + 两只药丸眼（idle 表情的静态版）。
+   子代理的头像就是它——智能体库行、启动弹窗、颜色选择器共用这一张脸。 */
+const agFace = (k, size) => {
+  const c = agColor(k);
+  return '<svg viewBox="0 0 20 20" width="' + size + '" height="' + size + '" style="display:block" aria-hidden="true">' +
+    '<rect width="20" height="20" rx="7" fill="' + c + '"/>' +
+    '<g fill="#fff"><rect x="7" y="6" width="4" height="6" rx="2"/><rect x="13" y="6" width="4" height="6" rx="2"/></g>' +
+    '</svg>';
+};
+
 async function renderTeamPage() {
   const z = S.lang === 'zh';
-  // 团队以当前会话为准：没开新会话时无从谈起一个团队。
-  if (!conv || !conv.id) {
+  // 智能体库不依赖会话；成员/任务板才有会话前提。两个请求并行。
+  const hasConv = !!(conv && conv.id);
+  const pDefs = api('/agents/defs')
+    .then(r => { AG.defs = r.agents || []; AG.problems = r.problems || []; if (r.roots) AG.roots = r.roots; })
+    .catch(() => {});
+  const pTeam = hasConv
+    ? api('/team?session=' + encodeURIComponent(conv.id)).catch(e => ({ error: e.message }))
+    : Promise.resolve(null);
+  const data = await pTeam;
+  await pDefs;
+  if (data && data.error) {
     return '<div class="pg-head"><h2>' + (z ? '智能体团队' : 'Agent team') + '</h2>' +
-      '<p>' + (z ? '先打开一个会话，再回来组建团队。' : 'Open a conversation first, then come back to build a team.') + '</p></div>';
+      '<p>' + esc(data.error) + '</p></div>';
   }
-  let data = null;
-  try {
-    data = await api('/team?session=' + encodeURIComponent(conv.id));
-  } catch (e) {
-    return '<div class="pg-head"><h2>' + (z ? '智能体团队' : 'Agent team') + '</h2>' +
-      '<p>' + esc(e.message) + '</p></div>';
-  }
-  const enabled = !!data.enabled;
-  const members = data.members || [];
-  const tasks = data.tasks || [];
+  const enabled = !!(data && data.enabled);
+  const members = (data && data.members) || [];
+  const tasks = (data && data.tasks) || [];
+
+  // —— 智能体库行（当前作用域）
+  const mine = AG.defs.filter(d => d.scope === AG.scope);
+  const defRows = mine.map(d => {
+    const c = agColor(d.color);
+    const toolsLabel = (!d.tools || !d.tools.length)
+      ? (z ? '全部工具' : 'all tools')
+      : (z ? d.tools.length + ' 个工具' : d.tools.length + ' tools');
+    return '<div class="skr ed" data-agerow="' + esc(d.id) + '" data-agsc2="' + esc(d.scope) + '">' +
+      '<span class="sktile" style="background:transparent">' + agFace(d.color, 26) + '</span>' +
+      '<div class="skt"><b>' + esc(d.name) +
+        '<em class="agb" style="background:color-mix(in srgb,' + c + ' 14%,transparent);color:' + c + '">' +
+          esc(d.model || (z ? '继承默认' : 'inherit')) + '</em>' +
+        '<em class="agb">' + esc(toolsLabel) + '</em></b>' +
+        '<span>' + esc(d.description) + '</span></div>' +
+      (hasConv ? '<button class="btn" data-agrun="' + esc(d.id) + '">' + (z ? '启动' : 'Launch') + '</button>' : '') +
+      '<button class="ib" data-aged="' + esc(d.id) + '" title="' + (z ? '编辑' : 'Edit') + '">' + ic('edit') + '</button>' +
+      '<button class="tg' + (d.enabled ? ' on' : '') + '" data-agtg="' + esc(d.id) + '" title="' + (z ? '启用' : 'Enabled') + '"></button>' +
+      '<button class="ib danger" data-agdel="' + esc(d.id) + '" title="' + (z ? '删除' : 'Delete') + '">' + ic('trash') + '</button>' +
+      '</div>';
+  }).join('');
+  const probList = AG.problems.filter(p => p.scope === AG.scope);
 
   const modeBtn = enabled
     ? '<button class="btn" data-act="mode-off">' + (z ? '关闭团队模式' : 'Turn team mode off') + '</button>'
@@ -2712,19 +2774,226 @@ async function renderTeamPage() {
     '</div>';
   }).join('');
 
-  return '<div class="pg-head"><h2>' + (z ? '智能体团队' : 'Agent team') + '</h2>' +
-    '<p>' + (z
-      ? '一个会话和它的子代理共享同一块任务板：拆分工作、认领任务、跟踪依赖。'
-      : 'A conversation and its subagents share one task board: split work, claim tasks, track dependencies.') + '</p></div>' +
-    '<div class="tk-acts" style="margin-bottom:16px">' + modeBtn +
+  // —— 团队部分：需要会话；智能体库永远可用
+  let teamHtml;
+  if (!hasConv) {
+    teamHtml = '<div class="sksh"><b>' + (z ? '成员' : 'Members') + '</b></div>' +
+      '<div class="skl"><div class="pempty">' +
+        (z ? '先打开一个会话，再回来组建团队——智能体库不需要会话，随时可以创建。'
+           : 'Open a conversation to build a team — the agent library itself needs no session.') +
+      '</div></div>';
+  } else {
+    teamHtml = '<div class="tk-acts" style="margin-bottom:16px">' + modeBtn +
       '<button class="btn" id="tm-refresh">' + (z ? '刷新' : 'Refresh') + '</button>' +
       (enabled ? '<span class="tk-ver">' + (z ? '团队已开启' : 'team mode on') + '</span>'
                : '<span class="tk-ver">' + (z ? '团队未开启——模型看不到任务板' : 'team mode off — the model cannot see the board') + '</span>') +
     '</div>' +
     '<div class="sksh"><b>' + (z ? '成员' : 'Members') + '</b><em>' + members.length + '</em></div>' +
-    '<div class="skl">' + (memberRows || '<div class="pempty">' + (z ? '还没有子代理。用 spawn_agent 委派任务。' : 'No subagents yet. Delegate work with spawn_agent.') + '</div>') + '</div>' +
+    '<div class="skl">' + (memberRows || '<div class="pempty">' + (z ? '还没有子代理。用 spawn_agent 委派任务，或从上面的智能体库直接启动。' : 'No subagents yet. Delegate with spawn_agent or launch one from the library above.') + '</div>') + '</div>' +
     '<div class="sksh"><b>' + (z ? '任务板' : 'Task board') + '</b><em>' + tasks.length + '</em></div>' +
     '<div class="skl">' + (taskRows || '<div class="pempty">' + (z ? '还没有共享任务。' : 'No shared tasks yet.') + '</div>') + '</div>';
+  }
+
+  return '<div class="pg-head"><h2>' + (z ? '智能体团队' : 'Agent team') + '</h2>' +
+    '<p>' + (z
+      ? '把常用角色沉淀成智能体库——一份 Markdown 就是一份人设。团队页可直接启动，模型也能用 spawn_agent + agent 派它们干活。'
+      : 'Save recurring roles as agent profiles — one Markdown file each. Launch them here, or let the model delegate with spawn_agent.') + '</p></div>' +
+    '<div class="sksh"><b>' + (z ? '智能体库' : 'Agent library') + '</b><em>' + mine.length + '</em>' +
+      '<span class="fl"></span>' +
+      '<label class="scope">' + ic('monitor') +
+        '<select id="agsc"><option value="user">' + (z ? '用户' : 'User') + '</option>' +
+        '<option value="project">' + (z ? '项目' : 'Project') + '</option></select></label>' +
+      '<button class="ib" id="ag-ref" title="' + (z ? '刷新' : 'Refresh') + '">' + ic('refresh') + '</button>' +
+      '<button class="btn pri" id="ag-add">+ ' + (z ? '新建智能体' : 'New agent') + '</button></div>' +
+    (probList.length
+      ? '<div class="diag open"><div class="dh">' + ic('warn') +
+          esc((z ? '{n} 个文件加载失败' : '{n} file(s) failed to load').replace('{n}', probList.length)) +
+        '</div><div class="dbody">' + probList.map(p => esc(p.path) + ' — ' + esc(p.reason)).join('<br>') + '</div></div>'
+      : '') +
+    '<div class="skl" id="ag-list">' + (defRows || '<div class="pempty">' +
+      (z ? '还没有智能体。新建一个，给它名字、人设和工具。' : 'No agents yet. Create one with a name, persona and tools.') + '</div>') + '</div>' +
+    teamHtml;
+}
+
+/* 新建 / 编辑智能体：名称、颜色、模型、思考档、描述、工具、人设 */
+function agEdit(id) {
+  const z = S.lang === 'zh';
+  const src = id ? AG.defs.find(x => x.id === id && x.scope === AG.scope) : null;
+  const isNew = !src;
+  const d = {
+    name: src ? src.name : '',
+    color: src ? src.color : 'blue',
+    model: src ? src.model : '',
+    thinking: src && src.thinking != null ? src.thinking : -1,
+    description: src ? src.description : '',
+    tools: src ? (src.tools || []) : [],
+    allTools: src ? !(src.tools && src.tools.length) : true,
+    system_prompt: src ? (src.system_prompt || '') : ''
+  };
+
+  const ov = document.createElement('div');
+  ov.className = 'mdl';
+  document.body.appendChild(ov);
+  const close = () => { document.removeEventListener('keydown', onKey, true); ov.remove(); };
+  const onKey = e => { if (e.key === 'Escape') { e.stopPropagation(); close(); } };
+  document.addEventListener('keydown', onKey, true);
+
+  const dots = AG_COLORS.map(c =>
+    '<button type="button" class="agdot' + (d.color === c[0] ? ' on' : '') + '" data-c="' + c[0] +
+    '" title="' + c[0] + '" aria-label="' + c[0] + '">' + agFace(c[0], 20) + '</button>').join('');
+  const modelOpts = ['<option value="">' + (z ? '继承默认' : 'Inherit default') + '</option>']
+    .concat(MODELS.map(m => '<option value="' + esc(m.value) + '"' + (d.model === m.value ? ' selected' : '') + '>' +
+      esc(m.label || m.value) + '</option>')).join('');
+  const thinkOpts = [-1, 0, 1, 2, 3].map(n =>
+    '<option value="' + n + '"' + (d.thinking === n ? ' selected' : '') + '>' +
+    (n < 0 ? (z ? '继承默认' : 'Inherit') : (z ? '档位 ' : 'level ') + n) + '</option>').join('');
+  const toolGrid = AG_TOOLS.map(t =>
+    '<span class="agtool' + (!d.allTools && d.tools.includes(t) ? ' on' : '') + '" data-t="' + t + '"><i>&#10003;</i>' + t + '</span>').join('');
+
+  ov.innerHTML = '<div class="mdlc"><div class="mdlh"><h3>' +
+    esc(isNew ? (z ? '新建智能体' : 'New agent') : (z ? '编辑智能体' : 'Edit agent')) +
+    '</h3><button class="ib" data-x title="' + esc(t('close')) + '">' + ic('x') + '</button></div>' +
+    '<div class="mdlb">' +
+      '<div class="mp-field"><label>' + (z ? '名称' : 'Name') + '</label>' +
+        '<input class="mp-in" id="agn1" value="' + esc(d.name) + '" placeholder="' +
+        (z ? '如：文档整理师（1-32 字，中文优先）' : 'e.g. Doc curator (1-32 chars)') + '" spellcheck="false"></div>' +
+      '<div class="mp-field"><label>' + (z ? '颜色' : 'Color') + '</label><div class="agdots">' + dots + '</div></div>' +
+      '<div class="mp-row2">' +
+        '<div class="mp-field"><label>' + (z ? '模型' : 'Model') + '</label>' +
+          '<select class="mp-in" id="agm1">' + modelOpts + '</select></div>' +
+        '<div class="mp-field"><label>' + (z ? '思考档位' : 'Thinking') + '</label>' +
+          '<select class="mp-in" id="agk1">' + thinkOpts + '</select></div>' +
+      '</div>' +
+      '<div class="mp-field"><label>' + (z ? '描述' : 'Description') + '</label>' +
+        '<input class="mp-in" id="agd1" value="' + esc(d.description) + '" placeholder="' +
+        (z ? '什么时候派它出场（会显示给主智能体）' : 'When to delegate to it (shown to the main agent)') + '"></div>' +
+      '<div class="mp-field"><label>' + (z ? '工具' : 'Tools') + '</label>' +
+        '<div class="mp-inline"><select class="mp-in" id="agtmode" style="width:auto">' +
+          '<option value="all"' + (d.allTools ? ' selected' : '') + '>' + (z ? '全部工具' : 'All tools') + '</option>' +
+          '<option value="custom"' + (!d.allTools ? ' selected' : '') + '>' + (z ? '自定义' : 'Custom') + '</option></select>' +
+        '<span class="agtnote">' + (z ? '自定义时勾选这个智能体可以用的工具' : 'pick the tools this agent may call') + '</span></div>' +
+        '<div class="agtgrid" id="agtgrid"' + (d.allTools ? ' style="display:none"' : '') + '>' + toolGrid + '</div></div>' +
+      '<div class="mp-field"><label>' + (z ? '系统提示词（人设）' : 'System prompt (persona)') + '</label>' +
+        '<textarea class="mp-in js" id="agp1" spellcheck="false" style="min-height:140px" placeholder="' +
+        (z ? '你是……' : 'You are...') + '">' + esc(d.system_prompt) + '</textarea></div>' +
+    '</div><div class="mderr" id="mderr"></div>' +
+    '<div class="mdlf"><span class="fl"></span>' +
+      (src ? '<button class="btn danger" data-del>' + (z ? '删除' : 'Delete') + '</button>' : '') +
+      '<button class="btn" data-x>' + esc(t('mem_cancel')) + '</button>' +
+      '<button class="btn pri" data-save>' + esc(t('mem_save')) + '</button></div></div>';
+
+  const err = m => { const el = ov.querySelector('#mderr'); if (el) el.textContent = m; };
+  ov.onchange = e => {
+    if (e.target.id !== 'agtmode') return;
+    const grid = ov.querySelector('#agtgrid');
+    const custom = e.target.value !== 'all';
+    grid.style.display = custom ? '' : 'none';
+    // 从「全部」切到自定义时默认全选（与 ZCode 一致），避免空清单困惑。
+    if (custom && !ov.querySelector('.agtool.on')) {
+      ov.querySelectorAll('.agtool').forEach(x => x.classList.add('on'));
+    }
+  };
+  ov.onclick = e => {
+    if (e.target.closest('[data-x]')) { close(); return; }
+    const dot = e.target.closest('.agdot');
+    if (dot) {
+      ov.querySelectorAll('.agdot').forEach(x => x.classList.toggle('on', x === dot));
+      return;
+    }
+    const tl = e.target.closest('.agtool');
+    if (tl) { tl.classList.toggle('on'); return; }
+    if (e.target.closest('[data-del]')) {
+      if (!src) return;
+      confirmBox(z ? '删除智能体「' + src.id + '」？' : 'Delete agent "' + src.id + '"?').then(ok => {
+        if (!ok) return;
+        api('/agents/defs/' + encodeURIComponent(src.scope) + '/' + encodeURIComponent(src.id), { method: 'DELETE' })
+          .then(() => { close(); return go('team', true); })
+          .catch(x => err(x.message));
+      });
+      return;
+    }
+    if (!e.target.closest('[data-save]')) return;
+    const name = ov.querySelector('#agn1').value.trim();
+    const description = ov.querySelector('#agd1').value.trim();
+    const model = ov.querySelector('#agm1').value.trim();
+    const thinking = +ov.querySelector('#agk1').value;
+    const prompt = ov.querySelector('#agp1').value.trim();
+    const allTools = ov.querySelector('#agtmode').value === 'all';
+    const tools = allTools ? [] : [...ov.querySelectorAll('.agtool.on')].map(x => x.dataset.t);
+    const selDot = ov.querySelector('.agdot.on');
+    const color = selDot ? selDot.dataset.c : 'blue';
+    if (!name) return err(z ? '名称不能为空' : 'Name is required');
+    if (name.length > 32) return err(z ? '名称最多 32 个字符' : 'Name is limited to 32 characters');
+    if (name === 'lead' ||
+        !/^[a-zA-Z\u3400-\u4DBF\u4E00-\u9FFF][a-zA-Z0-9\u3400-\u4DBF\u4E00-\u9FFF-]*$/.test(name)) {
+      return err(z ? '名称需以中文或字母开头，只含中文/字母/数字/连字符，且不能叫 lead'
+                   : 'Start with a letter; only letters, digits, hyphens (and not "lead")');
+    }
+    if (!description) return err(z ? '描述不能为空' : 'Description is required');
+    if (!prompt) return err(z ? '系统提示词不能为空' : 'System prompt is required');
+    if (!isNew && src.id !== name && AG.defs.some(x => x.scope === AG.scope && x.id === name)) {
+      return err(z ? '同名智能体已存在' : 'An agent with this name already exists');
+    }
+    api('/agents/defs', {
+      method: 'POST',
+      body: {
+        name,
+        description,
+        color,
+        model,
+        thinking: thinking >= 0 ? thinking : null,
+        tools,
+        system_prompt: prompt,
+        scope: AG.scope,
+        // 更新语义：rename_from 指向被编辑的 id（允许原地覆盖）；改名时
+        // 后端迁移旧文件与禁用记录。
+        rename_from: isNew ? null : src.id
+      }
+    })
+      .then(() => { close(); toast(isNew ? (z ? '智能体已创建' : 'Agent created') : (z ? '已保存' : 'Saved')); return go('team', true); })
+      .catch(x => err(x.message));
+  };
+  setTimeout(() => { const f = ov.querySelector('#agn1'); if (f) f.focus(); }, 40);
+}
+
+/* 从团队页直接启动一个智能体：按 profile 派生一个子代理 */
+function agRun(id) {
+  const z = S.lang === 'zh';
+  const src = AG.defs.find(x => x.id === id && x.scope === AG.scope);
+  if (!src) return;
+  if (!conv || !conv.id) { toast(z ? '先打开一个会话' : 'Open a conversation first'); return; }
+  const c = agColor(src.color);
+  const ov = document.createElement('div');
+  ov.className = 'mdl';
+  document.body.appendChild(ov);
+  const close = () => { document.removeEventListener('keydown', onKey, true); ov.remove(); };
+  const onKey = e => { if (e.key === 'Escape') { e.stopPropagation(); close(); } };
+  document.addEventListener('keydown', onKey, true);
+
+  ov.innerHTML = '<div class="mdlc"><div class="mdlh"><h3>' + (z ? '启动 ' : 'Launch ') + esc(src.name) +
+    '</h3><button class="ib" data-x title="' + esc(t('close')) + '">' + ic('x') + '</button></div>' +
+    '<div class="mdlb">' +
+      '<div class="agr-head"><span class="sktile" style="background:transparent">' + agFace(src.color, 24) + '</span>' +
+        '<div>' + esc(src.description) + '</div></div>' +
+      '<div class="mp-field"><label>' + (z ? '任务指令' : 'Task') + '</label>' +
+        '<textarea class="mp-in js" id="agrt" spellcheck="false" style="min-height:110px" placeholder="' +
+        (z ? '让它去做什么？' : 'What should it do?') + '"></textarea></div>' +
+    '</div><div class="mderr" id="mderr"></div>' +
+    '<div class="mdlf"><span class="fl"></span>' +
+      '<button class="btn" data-x>' + esc(t('mem_cancel')) + '</button>' +
+      '<button class="btn pri" data-go>' + (z ? '启动' : 'Launch') + '</button></div></div>';
+
+  const err = m => { const el = ov.querySelector('#mderr'); if (el) el.textContent = m; };
+  ov.onclick = e => {
+    if (e.target.closest('[data-x]')) { close(); return; }
+    if (!e.target.closest('[data-go]')) return;
+    const task = ov.querySelector('#agrt').value.trim();
+    if (!task) return err(z ? '任务指令不能为空' : 'Task is required');
+    api('/agents/defs/run', { method: 'POST', body: { session_id: conv.id, name: src.id, task } })
+      .then(() => { close(); toast((z ? '已启动 ' : 'Launched ') + src.name); return go('team', true); })
+      .catch(x => err(x.message));
+  };
+  setTimeout(() => { const f = ov.querySelector('#agrt'); if (f) f.focus(); }, 40);
 }
 
 function bindTeamPage(root) {
@@ -2754,6 +3023,43 @@ function bindTeamPage(root) {
       } catch (e) { toast(e.message); }
     };
   });
+
+  // —— 智能体库（委托分发：启动 > 开关 > 删除 > 编辑/行点击）
+  const agsc = root.querySelector('#agsc');
+  if (agsc) { agsc.value = AG.scope; agsc.onchange = () => { AG.scope = agsc.value; go('team', true); }; }
+  const agRef = root.querySelector('#ag-ref');
+  if (agRef) agRef.onclick = () => go('team', true);
+  const agAdd = root.querySelector('#ag-add');
+  if (agAdd) agAdd.onclick = () => agEdit(null);
+  const agFind = (id, sc) => AG.defs.find(x => x.id === id && x.scope === sc);
+  root.onclick = e => {
+    const g = k => e.target.closest('[' + k + ']');
+    const row = g('data-agerow');
+    const sc = row ? row.dataset.agsc2 : AG.scope;
+    if (g('data-agrun')) { agRun(g('data-agrun').dataset.agrun); return; }
+    if (g('data-agtg')) {
+      const it = agFind(g('data-agtg').dataset.agtg, sc);
+      if (!it) return;
+      const next = !it.enabled;
+      api('/agents/defs/' + encodeURIComponent(it.scope) + '/' + encodeURIComponent(it.id) + '/enabled',
+          { method: 'POST', body: { enabled: next } })
+        .then(() => { it.enabled = next; go('team', true); })
+        .catch(err => toast(err.message));
+      return;
+    }
+    if (g('data-agdel')) {
+      const id = g('data-agdel').dataset.agdel;
+      confirmBox(z ? '删除智能体「' + id + '」？' : 'Delete agent "' + id + '"?').then(ok => {
+        if (!ok) return;
+        api('/agents/defs/' + encodeURIComponent(sc) + '/' + encodeURIComponent(id), { method: 'DELETE' })
+          .then(() => go('team', true))
+          .catch(err => toast(err.message));
+      });
+      return;
+    }
+    if (g('data-aged')) { agEdit(g('data-aged').dataset.aged); return; }
+    if (row) agEdit(row.dataset.agerow);
+  };
 
   // 任务状态流转：每个动作都带上当前 revision 做乐观并发控制。
   root.querySelectorAll('.taskrow[data-tid]').forEach(row => {

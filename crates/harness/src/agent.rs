@@ -252,6 +252,7 @@ impl crate::tools::TurnStarter for AgentRuntime {
                 permission_mode: perm,
                 thinking_level: lvl,
                 plan_mode: false,
+                ..TurnOptions::default()
             },
         )
         .await
@@ -276,6 +277,12 @@ pub struct TurnOptions {
     pub permission_mode: String,
     pub thinking_level: u32,
     pub plan_mode: bool,
+    /// 智能体库 profile 的人设（system prompt 追加段；空 = 无）。
+    /// 只由 spawn 的子轮携带，经 `SpawnRequest.system_prompt` 传入。
+    pub system_extra: String,
+    /// 子轮工具白名单（空 = 全部工具）。白名单外既不出现在工具清单里，
+    /// 调用也会被拒绝执行。
+    pub tool_filter: Vec<String>,
 }
 
 impl Default for TurnOptions {
@@ -285,6 +292,8 @@ impl Default for TurnOptions {
             permission_mode: "ask".into(),
             thinking_level: 2,
             plan_mode: false,
+            system_extra: String::new(),
+            tool_filter: Vec::new(),
         }
     }
 }
@@ -1026,6 +1035,12 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
             system.push_str("\n\n");
             system.push_str(&sk);
         }
+        // Saved agents（智能体库）：一份可委派的 profile 菜单。与 skills 同理
+        // 只列名字 + 描述，人设正文由 spawn_agent + agent 在派生时注入。
+        if let Some(menu) = crate::agents::prompt_block(workspace) {
+            system.push_str("\n\n");
+            system.push_str(&menu);
+        }
         // Agent Teams: the shared task board and the collaboration policy.
         // Must live here rather than in `build_system_prompt`, so it survives
         // a `systemPromptRaw` override — the same reason the goal block does.
@@ -1034,6 +1049,13 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
         let team_root = self.team_root_of(session_id).await;
         if let Some(team) = self.store.get_team(&team_root).await.filter(|t| t.enabled) {
             system.push_str(&team_policy(team.live_tasks().len()));
+        }
+        // 智能体库 profile 的人设：子轮经 SpawnRequest.system_prompt →
+        // TurnOptions.system_extra 带进来，放在末尾，压过前面的一切常规段。
+        // 它是用户配置（与 systemPromptRaw 同级），不是不可信数据。
+        if !opts.system_extra.is_empty() {
+            system.push_str("\n\n## Persona\n");
+            system.push_str(&opts.system_extra);
         }
         system
     }
@@ -1312,7 +1334,24 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
 
             // Context guard: if the conversation is about to overflow, summarise
             // the older part before sending anything to the model.
-            let tools = registry.specs();
+            // 智能体库 profile 的工具白名单：白名单外的工具不进模型清单。
+            let tools = if opts.tool_filter.is_empty() {
+                registry.specs()
+            } else {
+                let allow: std::collections::HashSet<&str> = opts
+                    .tool_filter
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect();
+                std::sync::Arc::new(
+                    registry
+                        .specs()
+                        .iter()
+                        .filter(|t| allow.contains(t.name.as_str()))
+                        .cloned()
+                        .collect(),
+                )
+            };
             let fixed_tokens = estimate_fixed(&system, &tools);
             let compaction = tcfg.compaction_pct.clamp(50, 95);
             let compact_fut = async {
@@ -1581,6 +1620,14 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
             }
 
             let mut i = 0usize;
+            // 智能体库工具白名单：白名单外的调用直接回错误 tool_result，
+            // 不进入执行（清单过滤只管"看不见"，这里管"调不到"）。
+            let tool_allow: Option<std::collections::HashSet<&str>> =
+                if opts.tool_filter.is_empty() {
+                    None
+                } else {
+                    Some(opts.tool_filter.iter().map(|s| s.as_str()).collect())
+                };
             'tools: while i < calls.len() {
                 if cancel.is_cancelled() {
                     break 'tools;
@@ -1600,6 +1647,25 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
                         tokio::task::JoinHandle<(String, String, Result<crate::tools::ToolOutcome, HarnessError>, u64)>,
                     )> = Vec::new();
                     for (id, name, args) in batch {
+                        // 白名单拒绝：不 spawn，直接记一条错误 tool_result。
+                        if let Some(allow) = &tool_allow {
+                            if !allow.contains(name.as_str()) {
+                                let msg = format!(
+                                    "tool `{name}` is not available to this agent (tool allowlist)"
+                                );
+                                {
+                                    let e0 = tool_stats.entry(name.clone()).or_insert((0, 0, 0));
+                                    e0.0 += 1;
+                                    e0.1 += 1;
+                                }
+                                self.record_outcome(
+                                    session_id, turn_id, &id, &name,
+                                    Err(HarnessError::Tool(msg.clone())), &mut outcomes,
+                                )
+                                .await;
+                                continue;
+                            }
+                        }
                         let reg = Arc::clone(&registry);
                         let ctx = self.tool_ctx(&workspace, &opts, session_id, turn_id, &id, &search_key, &search_pref).await;
                         let cancel_tool = cancel.clone();
@@ -1652,6 +1718,25 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
                     // 非只读：严格串行，就地执行；同样可被终止立即打断。
                     let (id, name, args) = calls[i].clone();
                     i += 1;
+                    // 白名单拒绝：同并行分支，直接记错误不执行。
+                    if let Some(allow) = &tool_allow {
+                        if !allow.contains(name.as_str()) {
+                            let msg = format!(
+                                "tool `{name}` is not available to this agent (tool allowlist)"
+                            );
+                            {
+                                let e0 = tool_stats.entry(name.clone()).or_insert((0, 0, 0));
+                                e0.0 += 1;
+                                e0.1 += 1;
+                            }
+                            self.record_outcome(
+                                session_id, turn_id, &id, &name,
+                                Err(HarnessError::Tool(msg.clone())), &mut outcomes,
+                            )
+                            .await;
+                            continue;
+                        }
+                    }
                     let reg = Arc::clone(&registry);
                     let ctx = self.tool_ctx(&workspace, &opts, session_id, turn_id, &id, &search_key, &search_pref).await;
                     let t0 = std::time::Instant::now();

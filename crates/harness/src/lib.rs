@@ -1,6 +1,7 @@
 //! Parable harness core — agent loop, providers, tools, permissions, sessions, local server.
 
 pub mod agent;
+pub mod agents;
 pub mod computer;
 pub mod checkpoint;
 pub mod desktop;

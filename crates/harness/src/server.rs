@@ -239,6 +239,12 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/skills", get(list_skills).post(save_skill))
         .route("/skills/{scope}/{id}", get(get_skill).delete(delete_skill))
         .route("/skills/{scope}/{id}/enabled", post(toggle_skill))
+        // 智能体库（agent definitions）。挂在 /agents 下的静态分支 defs，
+        // 与子代理目录的 /agents/{id}/... 动态分支互不干扰。
+        .route("/agents/defs", get(list_agent_defs).post(save_agent_def))
+        .route("/agents/defs/run", post(run_agent_def))
+        .route("/agents/defs/{scope}/{id}", axum::routing::delete(delete_agent_def))
+        .route("/agents/defs/{scope}/{id}/enabled", post(toggle_agent_def))
         .route("/agents/{id}/interrupt", post(interrupt_agent))
         // 向子代理发消息：运行中=steer 注入；已收尾=在其子会话续开新轮
         .route("/agents/{id}/say", post(agent_say))
@@ -548,6 +554,7 @@ async fn chat(
         // 前端永远发送 0-3:0=显式关闭,不再把 0 当"未指定"回退配置值
         thinking_level: req.thinking_level.min(3),
         plan_mode: req.plan_mode,
+        ..TurnOptions::default()
     };
 
     // Regenerate never enqueues: it is meaningless without the running history
@@ -2244,6 +2251,7 @@ async fn run_task_now(
                 permission_mode: mode,
                 thinking_level: 0,
                 plan_mode: false,
+                ..TurnOptions::default()
             };
             let prompt = format!(
                 "[scheduled task `{}` run manually]\n\n{}",
@@ -2464,6 +2472,130 @@ async fn toggle_skill(
         Ok(ok) => Json(json!({"ok": ok})).into_response(),
         Err(crate::HarnessError::NotFound(_)) => not_found(&format!("skill {id}")),
         Err(e) => bad_request(&e.to_string()),
+    }
+}
+
+// ------------------------------------------------------------------ 智能体库（agent definitions）
+
+async fn list_agent_defs(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    let ws = workspace_of(&state).await;
+    let scope = q.get("scope").map(|s| s.as_str());
+    let listing = crate::agents::list(&ws, scope);
+    Json(json!({
+        "agents": listing.agents,
+        "problems": listing.problems,
+        "roots": {
+            "user": crate::agents::user_dir().display().to_string(),
+            "project": crate::agents::project_dir(&ws).display().to_string(),
+        }
+    }))
+    .into_response()
+}
+
+async fn save_agent_def(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(input): Json<crate::agents::AgentInput>,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    let ws = workspace_of(&state).await;
+    match crate::agents::save(&ws, &input) {
+        Ok(d) => Json(json!({"ok": true, "agent": d})).into_response(),
+        Err(e) => bad_request(&e.to_string()),
+    }
+}
+
+async fn delete_agent_def(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    axum::extract::Path((scope, id)): axum::extract::Path<(String, String)>,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    let ws = workspace_of(&state).await;
+    match crate::agents::remove(&ws, &scope, &id) {
+        Ok(removed) => Json(json!({"ok": true, "removed": removed})).into_response(),
+        Err(e) => bad_request(&e.to_string()),
+    }
+}
+
+async fn toggle_agent_def(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    axum::extract::Path((scope, id)): axum::extract::Path<(String, String)>,
+    Json(v): Json<Value>,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    let enabled = v.get("enabled").and_then(|x| x.as_bool()).unwrap_or(true);
+    let ws = workspace_of(&state).await;
+    match crate::agents::set_enabled(&ws, &scope, &id, enabled) {
+        Ok(ok) => Json(json!({"ok": ok})).into_response(),
+        Err(crate::HarnessError::NotFound(_)) => not_found(&format!("agent {id}")),
+        Err(e) => bad_request(&e.to_string()),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct AgentRunReq {
+    session_id: String,
+    /// Profile id or name (智能体库).
+    name: String,
+    /// The task the launched child should carry out.
+    task: String,
+}
+
+/// Launch a saved agent profile directly from the team page: spawn a child on
+/// the given session's tree wearing the profile's name/persona/model/tools.
+async fn run_agent_def(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(r): Json<AgentRunReq>,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    if r.task.trim().is_empty() {
+        return bad_request("task must not be empty");
+    }
+    let ws = workspace_of(&state).await;
+    let Some(def) = crate::agents::find(&ws, &r.name) else {
+        return not_found(&format!("agent {}", r.name));
+    };
+    if !def.enabled {
+        return bad_request(&format!("agent {} is disabled", def.name));
+    }
+    let starter: std::sync::Arc<dyn crate::tools::TurnStarter> =
+        std::sync::Arc::new(state.agent.clone());
+    let req = crate::subagent::SpawnRequest {
+        label: def.name.clone(),
+        name: Some(def.name.clone()),
+        task: r.task,
+        cwd: None,
+        seed_history: false,
+        model: def.model.clone(),
+        system_prompt: def.system_prompt.clone(),
+        tools: def.tools.clone(),
+        delivery: Some(crate::subagent::Delivery::Parent),
+    };
+    match state
+        .subagents
+        .spawn(starter, &r.session_id, &ws.to_string_lossy(), req)
+        .await
+    {
+        Ok(id) => Json(json!({"ok": true, "agentId": id, "name": def.name})).into_response(),
+        Err(e) => server_error(e),
     }
 }
 
@@ -3374,6 +3506,7 @@ pub async fn serve_in(
                                 permission_mode: mode,
                                 thinking_level: 0,
                                 plan_mode: false,
+                                ..TurnOptions::default()
                             };
                             let prompt = format!(
                                 "[scheduled task `{}` fired at {}]\n\n{}",
@@ -3670,5 +3803,95 @@ mod regression {
             text.contains("hello"),
             "expected a hello handshake, got: {text}"
         );
+    }
+
+    #[tokio::test]
+    async fn agent_defs_crud_end_to_end() {
+        let (base, token) = spawn_server("agent-defs").await;
+        let cli = reqwest::Client::new();
+        // defs 端点与 skills 一样只认 X-Parable-Token header（不收 query token）。
+        let url = |p: &str| format!("{base}/api{p}");
+        let hdr = ("x-parable-token", token.as_str());
+
+        // Create: validation is enforced server-side.
+        let res = cli.post(url("/agents/defs"))
+            .header(hdr.0, hdr.1)
+            .json(&json!({"name": "文档整理师", "description": "", "system_prompt": "x"}))
+            .send().await.unwrap();
+        assert_eq!(res.status(), 400, "an empty description is rejected");
+
+        let res = cli.post(url("/agents/defs"))
+            .header(hdr.0, hdr.1)
+            .json(&json!({
+                "name": "文档整理师",
+                "description": "归档文档并生成索引",
+                "color": "cyan",
+                "model": "zhipu/glm-5",
+                "thinking": 2,
+                "tools": ["read_file", "grep"],
+                "system_prompt": "你是文档整理师。",
+                "scope": "user"
+            }))
+            .send().await.unwrap();
+        assert_eq!(res.status(), 200);
+        let v: Value = res.json().await.unwrap();
+        assert_eq!(v["agent"]["id"], "文档整理师");
+        assert_eq!(v["agent"]["enabled"], true);
+        assert_eq!(v["agent"]["tools"][0], "read_file");
+
+        // Duplicate create is refused; list contains the profile.
+        let res = cli.post(url("/agents/defs"))
+            .header(hdr.0, hdr.1)
+            .json(&json!({"name": "文档整理师", "description": "d", "system_prompt": "s"}))
+            .send().await.unwrap();
+        assert_eq!(res.status(), 400);
+        let v: Value = cli.get(url("/agents/defs"))
+            .header(hdr.0, hdr.1).send().await.unwrap().json().await.unwrap();
+        let agents = v["agents"].as_array().unwrap();
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0]["name"], "文档整理师");
+
+        // Disable via the sidecar; the profile stays listed but disabled.
+        let res = cli.post(url("/agents/defs/user/文档整理师/enabled"))
+            .header(hdr.0, hdr.1)
+            .json(&json!({"enabled": false}))
+            .send().await.unwrap();
+        assert_eq!(res.status(), 200);
+        let v: Value = cli.get(url("/agents/defs"))
+            .header(hdr.0, hdr.1).send().await.unwrap().json().await.unwrap();
+        assert_eq!(v["agents"][0]["enabled"], false);
+
+        // Rename via rename_from.
+        let res = cli.post(url("/agents/defs"))
+            .header(hdr.0, hdr.1)
+            .json(&json!({
+                "name": "档案管理员",
+                "description": "归档文档并生成索引",
+                "system_prompt": "你是文档整理师。",
+                "scope": "user",
+                "rename_from": "文档整理师"
+            }))
+            .send().await.unwrap();
+        assert_eq!(res.status(), 200);
+        let v: Value = cli.get(url("/agents/defs"))
+            .header(hdr.0, hdr.1).send().await.unwrap().json().await.unwrap();
+        let agents = v["agents"].as_array().unwrap();
+        assert_eq!(agents.len(), 1, "the old file must be gone after a rename");
+        assert_eq!(agents[0]["id"], "档案管理员");
+
+        // Launching an unknown profile is rejected with a clear status.
+        let res = cli.post(url("/agents/defs/run"))
+            .header(hdr.0, hdr.1)
+            .json(&json!({"session_id": "s_none", "name": "不存在", "task": "t"}))
+            .send().await.unwrap();
+        assert_eq!(res.status(), 404, "an unknown profile is not found");
+
+        // Delete.
+        let res = cli.delete(url("/agents/defs/user/档案管理员"))
+            .header(hdr.0, hdr.1).send().await.unwrap();
+        assert_eq!(res.status(), 200);
+        let v: Value = cli.get(url("/agents/defs"))
+            .header(hdr.0, hdr.1).send().await.unwrap().json().await.unwrap();
+        assert_eq!(v["agents"].as_array().unwrap().len(), 0);
     }
 }
