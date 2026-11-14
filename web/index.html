@@ -3872,6 +3872,13 @@ function stopSpin(a, ms) {
     if (tx) tx.textContent = t('worked_done').replace('{t}', fmtDur(total));
   }
   wkStart = 0;
+  // 这一轮是在实时视图里跑完的：时间戳在实时视图里本来就是隐藏的
+  // （它表示「这轮开始的时间」，跑着的轮次显示它只会误导）。
+  // 定格后若它又冒出来，界面就自相矛盾了——「工作中 x 秒」和开始时间
+  // 同时出现。切会话重放时这条尤其明显：重放出来的是历史气泡（时间戳
+  // 默认显示），随后 turn.end 走 stopSpin 定格，时间戳必须继续隐藏。
+  const ts = a.querySelector('.ts');
+  if (ts) ts.classList.add('hide');
 }
 
 /**
@@ -5079,6 +5086,18 @@ function shadowPush(sid, ev) {
  *  流时 SHADOW 里没有条目，切回来要靠它恢复流式 UI（否则 sig 还挂着 stop，
  *  后续正文字符会被逐字写入循环全部丢弃）。 */
 const INFLIGHT = {};
+/** 每个会话「最后一轮已结束」的记账：{ turnId, ms }。
+ *
+ *  一轮在**别的会话**里跑完时，turn.end 到达时 curA 指向的是当前会话的
+ *  气泡（多半是 null），stopSpin() 没法给那一轮的气泡定格——「工作中 x 秒」
+ *  就此失去归宿。等用户切回那个会话，历史重放只知道「这一轮有这些消息」，
+ *  不知道「它运行过多久」，于是时间戳照常显示、计时条从未出现，
+ *  打断键也退回发送键（这轮明明已经结束，状态却像从没跑过）。
+ *
+ *  这里记下结束轮次与墙钟耗时，切回来时据此补出定格态。
+ *  只留每个会话最后一轮：更早的轮次在历史里本来就该是终态。
+ */
+const DONE_TURNS = {};
 /** 全局事件序号水位：SSE 事件带单调递增 seq，乱序/重复直接丢弃。 */
 let lastSeq = 0;
 // conv 未绑定（首条消息在途）期间闯入的他人会话：其事件全部丢弃直到绑定。
@@ -5135,6 +5154,15 @@ function dispatch(ev) {
   if (ignoreSid && ev.sessionId === ignoreSid) return;
   if (ev.type === 'turn.end') {
     INFLIGHT[ev.sessionId] = false;
+    // 记下「这一轮在哪个会话跑完、跑了多久」。当前会话走下面的正常收尾
+    // 路径（stopSpin 定格计时条并隐藏时间戳）；别的会话没有可定格的气泡，
+    // 先记账，等用户切回去时补出定格态。
+    // 当前会话也记：turn.end 可能晚于 openSession 的重放到达（用户恰好在
+    // 切回的瞬间轮次结束），记账能让下次切回时状态依然正确。
+    DONE_TURNS[ev.sessionId] = {
+      turnId: ev.turnId || '',
+      ms: typeof ev.ms === 'number' ? ev.ms : null,
+    };
     // 只丢「正在看的那个会话」的影子缓冲。别的会话结束时不删：切走期间如果
     // 落库失败或只落了一部分，回来还能从缓冲里补齐；旧代码无条件 delete，
     // 那段正文就永久消失，正是「切会话把思考过程截断」的一半原因。
@@ -5227,6 +5255,9 @@ function dispatch(ev) {
 
     case 'turn.start':
       INFLIGHT[ev.sessionId] = true;
+      // 新的一轮开始：上一轮的「已结束」记录作废（否则切回来时会把新一轮
+      // 误判成已跑完，显示一个假的定格用时）。
+      if (!(conv && conv.id === ev.sessionId)) delete DONE_TURNS[ev.sessionId];
       if (conv && ev.sessionId === conv.id) {
         turnSawTool = false;
         busy = true;
@@ -7087,6 +7118,33 @@ function ensureWorkBar(a) {
 }
 
 /**
+ * 一轮在别的会话里跑完、之后才切回来的补正：给那个气泡补出「已工作 x 秒」
+ * 的定格计时条，并隐藏它的时间戳（时间戳是「这轮开始的时间」，实时视图
+ * 里跑着的轮次本来就隐藏它，定格后也该保持隐藏）。
+ *
+ * 没有这一步，切回来的视图会说「这轮从没跑过」：时间戳照常显示、
+ * 计时条从未出现，打断键退回发送键——尽管那一轮确实跑过并结束了。
+ */
+function applyDoneTurn(bubble, done) {
+  if (!bubble || !done) return;
+  // 已经定格过（.wk.done）就别重复处理。
+  const wk = bubble.querySelector('.wk');
+  if (wk && wk.classList.contains('done')) return;
+  ensureWorkBar(bubble);
+  const el = bubble.querySelector('.wk');
+  if (!el) return;
+  if (wkTimer) { clearInterval(wkTimer); wkTimer = 0; }
+  wkStart = 0;
+  el.classList.remove('on');
+  el.classList.add('done');
+  const tx = el.querySelector('.wtx');
+  const total = typeof done.ms === 'number' ? done.ms : 0;
+  if (tx) tx.textContent = t('worked_done').replace('{t}', fmtDur(total));
+  const ts = bubble.querySelector('.ts');
+  if (ts) ts.classList.add('hide');
+}
+
+/**
  * 事件缓冲兜底去重：如果最后一条已落库的 assistant 步已经包含缓冲里的
  * thinking / tool_call，就把这一段从 SHADOW 里剪掉。正常情况下
  * `step.persisted` 已经清空；这里防 SSE 丢事件那一次窗口。
@@ -7129,6 +7187,13 @@ function dropPersistedShadow(msgs, sh) {
 async function openSession(id, focusMsg) {
   const my = ++openTok;
   // 代际立刻递增：所有还在路上的旧会话请求从这一刻起都不能再写 DOM。
+  //
+  // gen 是本函数进入时的快照，convGen 紧接着 +1 变成 gen+1。此后 await
+  // 期间若**别的** openSession 也被调用，convGen 会继续涨到 gen+2 以上，
+  // 本函数就必须作废。所以后面所有的代际检查一律比较 convGen !== gen + 1，
+  // 不能写成 gen !== convGen——后者拿自己的快照和自己的自增值比，恒为真，
+  // 于是「切回正在跑的会话」这条恢复路径（打断键 + 工作中计时条）从未
+  // 执行过：界面只会说这一轮从没跑过。
   const gen = convGen;
   convGen++;
   qsReset(true);
@@ -7206,6 +7271,10 @@ async function openSession(id, focusMsg) {
       }
       a.dataset.tsMin = aTsMin;
       a.dataset.tsMax = aTsMax;
+      // 记下这个气泡消费了哪些 turn：切回来补「已结束轮次」定格态时，
+      // 要确认 DONE_TURNS 里那一轮确实属于这个气泡（历史里更早的轮次
+      // 本来就是终态，不能被误改成"刚跑完"）。
+      if (aTurns.length) a.dataset.turns = aTurns.join(',');
       // 操作条交给末尾的 restamp()：拿到存储下标才显示，避免灰色不可点。
       setActs(a, true);
       a = null; ab = null; aHasTool = false;
@@ -7320,6 +7389,21 @@ async function openSession(id, focusMsg) {
     // 所有已落库工具卡都登记到全局映射：复用旧气泡或接收后续 tool.result 时
     // 都能命中同一张卡，不会凭空再建一张。
     toolEls = { ...cardById };
+    // 这一轮是不是「在别的会话里跑完、现在才切回来」的？若是，给对应气泡
+    // 补出定格计时条与隐藏时间戳——否则界面会说这轮从没跑过。
+    // （turn.end 到达时用户可能在别的会话，curA 定格不到这个气泡。）
+    if (!INFLIGHT[id] && DONE_TURNS[id]) {
+      const done = DONE_TURNS[id];
+      const bubbles = [...feed.querySelectorAll(':scope > .a')];
+      const hit = bubbles[bubbles.length - 1];
+      if (hit) {
+        const turns = (hit.dataset.turns || '').split(',').filter(Boolean);
+        // turnId 对不上就只按「最后一个气泡」兜底（老数据没有 turn 字段）。
+        if (!done.turnId || !turns.length || turns.includes(done.turnId)) {
+          applyDoneTurn(hit, done);
+        }
+      }
+    }
     feed.classList.remove('fo');
     $('#ttl').classList.remove('fo');
     stick = true;
@@ -7336,7 +7420,7 @@ async function openSession(id, focusMsg) {
     foldEarlyTurns();
     // restamp 之后还有多次 await 与 DOM 写入：这里必须再验一次代际，
     // 否则用户在定位/重放期间切走，旧会话的内容会画进新会话。
-    if (my !== openTok || gen !== convGen) return;
+    if (my !== openTok || convGen !== gen + 1) return;
     if (focusMsg != null) {
       const hit = [...feed.querySelectorAll('[data-mi]')]
         .find(n => n.dataset.mi === String(focusMsg));
@@ -7404,7 +7488,7 @@ async function openSession(id, focusMsg) {
           if (sh.ended) {
             try {
               const msgs2 = (await api('/sessions/' + id + '/messages')).messages || [];
-              if (my !== openTok || gen !== convGen) return;
+              if (my !== openTok || convGen !== gen + 1) return;
               const flat = msgs2.filter(m => m.role === 'assistant')
                 .map(m => normParts(m.parts).filter(x => x.k === 'text').map(x => x.text).join('\n\n'))
                 .join('\n\n')
@@ -7414,7 +7498,7 @@ async function openSession(id, focusMsg) {
           }
           if (need.trim()) {
             // await 之后 curA 可能已被 resetTurn() 清掉，别对 null 解引用。
-            if (!curA || my !== openTok || gen !== convGen) return;
+            if (!curA || my !== openTok || convGen !== gen + 1) return;
             curStream = null;
             renderBlocks(curA.querySelector('.ab'), need);
             curText = (curText || '') + need;
@@ -7440,7 +7524,7 @@ async function openSession(id, focusMsg) {
       if (need) {
         try {
           const msgs = (await api('/sessions/' + id + '/messages')).messages || [];
-          if (my !== openTok || gen !== convGen) return;
+          if (my !== openTok || convGen !== gen + 1) return;
           const flat = msgs.filter(m => m.role === 'assistant')
             .map(m => normParts(m.parts).filter(x => x.k === 'text').map(x => x.text).join('\n\n'))
             .join('\n\n')
@@ -7449,7 +7533,7 @@ async function openSession(id, focusMsg) {
         } catch (e) { /* 存储读不到就照常补渲染，宁可多不可少 */ }
       }
       if (need) {
-        if (my !== openTok || gen !== convGen) return;
+        if (my !== openTok || convGen !== gen + 1) return;
         const asDone = [...feed.querySelectorAll(':scope > .a')];
         const aDone = asDone[asDone.length - 1];
         if (aDone) renderBlocks(aDone.querySelector('.ab'), need);
