@@ -303,7 +303,7 @@ textarea::placeholder{color:var(--fg2)}
 #qsf-kicker{color:var(--accent);font-weight:500}
 #qsf-hint{margin-left:auto;opacity:.7;text-transform:none;letter-spacing:0}
 #qsf-q{font:15.5px/1.6 var(--sans);color:var(--fg)}
-#qsf .qopts,.qopts{display:flex;flex-wrap:wrap;gap:6px}
+#qsf .qopts,.qopts{display:flex;flex-direction:column;gap:2px}
 .qsend{flex:none;border:0;background:var(--accent);color:#fff;border-radius:9px;padding:8px 14px;font:13px var(--sans);cursor:pointer;transition:opacity calc(.25s * var(--animd)),transform calc(.3s * var(--animd)) var(--qe)}
 .qsend:hover{transform:translateY(-1px);opacity:.92}.qsend:active{transform:scale(.96)}.qsend:disabled{opacity:.45;cursor:default;transform:none}
 .box.qask{overflow:hidden;transition:height .5s var(--qe),box-shadow calc(.4s * var(--animd)),border-color calc(.4s * var(--animd)),background-color calc(.6s * var(--animd))}
@@ -650,10 +650,13 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 /* 问答卡片：问题正文、可选答案、自由输入与回答回显 */
 .qpanel{display:flex;flex-direction:column;align-items:stretch;gap:8px;width:100%}
 .pm>.qpanel{align-items:stretch;width:100%}
-.qopts{display:flex;flex-wrap:wrap;gap:6px}
-.qopt{font:12.5px/1.45 var(--sans);border:.5px solid var(--line);background:var(--input);color:var(--fg);border-radius:8px;padding:5px 11px;cursor:pointer;max-width:100%;white-space:normal;text-align:left;transition:background-color calc(.2s * var(--animd)),border-color calc(.2s * var(--animd))}
-.qopt:hover{background:var(--hov);border-color:color-mix(in srgb,var(--accent) 35%,var(--line))}
-.qopt.ro{cursor:default;opacity:.92}.qopt.ro:hover{background:var(--input);border-color:var(--line)}
+.qopts{display:flex;flex-direction:column;gap:2px}
+/* 问答候选项：一行一项、前面低透明度字母序号（A/B/C…）的列表行，
+   不是按钮组。hover 高亮整行，点击作答。 */
+.qopt{display:flex;align-items:baseline;gap:10px;font:13px/1.5 var(--sans);border:0;background:none;color:var(--fg);border-radius:8px;padding:6px 10px;cursor:pointer;max-width:100%;white-space:normal;text-align:left;transition:background-color calc(.2s * var(--animd))}
+.qopt:hover{background:var(--hov)}
+.qopt .qkey{flex:none;width:1.2em;font:12px var(--mono);opacity:.35;user-select:none}
+.qopt.ro{cursor:default;opacity:.92}.qopt.ro:hover{background:none}
 .qaskrow{display:flex;align-items:center;gap:8px;width:100%}
 .qaskrow .qin{flex:1;min-width:0;padding:6px 9px;border:.5px solid var(--line);border-radius:8px;background:var(--input);color:inherit;font:13px var(--sans);outline:0}
 .qaskrow .qin:focus{border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 12%,transparent)}
@@ -4539,10 +4542,13 @@ function fillToolCard(e, display, ok, title) {
     if (opts.length) {
       const row = document.createElement('div');
       row.className = 'qopts';
-      opts.forEach(o => {
+      opts.forEach((o, i) => {
         const chip = document.createElement('span');
         chip.className = 'qopt ro';
-        chip.textContent = o;
+        const key = document.createElement('span');
+        key.className = 'qkey';
+        key.textContent = String.fromCharCode(65 + (i % 26));
+        chip.append(key, document.createTextNode(o));
         row.append(chip);
       });
       d.append(row);
@@ -4710,7 +4716,11 @@ function openAskSurface(ev, card, instant) {
     b.type = 'button';
     b.className = 'qopt';
     b.dataset.qopt = String(i);
-    b.textContent = o;
+    // 一行一项 + 低透明度字母序号（A/B/C…），不是按钮组。
+    const key = document.createElement('span');
+    key.className = 'qkey';
+    key.textContent = String.fromCharCode(65 + (i % 26));
+    b.append(key, document.createTextNode(o));
     b.onclick = e => { e.stopPropagation(); doSend(o); };
     optsEl.append(b);
   });
