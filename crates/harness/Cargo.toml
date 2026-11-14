@@ -67,5 +67,16 @@ windows = { version = "0.62", features = [
 ] }
 png = "0.17"
 
+# 文档能力：读/写/编辑常用办公与文档格式
+calamine = "0.38"
+rust_xlsxwriter = "0.79"
+umya-spreadsheet = "2.2"
+pdf-extract = "0.7"
+lopdf = "0.34"
+docx-rs = "0.4"
+genpdf = "0.2"
+zip = { version = "1", default-features = false, features = ["deflate"] }
+quick-xml = "0.37"
+
 [dev-dependencies]
 tempfile = "3"

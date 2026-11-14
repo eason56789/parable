@@ -959,6 +959,40 @@ skill matches the current request, then follow the steps it contains. Read-only.
                     "to": json!({"type":"object","description":"End: {ref} or {x,y}"}),
                 }), &[]),
             },
+            // ---- 文档能力（读/写/编辑常用办公与文档格式）----
+            ToolSpec {
+                name: "doc_read".into(),
+                description: "Read a document's content as text. Auto-detects by extension: pdf (text per page), docx (paragraphs & tables), pptx (text per slide), xlsx/xls (all sheets as rows), csv, md/txt. doc/ppt (legacy) auto-converts via LibreOffice when installed.".into(),
+                input_schema: obj(json!({
+                    "path": str_prop("Document path (workspace-relative or absolute)"),
+                    "sheet": str_prop("xlsx: read only this sheet name (default: all sheets)"),
+                    "max_chars": int_prop("Truncate output at N chars (default 40000)"),
+                }), &["path"]),
+            },
+            ToolSpec {
+                name: "doc_create".into(),
+                description: "Create a document from a structured spec (by extension): `.docx` doc={blocks:[{type:h1|h2|h3|p|bullet|table, text?, rows?}]}; `.xlsx` doc={sheets:[{name, rows:[[cell...]]}]}; `.pptx` doc={slides:[{title, bullets:[]}]}; `.pdf` doc={blocks:[{type:h1|h2|p, text}]}; `.md`/`.csv` doc={text|rows}. Overwriting an existing file needs confirmation.".into(),
+                input_schema: obj(json!({
+                    "path": str_prop("Target path; the extension picks the format"),
+                    "doc": json!({"type":["object","string"],"description":"Format-specific spec, see description"}),
+                }), &["path", "doc"]),
+            },
+            ToolSpec {
+                name: "doc_edit".into(),
+                description: "Edit an EXISTING document in place (keeps formatting where possible). ops by type: xlsx [{op:set_cells, sheet, cells:{A1:value}}, {op:add_sheet, name, rows}]; docx [{op:append_blocks, blocks:[...]}, {op:replace_text, find, replace}]; pptx [{op:add_slide, title, bullets}]; pdf [{op:merge, paths:[...]}] (merge into `path`). For .md just use write_file/edit_file.".into(),
+                input_schema: obj(json!({
+                    "path": str_prop("Document to edit"),
+                    "ops": json!({"type":"array","description":"Ops list, see description"}),
+                }), &["path", "ops"]),
+            },
+            ToolSpec {
+                name: "doc_convert".into(),
+                description: "Convert between document formats via LibreOffice (headless): doc→docx, ppt→pptx, docx→pdf, xlsx→pdf, etc. Requires LibreOffice installed; error message says where to get it when missing.".into(),
+                input_schema: obj(json!({
+                    "path": str_prop("Source document"),
+                    "to": str_prop("Target extension (docx | pdf | pptx | xlsx | html ...)"),
+                }), &["path", "to"]),
+            },
             ToolSpec {
                 name: "desktop_window".into(),
                 description: "Manage real windows: list (visible windows with hwnd, * = foreground), focus, minimize, maximize, close (graceful WM_CLOSE — the app decides whether to exit).".into(),
@@ -1116,6 +1150,10 @@ skill matches the current request, then follow the steps it contains. Read-only.
             "desktop_scroll" => crate::desktop::scroll(args, ctx).await,
             "desktop_drag" => crate::desktop::drag(args, ctx).await,
             "desktop_window" => crate::desktop::window(args, ctx).await,
+            "doc_read" => crate::docs::doc_read(args, ctx).await,
+            "doc_create" => crate::docs::doc_create(args, ctx).await,
+            "doc_edit" => crate::docs::doc_edit(args, ctx).await,
+            "doc_convert" => crate::docs::doc_convert(args, ctx).await,
             "plugin_list" | "plugin_create" | "plugin_edit" | "plugin_toggle" | "plugin_delete" => {
                 let r = crate::tools::plugin_admin(name, args, ctx).await;
                 if r.is_ok()

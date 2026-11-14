@@ -2089,6 +2089,7 @@ fn is_readonly_tool(name: &str) -> bool {
         "read_file" | "glob" | "grep" | "list_dir" | "web_fetch" | "computer_screenshot"
         | "computer_axtree" | "computer_snapshot" | "computer_extract" | "computer_wait"
         | "desktop_snapshot" | "desktop_screenshot" | "desktop_extract"
+        | "doc_read"
     )
 }
 

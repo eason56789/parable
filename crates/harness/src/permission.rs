@@ -371,7 +371,7 @@ impl PermissionBroker {
             None => match mode {
                 "full" => true,
                 "ws" => {
-                    if matches!(tool, "read_file" | "glob" | "grep" | "list_dir") {
+                    if matches!(tool, "read_file" | "glob" | "grep" | "list_dir" | "doc_read") {
                         return inside_workspace(workspace, Path::new(path));
                     }
                     // shell 类(bash 与插件命令,均为 Risk::Shell)、网络、破坏性
@@ -381,7 +381,7 @@ impl PermissionBroker {
                 }
                 _ => {
                     // ask:只读工具也不再全局放行,区外路径送确认。
-                    matches!(tool, "read_file" | "glob" | "grep" | "list_dir")
+                    matches!(tool, "read_file" | "glob" | "grep" | "list_dir" | "doc_read")
                         && inside_workspace(workspace, Path::new(path))
                 }
             },
