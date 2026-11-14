@@ -953,6 +953,17 @@ body.spmax #sdp{position:fixed;inset:46px 0 0 0;width:100vw;max-width:none;z-ind
   body.spmax #sdp{position:fixed;inset:46px 0 0 0;width:100vw!important}}
 
 /* ============ 使用统计 ============ */
+/* 工具调用表：名称 | 占用条 | 调用数 | 错误 | 平均耗时 */
+.ugtw{margin-top:10px}
+.utr{display:grid;grid-template-columns:minmax(90px,auto) 1fr 64px 88px 72px;gap:10px;align-items:center;padding:5px 0;font:12.5px var(--sans)}
+.utr+.utr{border-top:1px solid color-mix(in srgb,var(--line) 45%,transparent)}
+.utr .un{font-family:var(--mono);color:var(--fg);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.utr .ubar{display:block;height:6px;border-radius:99px;background:color-mix(in srgb,var(--hov) 70%,transparent);overflow:hidden}
+.utr .ubar i{display:block;height:100%;border-radius:99px;background:var(--uch2)}
+.utr b{font:600 12.5px var(--mono);color:var(--fg);text-align:right}
+.utr .ue{color:var(--fg2);text-align:right}
+.utr .ue.bad{color:#f87171}
+.utr .ua{color:var(--fg2);text-align:right;font-family:var(--mono)}
 .ug{display:flex;flex-direction:column;gap:18px;max-width:1100px;margin:0 auto;padding:38px 44px 60px}
 @media(max-width:760px){.ug{padding:22px 20px 40px}}
 .ug-h{display:flex;align-items:flex-start;justify-content:space-between;gap:20px}
@@ -1750,6 +1761,9 @@ const L = {
     sk_del_n:'确定删除技能 “{n}”？', sk_enabled:'启用',
     rulesT:'权限规则', rulesH:'命中允许规则就放行，命中拒绝规则就拒绝；规则优先于上面的权限模式。',
     ug_title:'使用统计', ug_desc:'Parable 的 Token 用量、活跃天数与模型分布。',
+    ug_tools:'工具调用', ug_tools_none:'所选范围内没有工具调用。',
+    ug_tools_n:'共 {n} 次调用', ug_tools_err:'错误率 {r}',
+    ug_ttft:'平均首字 {t}', ug_turndur:'轮均 {t}', ug_calls_n:'工具 {n} 次',
     ug_total:'累计 Token 数', ug_peak:'峰值 Token 数', ug_longest:'最长聊天时长',
     ug_streak_now:'当前连续天数', ug_streak_max:'最长连续天数',
     ug_activity:'Token 活动', ug_range:'时间范围', ug_trend:'每日 Token 趋势图',
@@ -1964,6 +1978,9 @@ const L = {
     sk_del_n:'Delete skill “{n}”?', sk_enabled:'Enabled',
     rulesT:'Permission rules', rulesH:'A matching allow rule wins, a matching deny rule wins; rules override the permission mode above.',
     ug_title:'Usage', ug_desc:'Token usage, active days and model breakdown in Parable.',
+    ug_tools:"Tool calls", ug_tools_none:"No tool calls in this range.",
+    ug_tools_n:"{n} calls total", ug_tools_err:"error rate {r}",
+    ug_ttft:"avg first token {t}", ug_turndur:"avg turn {t}", ug_calls_n:"{n} tool calls",
     ug_total:'Total tokens', ug_peak:'Peak tokens', ug_longest:'Longest chat',
     ug_streak_now:'Current streak', ug_streak_max:'Longest streak',
     ug_activity:'Token activity', ug_range:'Time range', ug_trend:'Daily token trend',
@@ -8977,7 +8994,8 @@ function fmtBig(n) {
 function fmtLongMs(ms) {
   const z = S.lang === 'zh';
   const s = Math.round((Number(ms) || 0) / 1000);
-  if (!s) return z ? '0 分钟' : '0 min';
+  if (!s) return z ? '0 秒' : '0s';
+  if (s < 60) return s + (z ? ' 秒' : 's');
   const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
   const out = [];
   if (d) out.push(d + (z ? ' 天' : 'd'));
@@ -9451,19 +9469,59 @@ function paintUsage(body, s) {
   const seg = '<div class="seg" id="rg">' + [['7d', 'ug_7d'], ['30d', 'ug_30d'], ['all', 'ug_all']]
     .map(r => '<button data-ugrange="' + r[0] + '" class="' + (ugRange === r[0] ? 'on' : '') + '">' +
       t(r[1]) + '</button>').join('') + '</div>';
+  const perf = [];
+  if (sum.avgTimeToFirstTokenMs != null) {
+    perf.push(t('ug_ttft').replace('{t}', sum.avgTimeToFirstTokenMs + ' ms'));
+  }
+  if (sum.avgTurnDurationMs != null) {
+    perf.push(t('ug_turndur').replace('{t}', fmtLongMs(sum.avgTurnDurationMs)));
+  }
   const trendCard = '<div class="card"><div class="ch"><h3>' + t('ug_trend') + '</h3>' +
-    '<em>' + t('ug_days_n').replace('{n}', daily.length) + '</em></div>' +
+    '<em>' + t('ug_days_n').replace('{n}', daily.length) +
+      (perf.length ? ' · ' + perf.join(' · ') : '') + '</em></div>' +
     '<div class="rowh"><b>' + t('ug_range') + '</b>' + seg + '</div>' +
     '<div class="tw" id="ugtw" style="margin-top:12px"></div></div>';
 
   // ---- 其余四张卡
+  const toolsCard = ugTools(s.tools || [], sum);
   const pieCard = ugPie(models);
   const compCard = ugComposition(sum);
   const hoursCard = ugActivity(s.activity || {});
   const topCard = ugTopSessions(s.topSessions || []);
 
-  body.innerHTML = '<div class="ug">' + strip + heat + trendCard + pieCard + compCard + hoursCard + topCard + '</div>';
+  body.innerHTML = '<div class="ug">' + strip + heat + trendCard + toolsCard + pieCard + compCard + hoursCard + topCard + '</div>';
   drawTrend(daily);
+}
+
+/* ------------------------------------------------------------ 工具调用表 */
+
+function ugTools(tools, sum) {
+  const list = (tools || []).slice().sort((a, b) => b.calls - a.calls);
+  if (!list.length) {
+    return '<div class="card"><div class="ch"><h3>' + t('ug_tools') + '</h3></div>' +
+      '<div class="ug-empty">' + t('ug_tools_none') + '</div></div>';
+  }
+  const mx = Math.max(1, ...list.map(x => x.calls || 0));
+  const errRate = Math.round((sum.toolErrorRate || 0) * 1000) / 10;
+  const rows = list.map(x => {
+    const calls = x.calls || 0;
+    const errs = x.errors || 0;
+    const rate = calls ? Math.round(errs / calls * 1000) / 10 : 0;
+    const avg = x.avgMs != null && x.avgMs > 0
+      ? (x.avgMs >= 1000 ? (x.avgMs / 1000).toFixed(1) + ' s' : x.avgMs + ' ms')
+      : '—';
+    return '<div class="utr">' +
+      '<span class="un">' + esc(x.name || '') + '</span>' +
+      '<span class="ubar"><i style="width:' + Math.max(2, calls / mx * 100) + '%"></i></span>' +
+      '<b>' + fmtBig(calls) + '</b>' +
+      '<span class="ue' + (errs ? ' bad' : '') + '">' + (errs ? errs + ' ✗ · ' + rate + '%' : '—') + '</span>' +
+      '<span class="ua">' + avg + '</span>' +
+      '</div>';
+  }).join('');
+  return '<div class="card"><div class="ch"><h3>' + t('ug_tools') + '</h3>' +
+    '<em>' + t('ug_tools_n').replace('{n}', fmtBig(sum.toolCalls || 0)) +
+      ' · ' + t('ug_tools_err').replace('{r}', errRate + '%') + '</em></div>' +
+    '<div class="ugtw">' + rows + '</div></div>';
 }
 
 /* ------------------------------------------------------------ 热力图 */
@@ -9485,7 +9543,8 @@ function heatHtml() {
       return '<div class="hmc">' + days.map(d => {
         if (!d) return '<i class="n"></i>';
         const tip = fmtDay(d.date) + '\n' + fmtBig(d.totalTokens) + ' ' + t('ug_tokens') +
-          ' · ' + t('ug_turns_n').replace('{n}', d.turnCount || 0);
+          ' · ' + t('ug_turns_n').replace('{n}', d.turnCount || 0) +
+          ' · ' + t('ug_calls_n').replace('{n}', d.toolCalls || 0);
         return heatLevelCell(d.level || 0, d.totalTokens, tip);
       }).join('') + '</div>';
     }).join('');

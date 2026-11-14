@@ -60,6 +60,21 @@ pub struct UsageRecord {
     /// always 1; a legacy session record carries the session's turn count.
     #[serde(default = "one")]
     pub turns: u64,
+    /// 该轮的工具调用统计：工具名 → (调用数, 错误数, 累计毫秒)。
+    /// 工具维度是「使用统计」页对标 ZCode App Usage 的核心增量。
+    #[serde(default)]
+    pub tools: BTreeMap<String, (u64, u64, u64)>,
+    /// 工具调用总数（= tools 的 calls 合计；冗余存一份便于聚合与旧数据）。
+    #[serde(default)]
+    pub tool_calls: u64,
+    #[serde(default)]
+    pub tool_errors: u64,
+    /// 首 token 延迟（本轮第一次观测到流式输出的毫秒数；0 = 未测得）。
+    #[serde(default)]
+    pub ttft_ms: u64,
+    /// 本轮是否以错误收尾（stop_reason == "error"）。
+    #[serde(default)]
+    pub failed: bool,
 }
 
 fn one() -> u64 {
@@ -285,6 +300,11 @@ fn import_sessions(root: &Path) -> Vec<UsageRecord> {
             // wall_ms is the session's total across all turns; keep it so
             // `longestSessionMs` reflects the real chat length.
             wall_ms: u.get("wall_ms").and_then(|x| x.as_u64()).unwrap_or(0),
+            tools: BTreeMap::new(),
+            tool_calls: 0,
+            tool_errors: 0,
+            ttft_ms: 0,
+            failed: false,
         });
     }
     out
@@ -324,6 +344,7 @@ struct DayTotals {
     cache_read: u64,
     cache_write: u64,
     turns: u64,
+    tool_calls: u64,
     by_model: HashMap<String, u64>,
 }
 
@@ -385,6 +406,12 @@ fn build_snapshot(recs: &[UsageRecord], range: &str, now: u64) -> Value {
     let mut total_cache_write: u64 = 0;
     let mut total_turns: u64 = 0;
     let mut peak_day: u64 = 0;
+    let mut wall_sum: u64 = 0;
+    let mut ttft_sum: u64 = 0;
+    let mut ttft_n: u64 = 0;
+    let mut failed_turns: u64 = 0;
+    let mut tool_calls_total: u64 = 0;
+    let mut tool_errors_total: u64 = 0;
     let mut activity = Activity::default();
     let mut session_detail: HashMap<String, SessionTotals> = HashMap::new();
 
@@ -415,6 +442,14 @@ fn build_snapshot(recs: &[UsageRecord], range: &str, now: u64) -> Value {
         }
         *sd.by_model.entry(r.model.clone()).or_insert(0) += t;
 
+        wall_sum += r.wall_ms;
+        if r.ttft_ms > 0 {
+            ttft_sum += r.ttft_ms;
+            ttft_n += 1;
+        }
+        failed_turns += u64::from(r.failed);
+        tool_calls_total += r.tool_calls;
+        tool_errors_total += r.tool_errors;
         let d = days.entry(r.day.clone()).or_default();
         d.total += t;
         d.input += r.input_tokens;
@@ -422,6 +457,7 @@ fn build_snapshot(recs: &[UsageRecord], range: &str, now: u64) -> Value {
         d.cache_read += r.cache_read;
         d.cache_write += r.cache_write;
         d.turns += r.turns.max(1);
+        d.tool_calls += r.tool_calls;
         *d.by_model.entry(r.model.clone()).or_insert(0) += t;
         if d.total > peak_day {
             peak_day = d.total;
@@ -477,6 +513,7 @@ fn build_snapshot(recs: &[UsageRecord], range: &str, now: u64) -> Value {
             "cacheRead": d.cache_read,
             "cacheWrite": d.cache_write,
             "turns": d.turns,
+            "toolCalls": d.tool_calls,
             "models": models,
         }));
     }
@@ -525,6 +562,36 @@ fn build_snapshot(recs: &[UsageRecord], range: &str, now: u64) -> Value {
                     .cmp(&b.get("modelId").and_then(|v| v.as_str())),
             )
     });
+
+    // ---- 工具维度（范围过滤），对标 ZCode App Usage 的 tools 数组
+    let mut tools_agg: BTreeMap<String, (u64, u64, u64)> = BTreeMap::new();
+    for r in recs {
+        if let Some(c) = &cutoff {
+            if r.day.as_str() < c.as_str() {
+                continue;
+            }
+        }
+        for (n, (c, e, ms)) in &r.tools {
+            let e0 = tools_agg.entry(n.clone()).or_insert((0, 0, 0));
+            e0.0 += c;
+            e0.1 += e;
+            e0.2 += ms;
+        }
+    }
+    let mut tools_rows: Vec<(String, (u64, u64, u64))> = tools_agg.into_iter().collect();
+    tools_rows.sort_by(|a, b| b.1 .0.cmp(&a.1 .0).then(a.0.cmp(&b.0)));
+    let tools_json: Vec<Value> = tools_rows
+        .into_iter()
+        .map(|(n, (c, e, ms))| {
+            serde_json::json!({
+                "name": n,
+                "calls": c,
+                "errors": e,
+                "errorRate": pct(e, c),
+                "avgMs": if c > 0 { serde_json::Value::from(ms / c) } else { serde_json::Value::Null },
+            })
+        })
+        .collect();
 
     // Top sessions by token spend, scoped to the same range as the charts.
     // A session's cost is attributed to the session as a whole — a chat that
@@ -647,8 +714,22 @@ fn build_snapshot(recs: &[UsageRecord], range: &str, now: u64) -> Value {
             "longestSessionMs": longest_session_ms,
             "peakDayTokens": peak_day,
             "favoriteModel": favorite_model,
+            "toolCalls": tool_calls_total,
+            "toolErrorRate": pct(tool_errors_total, tool_calls_total),
+            "modelErrorRate": pct(failed_turns, total_turns),
+            "avgTimeToFirstTokenMs": if ttft_n > 0 {
+                serde_json::Value::from(ttft_sum / ttft_n)
+            } else {
+                serde_json::Value::Null
+            },
+            "avgTurnDurationMs": if total_turns > 0 {
+                serde_json::Value::from(wall_sum / total_turns)
+            } else {
+                serde_json::Value::Null
+            },
         },
         "heatmap": heatmap,
+        "tools": tools_json,
         "daily": daily,
         "models": models,
         "activity": {
@@ -658,6 +739,15 @@ fn build_snapshot(recs: &[UsageRecord], range: &str, now: u64) -> Value {
         },
         "topSessions": top_sessions,
     })
+}
+
+/// 比率：num/den，den 为 0 时 0.0；保留 4 位小数。
+fn pct(num: u64, den: u64) -> f64 {
+    if den == 0 {
+        0.0
+    } else {
+        ((num as f64 / den as f64) * 10000.0).round() / 10000.0
+    }
 }
 
 /// Current and longest run of consecutive active days.
@@ -816,6 +906,11 @@ mod tests {
             cache_write: 0,
             wall_ms,
             turns: 1,
+            tools: BTreeMap::new(),
+            tool_calls: 0,
+            tool_errors: 0,
+            ttft_ms: 0,
+            failed: false,
         }
     }
 

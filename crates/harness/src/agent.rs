@@ -1192,7 +1192,7 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
                 // 还没有解析出具体模型，model 留空。
                 self.finalize_turn(
                     session_id, turn_id, t_start, &Usage::default(), 0, "error",
-                    ctx_limit, 0, 0, 0, 0, "",
+                    ctx_limit, 0, 0, 0, 0, "", &Default::default(),
                 )
                 .await;
                 return Err(e);
@@ -1258,6 +1258,10 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
         let mut stop_reason = "end_turn".to_string();
         // 本轮计时口径（随 status 事件发布）：
         let mut model_ms = 0u64; // 模型流耗时累计
+        // 工具维度统计：工具名 → (调用数, 错误数, 累计毫秒)。「使用统计」页
+        // 的工具表与错误率都来自这里，经 finalize_turn 写进 usage journal。
+        let mut tool_stats: std::collections::BTreeMap<String, (u64, u64, u64)> =
+            std::collections::BTreeMap::new();
         let mut tool_ms = 0u64; // 工具执行耗时累计
         let mut ttft_ms = 0u64; // 首 token 延迟（取第一次观测值）
 
@@ -1614,12 +1618,25 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
                         match h.await {
                             Ok((_id, _name, r, dt)) => {
                                 tool_ms += dt;
+                                {
+                                    let e = tool_stats.entry(name.clone()).or_insert((0, 0, 0));
+                                    e.0 += 1;
+                                    if r.is_err() {
+                                        e.1 += 1;
+                                    }
+                                    e.2 += dt;
+                                }
                                 self.record_outcome(session_id, turn_id, &id, &name, r, &mut outcomes)
                                     .await;
                             }
                             Err(e) => {
                                 // JoinError（panic/取消）：补发 is_error 的
                                 // tool_result，保证每个 tool_use 必有对应结果。
+                                {
+                                    let e0 = tool_stats.entry(name.clone()).or_insert((0, 0, 0));
+                                    e0.0 += 1;
+                                    e0.1 += 1;
+                                }
                                 let msg = format!("tool panicked: {e}");
                                 self.emit_tool_error(session_id, turn_id, &id, &name,
                                     &HarnessError::Other(msg.clone())).await;
@@ -1643,7 +1660,16 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
                         _ = cancel.cancelled() => Err(HarnessError::Tool("用户已终止本轮".into())),
                         r = reg.execute(&name, &args, &ctx) => r,
                     };
-                    tool_ms += t0.elapsed().as_millis() as u64;
+                    let dt = t0.elapsed().as_millis() as u64;
+                    tool_ms += dt;
+                    {
+                        let e0 = tool_stats.entry(name.clone()).or_insert((0, 0, 0));
+                        e0.0 += 1;
+                        if r.is_err() {
+                            e0.1 += 1;
+                        }
+                        e0.2 += dt;
+                    }
                     self.record_outcome(session_id, turn_id, &id, &name, r, &mut outcomes).await;
                 }
             }
@@ -1655,6 +1681,11 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
             if cancel.is_cancelled() {
                 for (id, name, _) in &calls {
                     if !outcomes.iter().any(|(oid, _, _, _, _)| oid == id) {
+                        {
+                            let e0 = tool_stats.entry(name.clone()).or_insert((0, 0, 0));
+                            e0.0 += 1;
+                            e0.1 += 1;
+                        }
                         let msg = "用户已终止本轮".to_string();
                         self.emit_tool_error(
                             session_id,
@@ -1734,6 +1765,7 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
             tool_ms,
             ttft_ms,
             &model_id,
+            &tool_stats,
         )
         .await;
         result.map(|_| ())
@@ -1796,6 +1828,7 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
         tool_ms: u64,
         ttft_ms: u64,
         model: &str,
+        tools: &std::collections::BTreeMap<String, (u64, u64, u64)>,
     ) {
         let wall = t_start.elapsed().as_millis() as u64;
         self.store
@@ -1815,6 +1848,11 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
                 cache_write: turn_usage.cache_creation_input_tokens,
                 wall_ms: wall,
                 turns: 1,
+                tools: tools.clone(),
+                tool_calls: tools.values().map(|v| v.0).sum(),
+                tool_errors: tools.values().map(|v| v.1).sum(),
+                ttft_ms,
+                failed: stop_reason == "error",
             })
             .await;
         }
