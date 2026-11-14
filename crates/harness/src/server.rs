@@ -290,6 +290,12 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/browser/forward", post(browser_history_go::<1>))
         .route("/browser/reload", post(browser_reload))
         .route("/browser/click", post(browser_click))
+        // 浏览器 cookie 导入：一键把 Chrome/Edge/Brave/Vivaldi/Firefox 的
+        // 登录状态搬进内置浏览器（登录态 jar 持久化在 ~/.parable）。
+        .route("/browser/cookies/sources", get(browser_cookie_sources))
+        .route("/browser/cookies/import", post(browser_cookie_import))
+        .route("/browser/cookies/clear", post(browser_cookie_clear))
+        .route("/browser/cookies/paste", post(browser_cookie_paste))
         .route("/term/exec", post(term_exec))
         // 后台终端（右上角悬浮窗）：/term/exec 是单次同步命令，这一组是常驻
         // 会话——启动即返回、可看输出、可终止、刷新后能重新列出来。
@@ -3128,6 +3134,146 @@ async fn browser_navigate(
     }
 }
 
+// ------------------------------------------------------------------ 浏览器 cookie 导入
+
+/// GET /api/browser/cookies/sources — 本机可导入的浏览器/配置清单。
+async fn browser_cookie_sources(State(state): State<SharedState>, headers: HeaderMap) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    let sources = crate::cookies::detect_sources();
+    let jar = crate::cookies::CookieJar::load();
+    Json(json!({
+        "sources": sources,
+        "jarCount": jar.cookies.len(),
+        "jarUpdatedAt": jar.updated_at,
+    }))
+    .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct BrowserCookieImportReq {
+    /// Source ids from `sources`, e.g. `["edge:Default", "firefox:xxx"]`.
+    sources: Vec<String>,
+    /// 允许为解锁 cookie 库临时关闭运行中的源浏览器（抽完自动重开并
+    /// 恢复标签页）。前端对锁定来源先弹确认框再置位。
+    #[serde(default)]
+    close: bool,
+}
+
+/// POST /api/browser/cookies/import — 抽取所选浏览器的 cookie，合并进
+/// 持久 jar，再注入内置浏览器。单个来源失败不拖垮整批。
+async fn browser_cookie_import(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(r): Json<BrowserCookieImportReq>,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    if r.sources.is_empty() {
+        return bad_request("没有选择导入来源");
+    }
+    let mut per: Vec<Value> = Vec::new();
+    let mut extracted = 0usize;
+    let mut incoming = Vec::new();
+    let mut closed_any = false;
+    let mut reopened_any = false;
+    for id in &r.sources {
+        match crate::cookies::extract_source_ex(id, r.close).await {
+            Ok(rep) => {
+                extracted += rep.cookies.len();
+                closed_any |= rep.closed;
+                reopened_any |= rep.reopened;
+                per.push(json!({"id": id, "count": rep.cookies.len()}));
+                incoming.extend(rep.cookies);
+            }
+            Err(e) => per.push(json!({"id": id, "error": e.to_string()})),
+        }
+    }
+    let mut jar = crate::cookies::CookieJar::load();
+    let total = jar.merge(incoming);
+    let _ = jar.save();
+    // 注入内置浏览器：只在真抽到东西时才动浏览器（全部来源失败时
+    // jar 原样，浏览器保持现状）。浏览器起不来（机器上没有 Edge/Chrome）
+    // 也不算导入失败——jar 已落盘，浏览器下次启动自动回放。
+    let mut injected = 0usize;
+    let mut inject_error = None;
+    if extracted > 0 {
+        match state.agent.computer.import_cookies(&jar.cookies).await {
+            Ok((ok, _fail)) => injected = ok,
+            Err(e) => inject_error = Some(e.to_string()),
+        }
+    }
+    let mut body = json!({
+        "ok": true,
+        "extracted": extracted,
+        "jarTotal": total,
+        "injected": injected,
+        "closed": closed_any,
+        "reopened": reopened_any,
+        "sources": per,
+    });
+    if let Some(e) = inject_error {
+        body["injectError"] = json!(e);
+    }
+    Json(body).into_response()
+}
+
+/// POST /api/browser/cookies/clear — 清空持久 jar 与内置浏览器 cookie。
+async fn browser_cookie_clear(State(state): State<SharedState>, headers: HeaderMap) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    let mut jar = crate::cookies::CookieJar::load();
+    jar.clear();
+    let _ = jar.save();
+    // 浏览器没起时无需拉起——没有 cookie 可清。
+    let _ = state.agent.computer.clear_cookies().await;
+    Json(json!({"ok": true})).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct BrowserCookiePasteReq {
+    /// `document.cookie` 原文（`a=1; b=2`）或 EditThisCookie 导出的 JSON。
+    text: String,
+    /// 这些 cookie 归属的域名，如 `.bilibili.com`。
+    domain: String,
+}
+
+/// POST /api/browser/cookies/paste — 手动粘贴导入。
+///
+/// ABE（App-Bound Encryption，Chrome/Edge 127+ 默认）使大部分加密 cookie
+/// 无法从其他浏览器还原，这条路径是用户的可靠兜底。
+async fn browser_cookie_paste(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(r): Json<BrowserCookiePasteReq>,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    let entries = match crate::cookies::parse_pasted(&r.text, &r.domain) {
+        Ok(e) => e,
+        Err(e) => return bad_request(&e.to_string()),
+    };
+    let n = entries.len();
+    let mut jar = crate::cookies::CookieJar::load();
+    let total = jar.merge(entries);
+    let _ = jar.save();
+    let mut injected = 0usize;
+    let mut inject_error = None;
+    match state.agent.computer.import_cookies(&jar.cookies).await {
+        Ok((ok, _)) => injected = ok,
+        Err(e) => inject_error = Some(e.to_string()),
+    }
+    let mut body = json!({"ok": true, "parsed": n, "jarTotal": total, "injected": injected});
+    if let Some(e) = inject_error {
+        body["injectError"] = json!(e);
+    }
+    Json(body).into_response()
+}
+
 #[derive(Debug, Deserialize)]
 struct TermExecReq {
     command: String,
@@ -3919,5 +4065,77 @@ mod regression {
                 .iter()
                 .any(|a| a["id"] == "档案管理员")
         );
+    }
+
+    #[tokio::test]
+    async fn browser_cookies_endpoints() {
+        // cookie jar 落在真实 home（Config::home_dir），测试先备份、结束还原，
+        // 绝不毁用户数据。
+        let jar = crate::cookies::jar_path();
+        let backup = std::fs::read(&jar).ok();
+        let restore = |backup: Option<Vec<u8>>| {
+            match backup {
+                Some(b) => {
+                    let _ = std::fs::write(&jar, b);
+                }
+                None => {
+                    let _ = std::fs::remove_file(&jar);
+                }
+            }
+        };
+        let (base, token) = spawn_server("cookies").await;
+        let cli = reqwest::Client::new();
+        let hdr = ("x-parable-token", token.as_str());
+        let url = |p: &str| format!("{base}/api{p}");
+
+        // sources：结构完整即可（本机装了什么浏览器因机器而异）。
+        let res = cli
+            .get(url("/browser/cookies/sources"))
+            .header(hdr.0, hdr.1)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        let v: Value = res.json().await.unwrap();
+        assert!(v["sources"].as_array().is_some());
+        assert!(v.get("jarCount").is_some());
+
+        // 空来源拒绝。
+        let res = cli
+            .post(url("/browser/cookies/import"))
+            .header(hdr.0, hdr.1)
+            .json(&json!({"sources": []}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 400);
+
+        // 不存在的来源：逐来源报 error，整批 ok（不拖垮）。
+        let res = cli
+            .post(url("/browser/cookies/import"))
+            .header(hdr.0, hdr.1)
+            .json(&json!({"sources": ["firefox:definitely-not-a-profile"]}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        let v: Value = res.json().await.unwrap();
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["extracted"], 0);
+        assert!(
+            v["sources"][0].get("error").is_some(),
+            "a bogus source must report its error"
+        );
+
+        // clear。
+        let res = cli
+            .post(url("/browser/cookies/clear"))
+            .header(hdr.0, hdr.1)
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        restore(backup);
     }
 }

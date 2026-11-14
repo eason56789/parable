@@ -9,6 +9,7 @@ pub mod docs;
 pub mod hooks;
 pub mod mcp;
 pub mod config;
+pub mod cookies;
 pub mod error;
 pub mod event;
 pub mod git;

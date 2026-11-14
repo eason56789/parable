@@ -51,6 +51,9 @@ encoding_rs = "0.8"
 cron = "0.15"
 tokio-tungstenite = "0.24"
 chrono-tz = "0.10"
+# 浏览器 cookie 导入：读 Firefox cookies.sqlite / Chromium cookie 库（计数）。
+# bundled = 自带 sqlite3 源码，不依赖系统 SQLite DLL。
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [

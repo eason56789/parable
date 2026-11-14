@@ -877,6 +877,15 @@ body.spmax #sdp{position:fixed;inset:46px 0 0 0;width:100vw;max-width:none;z-ind
 .spbtn:hover{background:var(--hov)}
 /* 内置浏览器工具栏：导航钮 + 药丸地址栏 */
 .spbnav{display:flex;align-items:center;gap:6px;padding:8px 10px;border-bottom:.5px solid var(--line);position:sticky;top:0;background:var(--bg);z-index:2}
+#ckimp-list{max-height:260px;overflow-y:auto;border:.5px solid var(--line);border-radius:10px;padding:4px;margin-top:6px}
+.ckimpr{display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:9px;cursor:pointer}
+.ckimpr:hover{background:var(--hov)}
+.ckimpr input{flex:none;accent-color:var(--accent)}
+.ckimpr svg{width:15px;height:15px;color:var(--fg2);flex:none}
+.ckimpr b{flex:1;min-width:0;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ckimpr em{font-style:normal;color:var(--fg2);font:12px var(--mono);flex:none}
+.ckimpr em.cklock{color:var(--accent);font-family:var(--sans)}
+.ckabe{color:var(--fg2);font-size:12px;line-height:1.6;padding:9px 11px;border-radius:9px;background:var(--side);border:.5px solid var(--line)}
 .spnav{border:1px solid var(--line);background:var(--input);color:var(--fg2);border-radius:8px;padding:6px 8px;cursor:pointer;flex:none;display:grid;place-items:center;transition:background-color calc(.2s * var(--animd)),color calc(.2s * var(--animd))}
 .spnav:hover{background:var(--hov);color:var(--fg)}
 .spnav:active{transform:scale(.94)}
@@ -1885,6 +1894,19 @@ const L = {
     sp_empty_fs:'选择一个文件查看内容。', sp_empty_git:'没有需要审查的变更。',
     sp_empty_browser:'还没有打开页面。', spb_ph:'输入网址，如 example.com', spb_back:'后退', spb_fwd:'前进', spb_rl:'刷新',
     spb_hint:'点击截图可直接操作页面；agent 的操作会实时反映在这里。', spb_text:'页面文本', sp_empty_term:'在下方输入命令。',
+    spb_ck:'导入登录状态', spb_ck_h:'一键把常见浏览器的 Cookie 与登录状态搬进内置浏览器', spb_ck_title:'导入登录状态（Cookie）',
+    spb_ck_intro:'把下面浏览器里已登录的 Cookie 搬进内置浏览器。导入结果持久保存，内置浏览器每次启动自动带上。',
+    spb_ck_none:'没有检测到可导入的浏览器。', spb_ck_go:'开始导入', spb_ck_clear:'清除已导入',
+    spb_ck_clear_ask:'清除已导入的全部登录状态？', spb_ck_running:'导入中…',
+    spb_ck_done:'已导入 {n} 个 Cookie（库内共 {m} 个）', spb_ck_cleared:'已清除导入的登录状态',
+    spb_ck_locked:'运行中·需关闭', spb_ck_close_ask:'导入这些来源需要临时关闭其浏览器（抽完会自动重新打开并恢复标签页），继续？',
+    spb_ck_reopened:'源浏览器已重新打开',
+    spb_ck_abe:'注意：Chrome/Edge 127+ 起 cookie 受 App-Bound 加密保护，只有部分站点（如 MSN/Bing 这类旧式 cookie）能被正常解出；抖音、哔哩哔哩、Claude 等站点的登录态多数解不出。这些站点请用「手动粘贴」——在已登录的浏览器里打开该站点，按 F12 在控制台执行 document.cookie 复制结果粘贴进来（或用 EditThisCookie 导出 JSON）。',
+    spb_ck_paste:'手动粘贴', spb_ck_paste_title:'手动粘贴 Cookie',
+    spb_ck_paste_hint:'在已登录的浏览器里打开目标站点，F12 → 控制台 → 输入 document.cookie 回车，复制输出粘贴到下面；也可粘贴 EditThisCookie/Cookie-Editor 导出的 JSON。',
+    spb_ck_domain:'Cookie 归属域名', spb_ck_domain_ph:'如 .bilibili.com（前导点 = 子域共享）',
+    spb_ck_text:'Cookie 内容', spb_ck_text_ph:'SESSDATA=xxx; bili_jct=yyy',
+    spb_ck_paste_go:'导入', spb_ck_paste_done:'已粘贴导入 {n} 个 Cookie（库内共 {m} 个）',
     sp_not_repo:'当前工作区不是 Git 仓库。', sp_no_files:'没有匹配的文件。',
     sp_run:'运行', sp_path_hint:'工作区路径', sp_search_hint:'按文件名搜索…',
     sp_deploy_note:'',
@@ -2107,6 +2129,19 @@ const L = {
     sp_empty_fs:'Pick a file to see its contents.', sp_empty_git:'No changes to review.',
     sp_empty_browser:'No page open yet.', spb_ph:'Enter a URL, e.g. example.com', spb_back:'Back', spb_fwd:'Forward', spb_rl:'Reload',
     spb_hint:'Click the screenshot to interact with the page; agent actions show up here live.', spb_text:'Page text', sp_empty_term:'Type a command below.',
+    spb_ck:'Import logins', spb_ck_h:'One-click import of browser cookies and login state into the built-in browser', spb_ck_title:'Import login state (cookies)',
+    spb_ck_intro:'Bring the logged-in cookies of the browsers below into the built-in browser. Imports persist and are re-applied on every browser start.',
+    spb_ck_none:'No importable browsers detected.', spb_ck_go:'Import', spb_ck_clear:'Clear imported',
+    spb_ck_clear_ask:'Clear all imported login state?', spb_ck_running:'Importing…',
+    spb_ck_done:'Imported {n} cookies ({m} in total)', spb_ck_cleared:'Imported login state cleared',
+    spb_ck_locked:'Running · close needed', spb_ck_close_ask:'Importing these requires briefly closing their browser (it reopens with tabs restored). Continue?',
+    spb_ck_reopened:'source browser reopened',
+    spb_ck_abe:'Note: since Chrome/Edge 127, cookies are protected by App-Bound Encryption, so only some sites (legacy cookies such as MSN/Bing) decrypt successfully; logins for sites like TikTok, Bilibili or Claude usually cannot be extracted. Use "Paste manually" for those — open the site in a logged-in browser, press F12, run document.cookie in the console and paste the output (or export JSON with EditThisCookie).',
+    spb_ck_paste:'Paste manually', spb_ck_paste_title:'Paste cookies manually',
+    spb_ck_paste_hint:'Open the site in a logged-in browser, F12 → console → type document.cookie and paste the output below; EditThisCookie / Cookie-Editor JSON exports work too.',
+    spb_ck_domain:'Cookie domain', spb_ck_domain_ph:'e.g. .bilibili.com (leading dot shares with subdomains)',
+    spb_ck_text:'Cookie content', spb_ck_text_ph:'SESSDATA=xxx; bili_jct=yyy',
+    spb_ck_paste_go:'Import', spb_ck_paste_done:'Imported {n} pasted cookies ({m} in total)',
     sp_not_repo:'The workspace is not a Git repository.', sp_no_files:'No matching files.',
     sp_run:'Run', sp_path_hint:'Workspace path', sp_search_hint:'Search files by name…',
     sp_deploy_note:'',
@@ -11411,6 +11446,7 @@ function spRenderBrowser(host, tab) {
     '<button class="spnav" id="spb-rl" title="' + esc(t('spb_rl')) + '">' + ic('refresh') + '</button>' +
     '<input id="spb-url" placeholder="' + esc(t('spb_ph')) + '" spellcheck="false" autocomplete="off">' +
     '<button class="spnav pri" id="spb-go" title="' + esc(t('sp_run')) + '">' + ic('fwd') + '</button>' +
+    '<button class="spnav" id="spb-ck" title="' + esc(t('spb_ck_h')) + '">' + ic('lock') + '</button>' +
     '</div>' +
     '<div class="spbrow" id="spb-body"><div class="spempty">' + esc(t('sp_empty_browser')) + '</div></div>' +
     '<div class="spbhint">' + esc(t('spb_hint')) + '</div>';
@@ -11443,6 +11479,7 @@ function spRenderBrowser(host, tab) {
   };
   go.onclick = doGo;
   url.onkeydown = e => { if (e.key === 'Enter') doGo(); };
+  host.querySelector('#spb-ck').onclick = () => spCookieImport();
   if (tab.st.url) spBrowserState(tab);
   // 实况轮询：内置浏览器是 agent 与用户共用的视图，agent 操作期间面板
   // 跟随刷新。3s 一次（BitBlt + PNG ~100ms，常驻开销可接受）。
@@ -11491,6 +11528,133 @@ async function spBrowserState(tab) {
     } catch (e2) { toast(e2.message); }
     im.style.opacity = '';
   };
+}
+
+/* -------------------- 一键导入浏览器 Cookie/登录状态 --------------------
+   来源：本机 Chrome/Edge/Brave/Vivaldi/Firefox 的配置文件（后端探测）。
+   Chromium 系的 cookie 值在磁盘上是加密的（DPAPI/ABE），后端用「复制
+   最小档案 + 本机真实浏览器无头自查」拿明文；Firefox 库直接读。
+   结果并入持久 jar（~/.parable/browser-cookies.json），每次浏览器启动
+   自动回放——内置浏览器从此自带登录态。 */
+function spCookieImport() {
+  const ov = document.createElement('div');
+  ov.className = 'mdl';
+  document.body.appendChild(ov);
+  const close = () => { document.removeEventListener('keydown', onKey, true); ov.remove(); };
+  const onKey = e => { if (e.key === 'Escape') { e.stopPropagation(); close(); } };
+  document.addEventListener('keydown', onKey, true);
+
+  ov.innerHTML = '<div class="mdlc"><div class="mdlh"><h3>' + esc(t('spb_ck_title')) +
+    '</h3><button class="ib" data-x title="' + esc(t('close')) + '">' + ic('x') + '</button></div>' +
+    '<div class="mdlb"><div class="mp-field"><label>' + esc(t('spb_ck_intro')) + '</label>' +
+      '<div id="ckimp-list"><div class="pempty">…</div></div></div>' +
+      '<div class="mp-field"><div class="ckabe">' + esc(t('spb_ck_abe')) + '</div></div></div>' +
+    '<div class="mderr" id="mderr"></div>' +
+    '<div class="mdlf"><button class="btn danger" data-ckclear>' + esc(t('spb_ck_clear')) + '</button>' +
+      '<button class="btn" data-ckpaste>' + esc(t('spb_ck_paste')) + '</button>' +
+      '<span class="fl"></span>' +
+      '<button class="btn" data-x>' + esc(t('mem_cancel')) + '</button>' +
+      '<button class="btn pri" data-ckgo disabled>' + esc(t('spb_ck_go')) + '</button></div></div>';
+
+  const err = m => { const el = ov.querySelector('#mderr'); if (el) el.textContent = m; };
+  const list = ov.querySelector('#ckimp-list');
+  const goBtn = ov.querySelector('[data-ckgo]');
+
+  api('/browser/cookies/sources').then(r => {
+    const srcs = r.sources || [];
+    if (!srcs.length) {
+      list.innerHTML = '<div class="pempty">' + esc(t('spb_ck_none')) + '</div>';
+      return;
+    }
+    list.innerHTML = srcs.map(s =>
+      '<label class="ckimpr"><input type="checkbox" data-id="' + esc(s.id) + '"' +
+      (s.locked ? ' data-locked="1"' : '') + ' checked>' +
+      ic('globe') + '<b title="' + esc(s.id) + '">' + esc(s.label) + '</b>' +
+      (s.locked ? '<em class="cklock">' + esc(t('spb_ck_locked')) + '</em>' : '') +
+      '<em>' + (s.count != null ? s.count : '—') + '</em></label>').join('');
+    goBtn.disabled = false;
+  }).catch(e => err(e.message));
+
+  ov.onclick = async e => {
+    if (e.target.closest('[data-x]')) { close(); return; }
+    if (e.target.closest('[data-ckpaste]')) { close(); spCookiePaste(); return; }
+    if (e.target.closest('[data-ckclear]')) {
+      if (!(await confirmBox(t('spb_ck_clear_ask')))) return;
+      try {
+        await api('/browser/cookies/clear', { method: 'POST', body: {} });
+        toast(t('spb_ck_cleared'));
+        close();
+      } catch (x) { err(x.message); }
+      return;
+    }
+    if (!e.target.closest('[data-ckgo]')) return;
+    const checked = [...ov.querySelectorAll('#ckimp-list input:checked')];
+    const ids = checked.map(x => x.dataset.id);
+    if (!ids.length) return err(t('spb_ck_none'));
+    // 锁定来源（运行中的 Chromium 系）需要先关浏览器——弹确认再放行。
+    const locked = checked.some(x => x.dataset.locked === '1');
+    if (locked && !(await confirmBox(t('spb_ck_close_ask')))) return;
+    goBtn.disabled = true;
+    goBtn.textContent = t('spb_ck_running');
+    try {
+      const r = await api('/browser/cookies/import', { method: 'POST', body: { sources: ids, close: locked } });
+      const fails = (r.sources || []).filter(x => x.error);
+      let msg = t('spb_ck_done').replace('{n}', r.extracted).replace('{m}', r.jarTotal);
+      if (fails.length) msg += ' — ' + fails.map(x => x.id + ': ' + x.error).join('; ');
+      if (r.reopened) msg += ' · ' + t('spb_ck_reopened');
+      if (r.injectError) msg += ' — ' + r.injectError;
+      close();
+      toast(msg);
+    } catch (x) {
+      err(x.message);
+      goBtn.disabled = false;
+      goBtn.textContent = t('spb_ck_go');
+    }
+  };
+  setTimeout(() => { const f = ov.querySelector('#ckimp-list input'); if (f) f.focus(); }, 40);
+}
+
+/* 手动粘贴导入：ABE 让复制档案解不出大部分站点，这是 100% 可靠的兜底。 */
+function spCookiePaste() {
+  const ov = document.createElement('div');
+  ov.className = 'mdl';
+  document.body.appendChild(ov);
+  const close = () => { document.removeEventListener('keydown', onKey, true); ov.remove(); };
+  const onKey = e => { if (e.key === 'Escape') { e.stopPropagation(); close(); } };
+  document.addEventListener('keydown', onKey, true);
+
+  ov.innerHTML = '<div class="mdlc"><div class="mdlh"><h3>' + esc(t('spb_ck_paste_title')) +
+    '</h3><button class="ib" data-x title="' + esc(t('close')) + '">' + ic('x') + '</button></div>' +
+    '<div class="mdlb">' +
+      '<div class="mp-field"><div class="ckabe">' + esc(t('spb_ck_paste_hint')) + '</div></div>' +
+      '<div class="mp-field"><label>' + esc(t('spb_ck_domain')) + '</label>' +
+        '<input class="mp-in" id="ckdom" placeholder="' + esc(t('spb_ck_domain_ph')) +
+        '" spellcheck="false" style="font-family:var(--mono)"></div>' +
+      '<div class="mp-field"><label>' + esc(t('spb_ck_text')) + '</label>' +
+        '<textarea class="mp-in js" id="cktxt" spellcheck="false" style="min-height:160px" placeholder="' +
+        esc(t('spb_ck_text_ph')) + '"></textarea></div>' +
+    '</div><div class="mderr" id="mderr"></div>' +
+    '<div class="mdlf"><span class="fl"></span>' +
+      '<button class="btn" data-x>' + esc(t('mem_cancel')) + '</button>' +
+      '<button class="btn pri" data-go>' + esc(t('spb_ck_paste_go')) + '</button></div></div>';
+
+  const err = m => { const el = ov.querySelector('#mderr'); if (el) el.textContent = m; };
+  ov.onclick = async e => {
+    if (e.target.closest('[data-x]')) { close(); return; }
+    if (!e.target.closest('[data-go]')) return;
+    const domain = ov.querySelector('#ckdom').value.trim();
+    const text = ov.querySelector('#cktxt').value.trim();
+    if (!domain) return err(t('spb_ck_domain_ph'));
+    if (!text) return err(t('spb_ck_text_ph'));
+    try {
+      const r = await api('/browser/cookies/paste', { method: 'POST', body: { domain, text } });
+      close();
+      let msg = t('spb_ck_paste_done').replace('{n}', r.parsed).replace('{m}', r.jarTotal);
+      if (r.injectError) msg += ' — ' + r.injectError;
+      toast(msg);
+    } catch (x) { err(x.message); }
+  };
+  setTimeout(() => { const f = ov.querySelector('#ckdom'); if (f) f.focus(); }, 40);
 }
 
 /* ------------------------------------------------------------ 终端面板 */

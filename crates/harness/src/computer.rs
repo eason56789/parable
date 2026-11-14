@@ -127,6 +127,8 @@ pub struct ComputerBridge {
     /// 而回退普通窗口）。由 serve_in 注入 harness 自身的 /browser-boot 页。
     boot_url: std::sync::RwLock<String>,
     pending: Mutex<Option<PendingImage>>,
+    /// cookie jar 是否已注入当前浏览器（每次启动注入一次；导入时置位）。
+    jar_injected: std::sync::atomic::AtomicBool,
 }
 
 impl ComputerBridge {
@@ -170,6 +172,7 @@ impl ComputerBridge {
             headless: std::sync::RwLock::new(true),
             boot_url: std::sync::RwLock::new(String::new()),
             pending: Mutex::new(None),
+            jar_injected: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -345,6 +348,77 @@ impl ComputerBridge {
         if let Some(mut child) = self.child.lock().await.take() {
             let _ = child.kill().await;
         }
+        // 浏览器重启后 cookie 全空，下次 ensure 重新注入 jar。
+        self.jar_injected
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// 把持久 cookie jar（~/.parable/browser-cookies.json）注入当前浏览器。
+    /// 每次浏览器启动后调用一次；失败只记日志，不阻塞工具调用。
+    ///
+    /// 注意：直接拿 cdp 锁发命令，不走 `cmd()`——那会形成
+    /// cmd → ensure → inject_jar_once → cmd 的 async 递归环（编译期 E0733）。
+    async fn inject_jar_once(&self) {
+        if self
+            .jar_injected
+            .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            return;
+        }
+        let jar = crate::cookies::CookieJar::load();
+        if jar.cookies.is_empty() {
+            return;
+        }
+        let mut ok = 0usize;
+        {
+            let mut g = self.cdp.lock().await;
+            let Some(c) = g.as_mut() else {
+                return;
+            };
+            for ck in &jar.cookies {
+                if let Ok(v) = c.cmd("Network.setCookie", ck.to_set_cookie_params()).await {
+                    if v.get("success").and_then(|s| s.as_bool()).unwrap_or(false) {
+                        ok += 1;
+                    }
+                }
+            }
+        }
+        tracing::info!("cookie jar 注入内置浏览器: {ok}/{}", jar.cookies.len());
+    }
+
+    /// 把一组 cookie 注入内置浏览器（登录态导入的落点）。
+    /// 返回（成功, 失败）计数。
+    pub async fn import_cookies(
+        &self,
+        entries: &[crate::cookies::CookieEntry],
+    ) -> Result<(usize, usize), HarnessError> {
+        // 先置位：ensure 的 inject-once 让位给这次显式注入，避免同一份灌两遍。
+        self.jar_injected
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.ensure().await?;
+        let mut ok = 0usize;
+        let mut fail = 0usize;
+        for c in entries {
+            match self.cmd("Network.setCookie", c.to_set_cookie_params()).await {
+                Ok(v) if v.get("success").and_then(|s| s.as_bool()).unwrap_or(false) => ok += 1,
+                _ => fail += 1,
+            }
+        }
+        Ok((ok, fail))
+    }
+
+    /// 清空内置浏览器的全部 cookie（「清除已导入」按钮的落点）。
+    /// 浏览器没起时不拉起：没有活着的会话可清（调用方已清空 jar，
+    /// 下次启动自然什么都不会注入）。
+    pub async fn clear_cookies(&self) -> Result<bool, HarnessError> {
+        {
+            let cdp = self.cdp.lock().await;
+            if cdp.is_none() {
+                return Ok(false);
+            }
+        }
+        self.cmd("Network.clearBrowserCookies", json!({})).await?;
+        Ok(true)
     }
 
     /// Ensure a CDP session to a page target. Launches a browser if none is
@@ -362,7 +436,12 @@ impl ComputerBridge {
         if !self.chromium_listening(&client).await {
             self.launch_browser().await?;
         }
-        self.connect_target(&client, None).await
+        let r = self.connect_target(&client, None).await;
+        if r.is_ok() {
+            // 浏览器起来后回放持久登录态（每次启动一次）。
+            self.inject_jar_once().await;
+        }
+        r
     }
 
     /// 连接到一个页面 target 的 WS。`prefer` 为 Some 时优先绑回该 target
