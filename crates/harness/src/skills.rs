@@ -348,7 +348,7 @@ pub fn prompt_block(workspace: &Path) -> Option<String> {
         return None;
     }
     let mut s = String::from(
-        "## Skills\n\
+        "# Skills\n\
          Reusable procedures you can follow. When a request matches one of these, \
          call `read_skill` with its id first and follow the steps in the document \
          instead of improvising.\n\n",

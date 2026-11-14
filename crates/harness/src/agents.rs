@@ -495,7 +495,7 @@ pub fn prompt_block(workspace: &Path) -> Option<String> {
         return None;
     }
     let mut s = String::from(
-        "## Saved agents\n\
+        "# Saved agents\n\
          Custom agent profiles you can delegate to. To spawn one, call `spawn_agent` \
          with `agent` set to its name — its system prompt, model and tool allowlist \
          are applied to the child automatically, and its name becomes the child's \

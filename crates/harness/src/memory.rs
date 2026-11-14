@@ -155,7 +155,7 @@ impl MemoryStore {
             return None;
         }
         let mut s = String::from(
-            "## Memories\n\
+            "# Memories\n\
              Things the user asked you to remember. Treat them as standing context: \
              they are true unless the user says otherwise, and they take priority over \
              your general assumptions about style and tooling.\n",
@@ -339,7 +339,7 @@ mod tests {
         .await
         .unwrap();
         let block = s.prompt_block().await.unwrap();
-        assert!(block.contains("## Memories"));
+        assert!(block.contains("# Memories"));
         assert!(block.contains("Preferences:\n- be terse"));
         assert!(block.contains("Facts:\n- UTC+8"));
         // Empty groups are omitted entirely.

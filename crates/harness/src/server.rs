@@ -3814,6 +3814,10 @@ mod regression {
         let hdr = ("x-parable-token", token.as_str());
 
         // Create: validation is enforced server-side.
+        // user 作用域落在真实 home（serve_in 的 home 只覆盖会话存储）——
+        // 可能有同名残留，先清理保证可重跑。
+        let _ = cli.delete(url("/agents/defs/user/文档整理师"))
+            .header(hdr.0, hdr.1).send().await;
         let res = cli.post(url("/agents/defs"))
             .header(hdr.0, hdr.1)
             .json(&json!({"name": "文档整理师", "description": "", "system_prompt": "x"}))
@@ -3847,9 +3851,14 @@ mod regression {
         assert_eq!(res.status(), 400);
         let v: Value = cli.get(url("/agents/defs"))
             .header(hdr.0, hdr.1).send().await.unwrap().json().await.unwrap();
+        // user 作用域是真实 home，可能有用户自己的 profile——按 id 断言，不断言总数。
         let agents = v["agents"].as_array().unwrap();
-        assert_eq!(agents.len(), 1);
-        assert_eq!(agents[0]["name"], "文档整理师");
+        let mine: Vec<&Value> = agents
+            .iter()
+            .filter(|a| a["id"] == "文档整理师")
+            .collect();
+        assert_eq!(mine.len(), 1);
+        assert_eq!(mine[0]["name"], "文档整理师");
 
         // Disable via the sidecar; the profile stays listed but disabled.
         let res = cli.post(url("/agents/defs/user/文档整理师/enabled"))
@@ -3859,9 +3868,17 @@ mod regression {
         assert_eq!(res.status(), 200);
         let v: Value = cli.get(url("/agents/defs"))
             .header(hdr.0, hdr.1).send().await.unwrap().json().await.unwrap();
-        assert_eq!(v["agents"][0]["enabled"], false);
+        let mine: Vec<&Value> = v["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|a| a["id"] == "文档整理师")
+            .collect();
+        assert_eq!(mine[0]["enabled"], false);
 
         // Rename via rename_from.
+        let _ = cli.delete(url("/agents/defs/user/档案管理员"))
+            .header(hdr.0, hdr.1).send().await;
         let res = cli.post(url("/agents/defs"))
             .header(hdr.0, hdr.1)
             .json(&json!({
@@ -3876,8 +3893,11 @@ mod regression {
         let v: Value = cli.get(url("/agents/defs"))
             .header(hdr.0, hdr.1).send().await.unwrap().json().await.unwrap();
         let agents = v["agents"].as_array().unwrap();
-        assert_eq!(agents.len(), 1, "the old file must be gone after a rename");
-        assert_eq!(agents[0]["id"], "档案管理员");
+        assert!(
+            !agents.iter().any(|a| a["id"] == "文档整理师"),
+            "the old file must be gone after a rename"
+        );
+        assert!(agents.iter().any(|a| a["id"] == "档案管理员"));
 
         // Launching an unknown profile is rejected with a clear status.
         let res = cli.post(url("/agents/defs/run"))
@@ -3892,6 +3912,12 @@ mod regression {
         assert_eq!(res.status(), 200);
         let v: Value = cli.get(url("/agents/defs"))
             .header(hdr.0, hdr.1).send().await.unwrap().json().await.unwrap();
-        assert_eq!(v["agents"].as_array().unwrap().len(), 0);
+        assert!(
+            !v["agents"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|a| a["id"] == "档案管理员")
+        );
     }
 }
