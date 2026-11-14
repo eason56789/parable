@@ -434,6 +434,19 @@ impl ComputerBridge {
         // 只认 Chromium 系(/json/version 的 Browser 字段):防止本机其他进程
         // 恰好占用该端口后被当成受控浏览器接管 CDP。
         if !self.chromium_listening(&client).await {
+            // 桌面壳：内置浏览器窗口是按需创建的。先发一个请求信号让壳
+            // 建窗口（它是唯一能建 WebView2 的一方），等端口就绪；超时
+            // 再退回进程内直接拉起外置 Edge（浏览器版 / 无壳场景）。
+            if request_shell_browser_window() {
+                for _ in 0..40 {
+                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                    if self.chromium_listening(&client).await {
+                        break;
+                    }
+                }
+            }
+        }
+        if !self.chromium_listening(&client).await {
             self.launch_browser().await?;
         }
         let r = self.connect_target(&client, None).await;
@@ -1139,6 +1152,19 @@ fn pick_free_port() -> u16 {
         .and_then(|l| l.local_addr())
         .map(|a| a.port())
         .unwrap_or(0)
+}
+
+/// 请求桌面壳按需创建内置浏览器窗口（壳轮询这个文件）。
+///
+/// 返回 false = 不在桌面壳里（浏览器版 / headless 服务），调用方应退回自己
+/// 拉起外置 Edge。
+fn request_shell_browser_window() -> bool {
+    // 只有壳会设置这个变量。
+    if std::env::var("PARABLE_BW_ARGS").is_err() {
+        return false;
+    }
+    let sig = crate::config::Config::home_dir().join("browser-window.request");
+    std::fs::write(&sig, b"1").is_ok()
 }
 
 /// 校验 /json/version 的 `Browser` 字段,只认 Chromium 系(Chrome/Chromium/

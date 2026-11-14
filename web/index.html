@@ -1165,6 +1165,11 @@ body.dragging #main{outline:2px dashed var(--accent);outline-offset:-8px}
 #jump:hover{color:var(--fg)}
 #jump svg{width:17px;height:17px}
 
+/* ============ 长会话折叠占位条 ============ */
+.foldsent{display:flex;justify-content:center;padding:10px 0 4px}
+.foldsent .btn{font-size:12px;color:var(--fg2);padding:5px 14px;border-radius:99px;background:var(--hov);border:0}
+.foldsent .btn:hover{color:var(--fg)}
+
 /* ============ 快捷键面板 ============ */
 #kbd{position:fixed;inset:0;z-index:96;display:none;place-items:center;background:rgba(0,0,0,.38);-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px)}
 #kbd.open{display:grid}
@@ -1692,6 +1697,7 @@ function stripEmojiDeep(v) {
 const L = {
   zh: {
     new:'新对话', plugins:'插件', autom:'自动化', team:'团队', setnav:'设置', set:'设置', search:'搜索', chats:'聊天', projects:'项目', arts:'工件', rec:'最近', pinned:'已置顶',
+    fold_early:'展开更早的 {n} 轮对话',
     ago_now:'刚刚', ago_m:'{n}分', ago_h:'{n}小时', ago_d:'{n}天',
     ph:'今天我能帮你什么？', ph2:'回复 Parable…',
     thinking:'思考中…', thought:'思考了 {n} 秒', worked:'已工作 {t}',
@@ -1922,6 +1928,7 @@ const L = {
   },
   en: {
     new:'New chat', plugins:'Plugins', autom:'Automation', team:'Team', setnav:'Settings', set:'Settings', search:'Search', chats:'Chats', projects:'Projects', arts:'Artifacts', rec:'Recents', pinned:'Pinned',
+    fold_early:'Show {n} earlier turns',
     ago_now:'now', ago_m:'{n}m', ago_h:'{n}h', ago_d:'{n}d',
     ph:'How can I help you today?', ph2:'Reply to Parable…',
     thinking:'Thinking…', thought:'Thought for {n}s', worked:'Worked for {t}',
@@ -5017,6 +5024,9 @@ function replayEvent(ev) {
 }
 
 const SHADOW = {};
+/** 已结束的后台会话影子缓冲上限（内存）：每个条目装着该轮全部思考增量与
+ *  工具事件，并行多会话时是主要增长点。6 个足够覆盖「刚切走又切回」。 */
+const SHADOW_ENDED_MAX = 6;
 /** 在途事件序列：思考块、工具卡片都记一份。切走再切回来时按序重放，
  *  思考过程与工具卡片才不会被截断。
  *  记账规则：
@@ -5043,7 +5053,10 @@ function shadowPush(sid, ev) {
   if (ev.type === 'reasoning.delta') {
     const last = sh.events[sh.events.length - 1];
     if (last && last.type === 'reasoning.delta') {
-      last.text = (last.text || '') + (ev.text || '');
+      // 内存：单条思考块留到最后 12000 字符即可——重放时只需要还原上下文
+      // 质感，不需要把整轮几十 KB 的思考全文背在内存里（多会话并行时
+      // 这是增长最快的一项）。
+      last.text = ((last.text || '') + (ev.text || '')).slice(-12000);
       return;
     }
     sh.events.push({ type: 'reasoning.delta', text: ev.text || '' });
@@ -5121,7 +5134,17 @@ function dispatch(ev) {
     // 落库失败或只落了一部分，回来还能从缓冲里补齐；旧代码无条件 delete，
     // 那段正文就永久消失，正是「切会话把思考过程截断」的一半原因。
     if (conv && conv.id === ev.sessionId) delete SHADOW[ev.sessionId];
-    else if (SHADOW[ev.sessionId]) SHADOW[ev.sessionId].ended = true;
+    else if (SHADOW[ev.sessionId]) {
+      SHADOW[ev.sessionId].ended = true;
+      // 内存：已结束的后台会话缓冲只是「落库失败时补齐」的兜底，不需要
+      // 无限期保留。超过上限丢最老的（Object.keys 是插入序），避免长时间
+      // 挂着多个并行/后台会话时把每轮的思考增量与工具事件全背在内存里。
+      // 正在看的会话不受影响（上面已 delete），未结束的也不动。
+      const endedIds = Object.keys(SHADOW).filter(k => SHADOW[k] && SHADOW[k].ended);
+      for (let di = 0; di < endedIds.length - SHADOW_ENDED_MAX; di += 1) {
+        delete SHADOW[endedIds[di]];
+      }
+    }
   }
   // 在途记录必须先于会话过滤：后台会话的增量也要进 SHADOW，切回去才能重放。
   if (ev.type === 'text.delta') {
@@ -6766,6 +6789,9 @@ const SB = {
   archOpen: false,
   cache: new Map(),
 };
+/** 侧栏行 DOM 缓存上限（内存）：每个节点带 4 个子元素与闭包，200 个会话
+ *  全量缓存会白占上万节点。80 足够覆盖当前视图 + 刚翻过的几页。 */
+const SB_CACHE_MAX = 80;
 try {
   const raw = JSON.parse(localStorage.getItem('parable-sidebar') || '{}');
   if (raw.view) SB.view = raw.view;
@@ -6908,6 +6934,20 @@ function renderSidebar() {
   // 删掉的会话：连同缓存节点一起清掉，避免缓存无限增长
   for (const [id, el] of SB.cache) {
     if (!CONVS.some(c => c.id === id)) { el.remove(); SB.cache.delete(id); }
+  }
+  // 内存：缓存只服务「切回来时复用 DOM」，超出活跃范围的老节点没有价值。
+  // 保留上限，超出时按插入序淘汰最老的（Map 迭代是插入序）。
+  if (SB.cache.size > SB_CACHE_MAX) {
+    const excess = SB.cache.size - SB_CACHE_MAX;
+    let n = 0;
+    for (const [id, el] of SB.cache) {
+      if (n >= excess) break;
+      // 别淘汰当前正在显示的会话行。
+      if (conv && conv.id === id) continue;
+      el.remove();
+      SB.cache.delete(id);
+      n += 1;
+    }
   }
   p.innerHTML = '';
   g.innerHTML = '';
@@ -7284,6 +7324,11 @@ async function openSession(id, focusMsg) {
     // 从搜索结果跳进来：滚动到命中的那条消息并高亮一下。
     // restamp 是异步的（下标回填要拉一次存储），所以等它跑完再定位。
     await restamp();
+    // 长会话折叠：只保留最近 N 个用户轮次的 DOM，early 轮次收进一行
+    // 「展开更早的 N 轮」。每轮助手气泡里的思考块、工具卡与 Markdown
+    // 都是重对象——几百条消息的会话原先会堆出上万节点，滚动与内存都受
+    // 影响。折叠不删数据（点一下就地展开），也不影响 restamp 已回填的下标。
+    foldEarlyTurns();
     // restamp 之后还有多次 await 与 DOM 写入：这里必须再验一次代际，
     // 否则用户在定位/重放期间切走，旧会话的内容会画进新会话。
     if (my !== openTok || gen !== convGen) return;
@@ -7486,8 +7531,42 @@ async function restamp() {
 }
 
 /**
- * turn.end 兜底：以存储为准重渲染最后一个助手气泡的答案文本。
- * 流式期间在途文本只活在 DOM 里——切换会话、SSE 断连重连、渲染中的任何
+ * 长会话折叠：只保留最近 FOLD_KEEP_TURNS 轮的 DOM，更早的收进一行可展开
+ * 的占位条。记忆点：思考块 / 工具卡 / Markdown 渲染出的节点是重对象，
+ * 几百条消息的会话原先会堆出上万节点。
+ *
+ * 用「用户轮次」作为切分单位：一个用户提问 + 它后面的助手回复算一轮。
+ * 已经被用户点开过的会话不重复折叠（避免滚动位置跳动）。
+ */
+const FOLD_KEEP_TURNS = 30;
+function foldEarlyTurns() {
+  if (!feed) return;
+  // 已经折叠过的（有 .foldsent）就跳过，防止反复处理。
+  if (feed.querySelector(':scope > .foldsent')) return;
+  const kids = [...feed.children];
+  // 用户轮次边界：用户气泡 class 里带 .u（提问气泡）。
+  const userIdx = [];
+  kids.forEach((n, i) => { if (n.classList && n.classList.contains('u')) userIdx.push(i); });
+  if (userIdx.length <= FOLD_KEEP_TURNS) return;
+  const cut = userIdx[userIdx.length - FOLD_KEEP_TURNS];
+  if (cut <= 0) return;
+  const hidden = kids.slice(0, cut);
+  // 只折叠「确实有内容」的那部分：全是空白就不值得做一个占位条。
+  if (!hidden.length) return;
+  const box = document.createElement('div');
+  box.className = 'foldsent';
+  const n = userIdx.length - FOLD_KEEP_TURNS;
+  box.innerHTML = '<button class="btn">' + esc(t('fold_early').replace('{n}', n)) + '</button>';
+  feed.insertBefore(box, hidden[0]);
+  hidden.forEach(n2 => { n2.style.display = 'none'; });
+  box.querySelector('button').onclick = () => {
+    hidden.forEach(n2 => { n2.style.display = ''; });
+    box.remove();
+  };
+}
+
+/**
+ * turn.end 兜底：以存储为准重渲染最后一个助手气泡的答案文本。 * 流式期间在途文本只活在 DOM 里——切换会话、SSE 断连重连、渲染中的任何
  * 异常都可能让尾部丢失。收尾时存储已经完整，直接对齐它，保证用户看到的
  * 最终答案不缺尾巴。错误提示（红字）和压缩提示（内联样式）保留不删。
  */

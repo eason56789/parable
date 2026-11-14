@@ -3902,10 +3902,18 @@ mod regression {
         assert!(v["job"]["id"].as_str().unwrap_or("").starts_with("term_"));
         assert_eq!(v["job"]["status"], "running");
 
-        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
-        let v: Value = cli.get(format!("{base}/api/term/list?token={token}"))
-            .send().await.unwrap().json().await.unwrap();
-        let jobs = v["jobs"].as_array().unwrap();
+        // 轮询等待命令退出：固定 800ms 在负载高的机器上会偶发失败
+        // （进程还没被回收就断言 status=exited）。
+        let mut jobs: Vec<Value> = Vec::new();
+        for _ in 0..40 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let v: Value = cli.get(format!("{base}/api/term/list?token={token}"))
+                .send().await.unwrap().json().await.unwrap();
+            jobs = v["jobs"].as_array().cloned().unwrap_or_default();
+            if jobs.first().map(|j| j["status"] == "exited").unwrap_or(false) {
+                break;
+            }
+        }
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0]["status"], "exited", "the job must leave running state");
         assert!(jobs[0]["output"].as_str().unwrap_or("").contains("parable-term"));
