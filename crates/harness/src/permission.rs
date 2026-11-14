@@ -73,6 +73,12 @@ pub struct Rule {
     /// 语义(permissions.toml 里手写的规则)。
     #[serde(default)]
     pub exact: bool,
+    /// 命令模式（Claude Code 的 `Bash(npm:*)` 同款）：设置后本规则只作用于
+    /// shell 类工具的命令串（glob 匹配），path 字段被忽略。这让
+    /// `bash + cmd="npm *"` 可以安全地放行"以 npm 开头的命令"，而不会像
+    /// 老式 path-glob 那样放行"该目录下任意命令"。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cmd: Option<String>,
 }
 
 fn star() -> String {
@@ -85,6 +91,19 @@ pub struct RuleSet {
     pub allow: Vec<Rule>,
     #[serde(default)]
     pub deny: Vec<Rule>,
+    /// ask 规则：即使 full / ws 模式也强制走确认流程（deny 优先级最高，
+    /// ask 次之，allow 最后）。手写规则用它的典型场景："全局 full，但
+    /// bash rm 必须问我"。
+    #[serde(default)]
+    pub ask: Vec<Rule>,
+}
+
+/// 规则判定结果（deny > ask > allow）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleOutcome {
+    Allow,
+    Deny,
+    Ask,
 }
 
 impl RuleSet {
@@ -122,6 +141,14 @@ impl RuleSet {
         if rule.tool != "*" && rule.tool != tool {
             return false;
         }
+        // 命令模式规则：只看命令串（Claude Code Bash(npm:*) 语义的安全版）。
+        // 与 path 互斥——cmd 存在时 path 不参与判定。
+        if let Some(pat) = &rule.cmd {
+            return match command {
+                Some(c) if !c.is_empty() => glob_match(pat, c),
+                _ => false,
+            };
+        }
         if rule.exact {
             return match command {
                 // shell 类规则存命令原文,按命令等值比较(可复现、无通配惊喜)
@@ -139,20 +166,29 @@ impl RuleSet {
         rule.path == "*" || glob_match(&rule.path, path)
     }
 
-    pub fn lookup(&self, tool: &str, path: &str, command: Option<&str>) -> Option<bool> {
+    /// 三态判定：deny > ask > allow；无匹配规则返回 None。auto_allow 用它
+    /// 替代旧的二值 lookup。
+    pub fn decide(&self, tool: &str, path: &str, command: Option<&str>) -> Option<RuleOutcome> {
         if self
             .deny
             .iter()
             .any(|r| Self::matches(r, tool, path, command))
         {
-            return Some(false);
+            return Some(RuleOutcome::Deny);
+        }
+        if self
+            .ask
+            .iter()
+            .any(|r| Self::matches(r, tool, path, command))
+        {
+            return Some(RuleOutcome::Ask);
         }
         if self
             .allow
             .iter()
             .any(|r| Self::matches(r, tool, path, command))
         {
-            return Some(true);
+            return Some(RuleOutcome::Allow);
         }
         None
     }
@@ -326,9 +362,12 @@ impl PermissionBroker {
         workspace: &Path,
     ) -> bool {
         let rules = self.rules.read().await;
-        match rules.lookup(tool, path, command) {
-            Some(true) => true,
-            Some(false) => false,
+        match rules.decide(tool, path, command) {
+            Some(RuleOutcome::Allow) => true,
+            // deny 与 ask 都走确认流：deny 的语义是"拒绝放行"，交给调用方
+            // 以确认框呈现（用户明确点允许仍可执行一次）；ask 则是"规则说
+            // 必须问"——即使在 full 模式下也要问。
+            Some(RuleOutcome::Deny) | Some(RuleOutcome::Ask) => false,
             None => match mode {
                 "full" => true,
                 "ws" => {
@@ -413,6 +452,7 @@ impl PermissionBroker {
             // Always 规则必须可精确复现:shell 类存命令原文等值比较,其余存路径
             // 精确比较。绝不把 cwd/glob 这类可变参数持久成放行依据。
             rules.allow.push(Rule {
+                cmd: None,
                 tool: tool.to_string(),
                 path: command.unwrap_or(path).to_string(),
                 action: "allow".into(),
@@ -570,13 +610,15 @@ mod tests {
                 path: "cargo build".into(),
                 action: "allow".into(),
                 exact: true,
+                cmd: None,
             }],
             deny: vec![],
+            ask: vec![],
         };
-        assert_eq!(rs.lookup("bash", "C:\\ws", Some("cargo build")), Some(true));
+        assert_eq!(rs.decide("bash", "C:\\ws", Some("cargo build")), Some(RuleOutcome::Allow));
         // 命令不完全相等就不放行
-        assert_eq!(rs.lookup("bash", "C:\\ws", Some("cargo build --release")), None);
-        assert_eq!(rs.lookup("bash", "C:\\ws", Some("cargo clean")), None);
+        assert_eq!(rs.decide("bash", "C:\\ws", Some("cargo build --release")), None);
+        assert_eq!(rs.decide("bash", "C:\\ws", Some("cargo clean")), None);
     }
 
     #[test]
@@ -588,10 +630,12 @@ mod tests {
                 path: "C:\\ws".into(),
                 action: "allow".into(),
                 exact: false,
+                cmd: None,
             }],
             deny: vec![],
+            ask: vec![],
         };
-        assert_eq!(rs.lookup("bash", "C:\\ws", Some("rm -rf /")), None);
+        assert_eq!(rs.decide("bash", "C:\\ws", Some("rm -rf /")), None);
         // 但全局语义仍保留
         let rs_star = RuleSet {
             allow: vec![Rule {
@@ -599,10 +643,12 @@ mod tests {
                 path: "*".into(),
                 action: "allow".into(),
                 exact: false,
+                cmd: None,
             }],
             deny: vec![],
+            ask: vec![],
         };
-        assert_eq!(rs_star.lookup("bash", "C:\\ws", Some("ls")), Some(true));
+        assert_eq!(rs_star.decide("bash", "C:\\ws", Some("ls")), Some(RuleOutcome::Allow));
     }
 
     #[test]
@@ -613,12 +659,14 @@ mod tests {
                 path: "C:\\ws\\a*b.txt".into(),
                 action: "allow".into(),
                 exact: true,
+                cmd: None,
             }],
             deny: vec![],
+            ask: vec![],
         };
         // exact 规则不做 glob 展开:星号是字面量
-        assert_eq!(rs.lookup("write_file", "C:\\ws\\a*b.txt", None), Some(true));
-        assert_eq!(rs.lookup("write_file", "C:\\ws\\aXb.txt", None), None);
+        assert_eq!(rs.decide("write_file", "C:\\ws\\a*b.txt", None), Some(RuleOutcome::Allow));
+        assert_eq!(rs.decide("write_file", "C:\\ws\\aXb.txt", None), None);
     }
 
     #[test]
@@ -629,16 +677,19 @@ mod tests {
                 path: "*".into(),
                 action: "allow".into(),
                 exact: false,
+                cmd: None,
             }],
             deny: vec![Rule {
                 tool: "bash".into(),
                 path: "*".into(),
                 action: "deny".into(),
                 exact: false,
+                cmd: None,
             }],
+            ask: vec![],
         };
-        assert_eq!(rs.lookup("bash", "x", None), Some(false));
-        assert_eq!(rs.lookup("read_file", "x", None), Some(true));
+        assert_eq!(rs.decide("bash", "x", None), Some(RuleOutcome::Deny));
+        assert_eq!(rs.decide("read_file", "x", None), Some(RuleOutcome::Allow));
     }
 
     #[test]

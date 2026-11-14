@@ -179,6 +179,14 @@ pub struct ToolCtx {
     pub desktop: Option<Arc<crate::desktop::DesktopBridge>>,
     /// ask_user 自动裁决超时（毫秒；0 = 关闭，一直等用户）。
     pub ask_timeout_ms: u64,
+    /// 生命周期 hooks（本 turn 快照）。
+    pub hooks: Arc<Vec<crate::hooks::HookConfig>>,
+    /// 文件检查点存储（写入前快照旧内容）。
+    pub checkpoint: Option<Arc<crate::checkpoint::CheckpointStore>>,
+    /// 当前 turn id（检查点分组键）。
+    pub turn_id: String,
+    /// MCP 管理器（mcp_* 工具的执行后端）。
+    pub mcp: Option<Arc<crate::mcp::McpManager>>,
 }
 
 impl ToolCtx {
@@ -407,12 +415,30 @@ fn read_image(path: &Path, mime: &str) -> Result<ToolOutcome, HarnessError> {
 /// Process-wide memo for the tool schema list. Keyed by everything the
 /// schemas depend on (search preference, key presence, plugin count).
 fn specs_cache() -> &'static std::sync::Mutex<
-    Option<((String, bool, usize), std::sync::Arc<Vec<crate::provider::ToolSpec>>)>,
+    Option<((String, bool, usize, u64), std::sync::Arc<Vec<crate::provider::ToolSpec>>)>,
 > {
     static CACHE: std::sync::OnceLock<
-        std::sync::Mutex<Option<((String, bool, usize), std::sync::Arc<Vec<crate::provider::ToolSpec>>)>>,
+        std::sync::Mutex<Option<((String, bool, usize, u64), std::sync::Arc<Vec<crate::provider::ToolSpec>>)>>,
     > = std::sync::OnceLock::new();
     CACHE.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// MCP 工具缓存：run_turn 每轮从 McpManager 拉一次写进这里，specs() 同步读。
+/// 世代号进缓存键——工具集变化即失配重建。
+static MCP_TOOLS: std::sync::RwLock<Vec<crate::provider::ToolSpec>> =
+    std::sync::RwLock::new(Vec::new());
+static MCP_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// run_turn 调用：刷新 MCP 工具缓存（并 bump 世代）。
+pub fn mcp_set_tools(specs: Vec<crate::provider::ToolSpec>) {
+    if let Ok(mut g) = MCP_TOOLS.write() {
+        *g = specs;
+    }
+    MCP_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn mcp_gen() -> u64 {
+    MCP_GEN.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 pub struct Registry {
@@ -474,6 +500,7 @@ impl Registry {
                 .read()
                 .map(|g| g.len())
                 .unwrap_or(0),
+            mcp_gen(),
         );
         {
             let cache = specs_cache().lock().unwrap_or_else(|e| e.into_inner());
@@ -483,7 +510,12 @@ impl Registry {
                 }
             }
         }
-        let specs = std::sync::Arc::new(self.build_specs());
+        let mut specs = self.build_specs();
+        // MCP 工具（缓存由 run_turn 刷新）：每个暴露名为独立工具
+        if let Ok(mcp) = MCP_TOOLS.read() {
+            specs.extend(mcp.iter().cloned());
+        }
+        let specs = std::sync::Arc::new(specs);
         let mut cache = specs_cache().lock().unwrap_or_else(|e| e.into_inner());
         *cache = Some((cache_key, std::sync::Arc::clone(&specs)));
         specs
@@ -1015,6 +1047,38 @@ skill matches the current request, then follow the steps it contains. Read-only.
 
     pub async fn execute(&self, name: &str, args: &Value, ctx: &ToolCtx) -> Result<ToolOutcome, HarnessError> {
         let t0 = std::time::Instant::now();
+        // PreToolUse hook：exit 2 / deny JSON = 阻断本次调用
+        if !crate::hooks::is_empty(&ctx.hooks, crate::hooks::HookEvent::PreToolUse) {
+            let payload = json!({"event":"pre_tool_use","tool":name,"args":args,
+                "session":ctx.session_id,"turn":ctx.turn_id});
+            if let Err(reason) = crate::hooks::run_pre_tool(&ctx.hooks, name, args, payload).await {
+                return Ok(ToolOutcome {
+                    ok: false,
+                    title: format!("{name} · hook 阻断"),
+                    display: DisplayKind::Plain(reason.to_string()),
+                    for_model: format!("工具调用被 hook 阻断：{reason}。不要重试同一调用；如确需执行，请告知用户调整 hooks 配置。"),
+                });
+            }
+        }
+        let res: Result<ToolOutcome, HarnessError> = self.execute_inner(name, args, ctx).await;
+        // PostToolUse hook：通知型（失败只记日志）
+        if !crate::hooks::is_empty(&ctx.hooks, crate::hooks::HookEvent::PostToolUse) {
+            let payload = json!({"event":"post_tool_use","tool":name,
+                "ok": res.as_ref().map(|o| o.ok).unwrap_or(false),
+                "title": res.as_ref().ok().map(|o| o.title.clone()).unwrap_or_default(),
+                "session":ctx.session_id,"turn":ctx.turn_id});
+            crate::hooks::run_post_tool(&ctx.hooks, name, payload).await;
+        }
+        // 执行审计:无论成败都记一条(tool、判定来源 auto/requested、耗时)。
+        let source = ctx.broker.decision_of(&ctx.call_id).await;
+        let ok = res.as_ref().map(|o| o.ok).unwrap_or(false);
+        ctx.broker
+            .audit_execution(&ctx.call_id, name, source, ok, t0.elapsed().as_millis())
+            .await;
+        res
+    }
+
+    async fn execute_inner(&self, name: &str, args: &Value, ctx: &ToolCtx) -> Result<ToolOutcome, HarnessError> {
         let res: Result<ToolOutcome, HarnessError> = match name {
             "read_file" => self.read_file(args, ctx).await,
             "write_file" => self.write_file(args, ctx).await,
@@ -1073,6 +1137,14 @@ skill matches the current request, then follow the steps it contains. Read-only.
             "team_task_create" | "team_task_list" | "team_task_get" | "team_task_update" => {
                 self.team_tool(name, args, ctx).await
             }
+            other if other.starts_with("mcp_") => {
+                ctx.authorize(other, "mcp", Risk::Shell).await?;
+                let m = ctx.mcp.as_ref().ok_or_else(|| {
+                    HarnessError::Tool("MCP 未挂载".into())
+                })?;
+                let text = m.call_tool(other, args.clone()).await?;
+                Ok(ToolOutcome::text(true, format!("MCP {other}"), text))
+            }
             other => {
                 let hit = self
                     .plugin_tools
@@ -1085,12 +1157,6 @@ skill matches the current request, then follow the steps it contains. Read-only.
                 }
             }
         };
-        // 执行审计:无论成败都记一条(tool、判定来源 auto/requested、耗时)。
-        let source = ctx.broker.decision_of(&ctx.call_id).await;
-        let ok = res.as_ref().map(|o| o.ok).unwrap_or(false);
-        ctx.broker
-            .audit_execution(&ctx.call_id, name, source, ok, t0.elapsed().as_millis())
-            .await;
         res
     }
 
@@ -1166,6 +1232,15 @@ impl Registry {
         let preview = fs_impl::preview_replace(&path, old, new, replace_all)?;
         ctx.authorize_with_preview("edit_file", &path.to_string_lossy(), Risk::Write, &preview)
             .await?;
+        // 文件检查点：改前快照旧内容（同 turn 同路径保留最早状态）
+        {
+            let cur = std::fs::read(&path).ok();
+            if let Some(cp) = &ctx.checkpoint {
+                let _ = cp
+                    .record(&ctx.session_id, &ctx.turn_id, &path, cur.as_deref())
+                    .await;
+            }
+        }
         fs_impl::edit_file(&path, old, new, replace_all)
     }
 

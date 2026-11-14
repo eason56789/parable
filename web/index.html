@@ -1358,6 +1358,16 @@ body.dragging #main{outline:2px dashed var(--accent);outline-offset:-8px}
 #ctxbar i { display:block; height:100%; width:0%; background:var(--accent); transition:width .4s; }
 #ctxbar.warn i { background:#e0a03c; }
 #ctxbar.hot i { background:#d4574c; }
+
+/* Wave-2：MCP / Hooks / Profiles 行 */
+.mcprow { display:flex; gap:8px; align-items:center; border:1px solid var(--line); border-radius:10px; padding:8px 10px; margin:6px 0; }
+.mcprow select, .mcprow input { background:var(--bg); border:1px solid var(--line); border-radius:8px; color:inherit; padding:4px 8px; font-size:12px; }
+.mcpdot { display:inline-block; width:8px; height:8px; border-radius:50%; background:#8a8a85; margin:0 4px; }
+.mcpdot.ok { background:#5aa264; }
+.mcpdot.off { background:#8a8a85; }
+.profon { font-size:12px; color:var(--accent); border:1px solid var(--accent); border-radius:999px; padding:2px 10px; }
+.rwf { font-family:var(--mono); font-size:11px; opacity:.5; margin-left:8px; }
+.rwrow { display:flex; gap:10px; align-items:center; border-top:1px solid var(--line); padding:10px 0; }
 </style>
 </head>
 <body>
@@ -1640,6 +1650,24 @@ const L = {
     dangerT:'危险区', dangerH:'以下操作不可恢复，执行前请想清楚',
     dangerBtn:'清空全部会话…', dangerDone:'已删除 {n} 个会话',
     cfClearAll:'确定删除全部会话？所有对话历史将永久丢失！',
+    retention:'会话保留天数', retentionH:'已归档会话超过所选天数后在启动时删除（0 = 永不清理；活跃/置顶永不碰）',
+    sr_0:'永久', sr_7:'7 天', sr_30:'30 天', sr_90:'90 天', sr_365:'1 年',
+    mcpT:'MCP 服务器', mcpH:'接入 Model Context Protocol 服务器（stdio），其工具以 mcp_<服务器>_<工具> 呈现给模型',
+    mcp_add:'添加服务器', mcp_empty:'还没有 MCP 服务器——添加一个（如 filesystem、everything），保存后点「连接」',
+    mcp_connect:'连接', mcp_reconnect:'重连', mcp_off:'已停用', mcp_ok:'已连接，{n} 个工具',
+    mcp_pname:'服务器显示名（如 filesystem）：', mcp_pcmd:'启动命令（空格分参）：',
+    hkT:'Hooks', hkH:'生命周期钩子：在事件点执行本地命令（payload JSON 走 stdin；退出码 2 = 阻断本次调用）',
+    hk_add:'添加钩子', hk_empty:'还没有钩子。示例：pre_tool_use + bash + "npm *"，命令写校验脚本',
+    hk_cmd:'要执行的命令', hk_pre_tool_use:'工具调用前', hk_post_tool_use:'工具调用后',
+    hk_stop:'turn 结束', hk_session_start:'会话开始',
+    profT:'Profiles', profH:'命名配置束：把当前的 模型+权限+思考强度 打包存档，一键切换（工作/个人）',
+    prof_save:'把当前存为 Profile', prof_empty:'还没有 Profile——调好模型和权限后点下方按钮存档',
+    prof_apply:'套用', prof_on:'当前', prof_applied:'Profile 已套用',
+    prof_nomodel:'未指定模型', prof_pname:'Profile 名称（如 工作）:',
+    cm_rewind:'文件回退…',
+    rw_title:'文件回退', rw_hint:'选择一个检查点，把该轮改动过的文件恢复为此前状态（本轮新建的文件会被删除）。恢复前当前内容会另存一份，可再次回退找回。',
+    rw_do:'回退', rw_empty:'该会话还没有文件检查点——发生过写文件操作的轮次会自动记录。',
+    rw_done:'已回退 {n} 个文件',
     mem_title:'记忆', mem_desc:'Parable 会在对话中参考这些内容，可随时编辑、补充或删除。',
     mem_enable:'启用记忆', mem_enable_h:'关闭后对话不再读取任何记忆。',
     mem_auto:'自动提取记忆', mem_auto_h:'从对话中总结值得长期记住的内容，加入下方列表。',
@@ -1826,6 +1854,24 @@ const L = {
     dangerT:'Danger zone', dangerH:'These actions are irreversible. Think twice',
     dangerBtn:'Delete all sessions…', dangerDone:'Deleted {n} sessions',
     cfClearAll:'Delete ALL sessions? Every conversation will be lost permanently!',
+    retention:'Session retention', retentionH:'Archived sessions older than this are deleted at startup (0 = keep forever; active/pinned sessions are never touched)',
+    sr_0:'Forever', sr_7:'7 days', sr_30:'30 days', sr_90:'90 days', sr_365:'1 year',
+    mcpT:'MCP servers', mcpH:'Connect Model Context Protocol servers (stdio); their tools appear to the model as mcp_<server>_<tool>',
+    mcp_add:'Add server', mcp_empty:'No MCP servers yet — add one (e.g. filesystem, everything), save, then hit Connect',
+    mcp_connect:'Connect', mcp_reconnect:'Reconnect', mcp_off:'Disabled', mcp_ok:'Connected, {n} tools',
+    mcp_pname:'Server display name (e.g. filesystem):', mcp_pcmd:'Launch command (space-separated):',
+    hkT:'Hooks', hkH:'Lifecycle hooks: run a local command at each event (payload JSON via stdin; exit code 2 blocks the call)',
+    hk_add:'Add hook', hk_empty:'No hooks yet. Example: pre_tool_use + bash + "npm *" running a check script',
+    hk_cmd:'Command to run', hk_pre_tool_use:'Before tool', hk_post_tool_use:'After tool',
+    hk_stop:'Turn end', hk_session_start:'Session start',
+    profT:'Profiles', profH:'Named bundles: save the current model+permission+thinking combo and switch with one click (work/personal)',
+    prof_save:'Save current as Profile', prof_empty:'No profiles yet — tune model & permission, then save below',
+    prof_apply:'Apply', prof_on:'Active', prof_applied:'Profile applied',
+    prof_nomodel:'no model', prof_pname:'Profile name (e.g. work):',
+    cm_rewind:'Rewind files…',
+    rw_title:'Rewind files', rw_hint:'Pick a checkpoint to restore the files a turn touched to their prior state (files created that turn are deleted). Current content is saved aside first, so you can rewind again.',
+    rw_do:'Rewind', rw_empty:'No checkpoints for this session yet — turns that wrote files are recorded automatically.',
+    rw_done:'Rewound {n} files',
     mem_title:'Memory', mem_desc:'Things Parable should keep in mind across chats. Edit, add or delete them any time.',
     mem_enable:'Enable memory', mem_enable_h:'When off, chats stop reading any memory.',
     mem_auto:'Auto-extract memories', mem_auto_h:'Summarise durable facts from a conversation and add them below.',
@@ -1992,7 +2038,8 @@ const DEF = {
   compactionEnabled:true, compactionPct:85, maxSteps:100, askAutoResolve:false, keepAwake:false, ctxWarnPct:80,
   notify:true, notifySound:false, autoArchiveDays:0,
   codeLineNumbers:true, codeWrap:false,
-  httpProxy:'', httpNoProxy:'', modelIoLog:false, enterMode:'enter'
+  httpProxy:'', httpNoProxy:'', modelIoLog:false, enterMode:'enter',
+  sessionRetentionDays:0, hooks:[], profiles:[], activeProfile:''
 };
 let S = { ...DEF };
 try { S = { ...DEF, ...JSON.parse(localStorage.getItem('cd-s') || '{}') }; } catch (e) {}
@@ -2112,7 +2159,8 @@ function apply(pushToServer) {
         askAutoResolve: S.askAutoResolve, keepAwake: S.keepAwake, ctxWarnPct: S.ctxWarnPct,
         notify: S.notify, notifySound: S.notifySound, autoArchiveDays: S.autoArchiveDays,
         codeLineNumbers: S.codeLineNumbers, codeWrap: S.codeWrap,
-        httpProxy: S.httpProxy, httpNoProxy: S.httpNoProxy, modelIoLog: S.modelIoLog, enterMode: S.enterMode
+        httpProxy: S.httpProxy, httpNoProxy: S.httpNoProxy, modelIoLog: S.modelIoLog, enterMode: S.enterMode,
+        sessionRetentionDays: S.sessionRetentionDays, hooks: S.hooks, profiles: S.profiles, activeProfile: S.activeProfile
       }}).catch(() => {});
     }
   }, 300);
@@ -6733,6 +6781,7 @@ function openChatMenu(c, el, x, y) {
     (archd ? '' : it('pin', t(pinned ? 'cm_unpin' : 'cm_pin'))) +
     it('rename', t('cm_rename')) +
     it('cid', t('cm_cpid')) +
+    it('rewind', t('cm_rewind')) +
     it('set', t('setnav')) +
     '<div class="csep"></div>' +
     it('delete', t('cm_delete'), ' danger');
@@ -6748,6 +6797,45 @@ function closeChatMenu() {
   CM.classList.remove('open');
   cmTarget = null;
   document.querySelectorAll('.rc.menu').forEach(e => e.classList.remove('menu'));
+}
+
+/** 文件回退：列出该会话的检查点，一键恢复该轮改动前的文件状态。 */
+async function openRewind(c) {
+  const z = S.lang === 'zh';
+  let list = [];
+  try {
+    const r = await api('/sessions/' + c.id + '/checkpoints');
+    list = r.checkpoints || [];
+  } catch (e) { toast(e.message); return; }
+  const ov = document.createElement('div');
+  ov.className = 'mdl';
+  ov.innerHTML = '<div class="mdlc"><div class="mdlh"><h3>' + t('rw_title') + '</h3>' +
+    '<button class="ib" data-x>' + ic('x') + '</button></div>' +
+    '<div class="mdlb"><p style="opacity:.65;font-size:12px;margin:0 0 10px">' + t('rw_hint') + '</p>' +
+    (list.length ? list.map((cp, i) =>
+      '<div class="rwrow" data-i="' + i + '">' +
+      '<div style="flex:1;min-width:0"><b>' + esc(new Date(cp.ts).toLocaleString()) + '</b>' +
+      '<span class="rwf">' + esc(cp.turn) + '</span>' +
+      '<div style="opacity:.6;font-size:11px">' + esc((cp.files || []).join('  ')) + '</div></div>' +
+      '<button class="btn" data-rw="' + i + '">' + t('rw_do') + '</button></div>'
+    ).join('') : '<p style="opacity:.6">' + t('rw_empty') + '</p>') +
+    '</div></div></div>';
+  document.body.append(ov);
+  requestAnimationFrame(() => ov.classList.add('open'));
+  const close = () => { ov.classList.remove('open'); setTimeout(() => ov.remove(), 200); };
+  ov.querySelector('[data-x]').onclick = close;
+  ov.onclick = e => { if (e.target === ov) close(); };
+  ov.querySelectorAll('[data-rw]').forEach(b => {
+    b.onclick = async () => {
+      const cp = list[+b.dataset.rw];
+      b.disabled = true;
+      try {
+        const r = await api('/sessions/' + c.id + '/rewind', { method: 'POST', body: { turn: cp.turn } });
+        toast((t('rw_done') || '').replace('{n}', (r.files || []).length));
+        close();
+      } catch (e) { toast(e.message); b.disabled = false; }
+    };
+  });
 }
 
 function renameChat(c, el) {
@@ -6869,6 +6957,10 @@ CM.addEventListener('click', e => {
     return;
   } else if (k === 'cid') {
     cp(c.id || '');
+  } else if (k === 'rewind') {
+    closeChatMenu();
+    openRewind(c);
+    return;
   } else if (k === 'set') {
     closeChatMenu();
     openSet();
@@ -7403,7 +7495,7 @@ const TAB = ['g', 's', 'a', 'n', 'm', 'p', 'mem', 'sk', 'u'];
 /** 导航分组：基础设置 / Agent 能力 / 数据与统计 */
 const TGRP = [
   { k: 's_base', tabs: ['g', 'a', 'n', 's', 'net'] },
-  { k: 's_agent', tabs: ['m', 'p', 'mem', 'sk', 'bh'] },
+  { k: 's_agent', tabs: ['m', 'p', 'mem', 'sk', 'mcp', 'hk', 'bh'] },
   { k: 's_data', tabs: ['u', 'd'] }
 ];
 const SW = ['#d97757', '#6a9bcc', '#788c5d', '#9b87f5', '#d4637a', '#c9a227'];
@@ -7445,7 +7537,8 @@ const SC = {
   p:[
     { k:'perm', t:'rl', l:'permT', h:'permH', o:PK },
     { k:'lvl', t:'seg', l:'lvlT', o:[0,1,2,3], i:1, p:'l' },
-    { t:'rules', l:'rulesT', h:'rulesH' }
+    { t:'rules', l:'rulesT', h:'rulesH' },
+    { t:'profiles', l:'profT', h:'profH' }
   ],
   n:[
     { k:'stream', t:'tg', l:'stream' },
@@ -7455,6 +7548,12 @@ const SC = {
     { k:'blur', t:'rg', l:'blur', min:0, max:20, step:1, u:'px' },
     { k:'sf', t:'rg', l:'sf', min:1, max:3, step:0.1, u:'×' },
     { t:'pv' }
+  ],
+  mcp:[
+    { l:'mcpT', h:'mcpH', t:'mcp' }
+  ],
+  hk:[
+    { l:'hkT', h:'hkH', t:'hooks' }
   ],
   bh:[
     { k:'compactionEnabled', t:'tg', l:'cmpEn', h:'cmpEnH' },
@@ -7470,6 +7569,7 @@ const SC = {
     { k:'modelIoLog', t:'tg', l:'mioLog', h:'mioLogH' }
   ],
   d:[
+    { k:'sessionRetentionDays', t:'seg', l:'retention', h:'retentionH', o:[0,7,30,90,365], i:1, p:'sr_', num:1 },
     { l:'expAll', h:'expAllH', t:'exp' },
     { l:'dangerT', h:'dangerH', t:'danger' }
   ]
@@ -7589,13 +7689,13 @@ $('#snav').onclick = async e => {
    - action: allow / deny
    规则优先级高于权限模式：命中 allow 就放行，命中 deny 就拒绝。 */
 const RULE_TOOLS = ['*', 'bash', 'read_file', 'write_file', 'edit_file', 'list_dir', 'glob', 'grep', 'web_fetch', 'web_search'];
-let RULES = { allow: [], deny: [] };
+let RULES = { allow: [], deny: [], ask: [] };
 let rulesDirty = false;
 
 async function rulesLoad() {
   try {
     const r = await api('/permissions');
-    RULES = { allow: r.allow || [], deny: r.deny || [] };
+    RULES = { allow: r.allow || [], deny: r.deny || [], ask: r.ask || [] };
   } catch (e) { /* 保持空列表 */ }
 }
 
@@ -7619,7 +7719,9 @@ function rulesRender(host) {
       '<select data-f="tool">' + RULE_TOOLS.map(x =>
         '<option value="' + x + '"' + (r.tool === x ? ' selected' : '') + '>' + x + '</option>').join('') + '</select>' +
       '<input data-f="path" value="' + esc(r.path || '') + '" placeholder="' +
-      (z ? '路径或命令（* 通配）' : 'path or command (* wildcard)') + '" spellcheck="false">' +
+      (z ? '路径或 * 通配' : 'path or * wildcard') + '" spellcheck="false">' +
+      '<input data-f="cmd" value="' + esc(r.cmd || '') + '" placeholder="' +
+      (z ? '命令模式（可选，如 npm *）' : 'cmd pattern (opt, e.g. npm *)') + '" spellcheck="false" style="flex:1.2">' +
       '<select data-f="exact"><option value="0"' + (!r.exact ? ' selected' : '') + '>' + (z ? '通配' : 'glob') + '</option>' +
       '<option value="1"' + (r.exact ? ' selected' : '') + '>' + (z ? '精确' : 'exact') + '</option></select>' +
       '<button class="btn rdel" title="' + (z ? '删除' : 'Delete') + '">' + ic('trash') + '</button></div>';
@@ -7629,11 +7731,14 @@ function rulesRender(host) {
       '<div class="rsec"><b>' + (z ? '允许' : 'Allow') + '</b>' +
       RULES.allow.map((_, i) => row('allow', RULES.allow, i)).join('') +
       '<button class="btn rapp" data-a="allow">' + ic('plus') + (z ? '添加' : 'Add') + '</button></div>' +
+      '<div class="rsec"><b>' + (z ? '必须询问' : 'Always ask') + '</b>' +
+      (RULES.ask || []).map((_, i) => row('ask', RULES.ask, i)).join('') +
+      '<button class="btn rapp" data-a="ask">' + ic('plus') + (z ? '添加' : 'Add') + '</button></div>' +
       '<div class="rsec"><b>' + (z ? '拒绝' : 'Deny') + '</b>' +
       RULES.deny.map((_, i) => row('deny', RULES.deny, i)).join('') +
       '<button class="btn rapp" data-a="deny">' + ic('plus') + (z ? '添加' : 'Add') + '</button></div>' +
-      '<div class="rfoot"><span class="rfh">' + (z ? '规则优先于权限模式：命中允许就放行，命中拒绝就拒绝。' :
-        'Rules override the permission mode: a matching allow wins, a matching deny wins.') + '</span>' +
+      '<div class="rfoot"><span class="rfh">' + (z ? '优先级：拒绝 > 必须询问 > 允许 > 权限模式。命令模式只匹配命令串（如 bash + "npm *" 放行所有 npm 开头的命令）。' :
+        'Priority: deny > ask > allow > mode. Cmd patterns match the command string only (bash + "npm *" allows every npm command).') + '</span>' +
       '<button class="btn pri" data-save>' + (z ? '保存规则' : 'Save rules') + '</button></div>';
   };
   draw();
@@ -7647,6 +7752,7 @@ function rulesRender(host) {
     if (!r) return;
     if (f === 'tool') r.tool = e.target.value;
     else if (f === 'path') r.path = e.target.value;
+    else if (f === 'cmd') r.cmd = e.target.value || undefined;
     else if (f === 'exact') r.exact = e.target.value === '1';
     rulesDirty = true;
   };
@@ -7803,6 +7909,146 @@ function panel() {
               ? '逐字符模糊放大，像墨水在纸上化开。**Each character** settles into focus.'
               : 'Each character blurs in and **settles into focus**, like ink spreading on paper.',
             pvs, false);
+        };
+      } else if (c.t === 'mcp') {
+        ct.className = '';
+        ct.innerHTML = '<div class="mcplist"></div>' +
+          '<button class="btn" data-mcp-add>' + ic('plus') + t('mcp_add') + '</button>';
+        const lst = ct.querySelector('.mcplist');
+        const drawMcp = () => {
+          fetch('/api/mcp', { headers: { 'X-Parable-Token': TOKEN } }).then(r => r.json()).then(d => {
+            const servers = d.servers || [];
+            const stMap = {};
+            (d.status || []).forEach(x => { stMap[x.id] = x; });
+            lst.innerHTML = servers.length ? servers.map(sv => {
+              const st = stMap[sv.id] || {};
+              return '<div class="mcprow" data-id="' + esc(sv.id) + '">' +
+                '<div style="flex:1;min-width:0"><b>' + esc(sv.name) + '</b> <span class="mcpdot ' + (sv.enabled ? (st.connected ? 'ok' : '') : 'off') + '" title="' +
+                esc(st.error || '') + '"></span>' +
+                '<div style="opacity:.6;font-size:11px;font-family:var(--mono);word-break:break-all">' + esc(sv.command + ' ' + (sv.args || []).join(' ')) + '</div>' +
+                (st.tools && st.tools.length ? '<div style="opacity:.5;font-size:11px">' + esc(st.tools.join(', ')) + '</div>' : '') + '</div>' +
+                '<button class="btn" data-mcp-c>' + (sv.enabled ? (st.connected ? t('mcp_reconnect') : t('mcp_connect')) : t('mcp_off')) + '</button>' +
+                '<button class="btn rdel" data-mcp-del>' + ic('trash') + '</button></div>';
+            }).join('') : '<div style="opacity:.55;font-size:12px;padding:6px 0">' + t('mcp_empty') + '</div>';
+          });
+        };
+        drawMcp();
+        ct.onclick = async e => {
+          const row = e.target.closest('.mcprow');
+          if (e.target.closest('[data-mcp-del]') && row) {
+            const id = row.dataset.id;
+            const d = await (await fetch('/api/mcp', { headers: { 'X-Parable-Token': TOKEN } })).json();
+            await api('/mcp', { method: 'POST', body: { servers: (d.servers || []).filter(x => x.id !== id) } });
+            drawMcp();
+            return;
+          }
+          if (e.target.closest('[data-mcp-c]') && row) {
+            const id = row.dataset.id;
+            try {
+              const r = await api('/mcp/connect', { method: 'POST', body: { id } });
+              const st = (r.status || []).find(x => x.id === id);
+              toast(st && st.connected ? (t('mcp_ok') || '').replace('{n}', st.tools.length) : (st && st.error) || t('toast'));
+              drawMcp();
+            } catch (e2) { toast(e2.message); }
+            return;
+          }
+          if (e.target.closest('[data-mcp-add]')) {
+            const name = prompt(t('mcp_pname'), '');
+            if (!name) return;
+            const cmd = prompt(t('mcp_pcmd'), 'npx -y @modelcontextprotocol/server-filesystem .');
+            if (!cmd) return;
+            const parts = cmd.split(/\s+/);
+            const d = await (await fetch('/api/mcp', { headers: { 'X-Parable-Token': TOKEN } })).json();
+            const servers = d.servers || [];
+            servers.push({ id: 'mcp_' + Date.now().toString(36), name: name, command: parts[0], args: parts.slice(1), env: [], enabled: true, timeout_ms: 60000 });
+            await api('/mcp', { method: 'POST', body: { servers: servers } });
+            drawMcp();
+          }
+        };
+      } else if (c.t === 'hooks') {
+        ct.className = '';
+        ct.innerHTML = '<div class="hklist"></div>' +
+          '<button class="btn" data-hk-add>' + ic('plus') + t('hk_add') + '</button>';
+        const lst = ct.querySelector('.hklist');
+        const EVENTS = ['pre_tool_use', 'post_tool_use', 'stop', 'session_start'];
+        const drawHk = () => {
+          const hs = S.hooks || [];
+          lst.innerHTML = hs.length ? hs.map((h, i) =>
+            '<div class="mcprow" data-i="' + i + '">' +
+            '<div style="flex:1;min-width:0;display:flex;gap:6px;flex-wrap:wrap">' +
+            '<select data-f="event">' + EVENTS.map(ev =>
+              '<option value="' + ev + '"' + (h.event === ev ? ' selected' : '') + '>' + t('hk_' + ev) + '</option>').join('') + '</select>' +
+            '<input data-f="matcher" value="' + esc(h.matcher || '*') + '" placeholder="matcher" style="width:90px">' +
+            '<input data-f="command" value="' + esc(h.command || '') + '" placeholder="' + t('hk_cmd') + '" style="flex:1;min-width:180px;font-family:var(--mono)"></div>' +
+            '<button class="btn rdel" data-hk-del>' + ic('trash') + '</button></div>'
+          ).join('') : '<div style="opacity:.55;font-size:12px;padding:6px 0">' + t('hk_empty') + '</div>';
+        };
+        drawHk();
+        ct.oninput = e => {
+          const row = e.target.closest('.mcprow');
+          if (!row || !e.target.dataset.f) return;
+          const h = (S.hooks || [])[+row.dataset.i];
+          if (!h) return;
+          if (e.target.dataset.f === 'event') h.event = e.target.value;
+          else if (e.target.dataset.f === 'matcher') h.matcher = e.target.value;
+          else h.command = e.target.value;
+          apply();
+        };
+        ct.onclick = e => {
+          if (e.target.closest('[data-hk-del]')) {
+            const row = e.target.closest('.mcprow');
+            S.hooks.splice(+row.dataset.i, 1);
+            apply(); drawHk();
+            return;
+          }
+          if (e.target.closest('[data-hk-add]')) {
+            (S.hooks = S.hooks || []).push({ event: 'pre_tool_use', matcher: '*', command: '', timeout_ms: 10000 });
+            apply(); drawHk();
+          }
+        };
+      } else if (c.t === 'profiles') {
+        ct.className = '';
+        ct.innerHTML = '<div class="proflist"></div>' +
+          '<button class="btn" data-prof-save>' + ic('plus') + t('prof_save') + '</button>';
+        const lst = ct.querySelector('.proflist');
+        const drawProf = () => {
+          const ps = S.profiles || [];
+          lst.innerHTML = ps.length ? ps.map((pf, i) =>
+            '<div class="mcprow" data-i="' + i + '">' +
+            '<div style="flex:1;min-width:0"><b>' + esc(pf.name) + '</b>' +
+            '<div style="opacity:.6;font-size:11px">' + esc((pf.model || t('prof_nomodel')) + ' \u00b7 ' + t('p_' + pf.permission_mode) + ' \u00b7 ' + t('l' + pf.thinking_level)) + '</div></div>' +
+            (S.activeProfile === pf.id ? '<span class="profon">' + t('prof_on') + '</span>' : '<button class="btn" data-prof-apply="' + i + '">' + t('prof_apply') + '</button>') +
+            '<button class="btn rdel" data-prof-del="' + i + '">' + ic('trash') + '</button></div>'
+          ).join('') : '<div style="opacity:.55;font-size:12px;padding:6px 0">' + t('prof_empty') + '</div>';
+        };
+        drawProf();
+        ct.onclick = async e => {
+          const applyBtn = e.target.closest('[data-prof-apply]');
+          if (applyBtn) {
+            const pf = (S.profiles || [])[+applyBtn.dataset.profApply];
+            if (!pf) return;
+            try {
+              const r = await api('/profiles/apply', { method: 'POST', body: { id: pf.id } });
+              S.model = r.model; S.perm = r.permission_mode; S.lvl = r.thinking_level; S.activeProfile = pf.id;
+              apply(); drawProf(); toast(t('prof_applied'));
+            } catch (e2) { toast(e2.message); }
+            return;
+          }
+          const delBtn = e.target.closest('[data-prof-del]');
+          if (delBtn) {
+            S.profiles.splice(+delBtn.dataset.profDel, 1);
+            apply(); drawProf();
+            return;
+          }
+          if (e.target.closest('[data-prof-save]')) {
+            const name = prompt(t('prof_pname'), '');
+            if (!name) return;
+            (S.profiles = S.profiles || []).push({
+              id: 'prof_' + Date.now().toString(36), name: name,
+              model: S.model, permission_mode: S.perm, thinking_level: S.lvl,
+            });
+            apply(); drawProf();
+          }
         };
       } else if (c.t === 'exp') {
         ct.className = '';
@@ -11530,7 +11776,11 @@ async function boot() {
       httpProxy: c.http_proxy ?? S.httpProxy,
       httpNoProxy: c.http_no_proxy ?? S.httpNoProxy,
       modelIoLog: c.model_io_log ?? S.modelIoLog,
-      enterMode: c.enter_mode ?? S.enterMode
+      enterMode: c.enter_mode ?? S.enterMode,
+      sessionRetentionDays: c.session_retention_days ?? S.sessionRetentionDays,
+      hooks: c.hooks ?? S.hooks,
+      profiles: c.profiles ?? S.profiles,
+      activeProfile: c.active_profile ?? S.activeProfile
     });
   } catch (e) { /* offline: use local cache */ }
 

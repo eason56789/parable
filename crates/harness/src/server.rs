@@ -251,6 +251,15 @@ pub fn build_router(state: SharedState) -> Router {
         // 会话数据治理：全量导出 / 危险区清空（设置 → 数据）
         .route("/sessions/export", get(export_sessions))
         .route("/sessions/clear-all", post(clear_all_sessions))
+        // 多 Profile：一键把命名配置束套到当前配置上
+        .route("/profiles/apply", post(apply_profile))
+        // 文件检查点：列出某会话的可回退点 / 执行回退
+        .route("/sessions/{id}/checkpoints", get(list_checkpoints))
+        .route("/sessions/{id}/rewind", post(rewind_session))
+        // MCP 服务器舰队：读取（含状态）/ 保存并应用 / 显式连接
+        .route("/mcp", get(mcp_state))
+        .route("/mcp", post(mcp_save))
+        .route("/mcp/connect", post(mcp_connect))
         // 断线重连后恢复权限面板;聊天附件上传
         .route("/pending", get(pending_permissions))
         .route("/attachments", post(upload_attachment))
@@ -988,6 +997,32 @@ fn merge_config(cfg: &mut Config, v: &Value) {
                     if matches!(s, "enter" | "ctrl") {
                         cfg.enter_mode = s.to_string();
                     }
+                }
+                // ---- 数据治理 ----
+                "sessionRetentionDays" | "session_retention_days" => {
+                    cfg.session_retention_days =
+                        val.as_u64().unwrap_or(0).clamp(0, 3650) as u32;
+                }
+                // ---- hooks ----
+                "hooks" => {
+                    if let Ok(hs) = serde_json::from_value(val.clone()) {
+                        cfg.hooks = hs;
+                    }
+                }
+                // ---- MCP ----
+                "mcpServers" | "mcp_servers" => {
+                    if let Ok(ms) = serde_json::from_value(val.clone()) {
+                        cfg.mcp_servers = ms;
+                    }
+                }
+                // ---- profiles ----
+                "profiles" => {
+                    if let Ok(ps) = serde_json::from_value(val.clone()) {
+                        cfg.profiles = ps;
+                    }
+                }
+                "activeProfile" | "active_profile" => {
+                    cfg.active_profile = val.as_str().unwrap_or("").to_string();
                 }
                 "systemPrompt" | "system_prompt" => {
                     cfg.system_prompt = val.as_str().unwrap_or("").to_string()
@@ -1732,6 +1767,137 @@ async fn clear_all_sessions(State(state): State<SharedState>, headers: HeaderMap
     Json(json!({"ok": true, "deleted": n})).into_response()
 }
 
+#[derive(Debug, Deserialize)]
+struct ApplyProfileReq {
+    id: String,
+}
+
+/// POST /api/profiles/apply — 把命名 Profile 的 model/permission/thinking
+/// 套到当前配置并激活（前端模型菜单/设置页一键切换）。
+async fn apply_profile(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(r): Json<ApplyProfileReq>,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    let mut cfg = state.config.write().await;
+    let Some(p) = cfg.profiles.iter().find(|p| p.id == r.id).cloned() else {
+        return bad_request("profile 不存在");
+    };
+    cfg.model = p.model.clone();
+    cfg.permission_mode = p.permission_mode.clone();
+    cfg.thinking_level = p.thinking_level;
+    cfg.active_profile = p.id.clone();
+    crate::config::set_proxy(cfg.http_proxy.clone(), cfg.http_no_proxy.clone());
+    if let Err(e) = cfg.save() {
+        return server_error(e);
+    }
+    Json(json!({
+        "ok": true,
+        "model": cfg.model,
+        "permission_mode": cfg.permission_mode,
+        "thinking_level": cfg.thinking_level,
+    }))
+    .into_response()
+}
+
+/// GET /api/sessions/{id}/checkpoints — 该会话的全部文件检查点。
+async fn list_checkpoints(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    let list = state.agent.checkpoints.list(&id).await;
+    Json(json!({"checkpoints": list})).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct RewindReq {
+    turn: String,
+}
+
+/// POST /api/sessions/{id}/rewind — 回退某 turn 的文件改动。
+async fn rewind_session(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(r): Json<RewindReq>,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    match state.agent.checkpoints.restore(&id, &r.turn).await {
+        Ok(files) => Json(json!({"ok": true, "files": files})).into_response(),
+        Err(e) => server_error(e),
+    }
+}
+
+// ---------------------------------------------------------------- MCP
+
+/// GET /api/mcp — 配置 + 各服务器实时状态。
+async fn mcp_state(State(state): State<SharedState>, headers: HeaderMap) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    let cfg = state.config.read().await;
+    let servers = cfg.mcp_servers.clone();
+    drop(cfg);
+    let status = state.agent.mcp.list_status().await;
+    Json(json!({"servers": servers, "status": status})).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct McpSaveReq {
+    servers: Vec<crate::mcp::McpServerConfig>,
+}
+
+/// POST /api/mcp — 保存服务器清单并应用到管理器（移除的杀进程）。
+async fn mcp_save(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(r): Json<McpSaveReq>,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    {
+        let mut cfg = state.config.write().await;
+        cfg.mcp_servers = r.servers.clone();
+        if let Err(e) = cfg.save() {
+            return server_error(e);
+        }
+    }
+    state.agent.mcp.set_servers(r.servers).await;
+    let status = state.agent.mcp.list_status().await;
+    Json(json!({"ok": true, "status": status})).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct McpConnectReq {
+    id: String,
+}
+
+/// POST /api/mcp/connect — 显式连接一台服务器并拉工具清单。
+async fn mcp_connect(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(r): Json<McpConnectReq>,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    if let Err(e) = state.agent.mcp.connect(&r.id).await {
+        return server_error(e);
+    }
+    let status = state.agent.mcp.list_status().await;
+    Json(json!({"ok": true, "status": status})).into_response()
+}
+
 // ---------------------------------------------------------------- archive
 
 #[derive(Debug, Deserialize)]
@@ -2005,7 +2171,7 @@ async fn get_permissions(
         return unauthorized();
     }
     let rs = crate::permission::RuleSet::load();
-    Json(json!({ "allow": rs.allow, "deny": rs.deny })).into_response()
+    Json(json!({ "allow": rs.allow, "deny": rs.deny, "ask": rs.ask })).into_response()
 }
 
 async fn put_permissions(
@@ -2016,36 +2182,15 @@ async fn put_permissions(
     if !check_auth(&headers, None, &state) {
         return unauthorized();
     }
-    let parsed: Value = match serde_json::from_slice(&body) {
+    // 整体反序列化：allow / deny / ask 三张表 + 每条规则的 cmd 命令模式
+    let rs: crate::permission::RuleSet = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => return bad_request(&format!("invalid JSON: {e}")),
     };
-    let allow: Vec<crate::permission::Rule> = match serde_json::from_value(
-        parsed.get("allow").cloned().unwrap_or(json!([])),
-    ) {
-        Ok(v) => v,
-        Err(e) => return bad_request(&format!("invalid allow rules: {e}")),
-    };
-    let deny: Vec<crate::permission::Rule> = match serde_json::from_value(
-        parsed.get("deny").cloned().unwrap_or(json!([])),
-    ) {
-        Ok(v) => v,
-        Err(e) => return bad_request(&format!("invalid deny rules: {e}")),
-    };
-    // 只接受 allow/deny 两种动作 —— 其它值落盘后永远不匹配，等于静默失效。
-    for r in allow.iter().chain(deny.iter()) {
-        if r.action != "allow" && r.action != "deny" {
-            return bad_request(&format!(
-                "action must be allow or deny, got {:?}",
-                r.action
-            ));
-        }
-    }
-    let rs = crate::permission::RuleSet { allow, deny };
     if let Err(e) = rs.save() {
         return server_error(e);
     }
-    Json(json!({ "ok": true })).into_response()
+    Json(json!({"ok": true})).into_response()
 }
 
 // ------------------------------------------------------------------ memory
@@ -2903,6 +3048,24 @@ pub async fn serve_in(
             }
             if n > 0 {
                 tracing::info!("auto-archived {n} stale sessions (>{days}d)");
+            }
+            // 保留清理：已归档会话超过 session_retention_days 直接删除
+            // （0 = 永不清理；只动已归档的，活跃/置顶永不碰）。
+            let keep_days = config.read().await.session_retention_days;
+            if keep_days > 0 {
+                let cutoff = crate::event::now_ms() as u64 - (keep_days as u64) * 86_400_000;
+                let mut deleted = 0usize;
+                for s in store.list("").await {
+                    if !s.archived || s.pinned || s.updated_at >= cutoff {
+                        continue;
+                    }
+                    if store.delete(&s.id).await.is_ok() {
+                        deleted += 1;
+                    }
+                }
+                if deleted > 0 {
+                    tracing::info!("retention: deleted {deleted} archived sessions (>{keep_days}d)");
+                }
             }
         });
     }

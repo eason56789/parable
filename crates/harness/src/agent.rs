@@ -149,6 +149,10 @@ pub struct AgentRuntime {
     pub computer: Arc<crate::computer::ComputerBridge>,
     /// Desktop use bridge（OS 级：截屏 + UIA + SendInput），shared across turns。
     pub desktop: Arc<crate::desktop::DesktopBridge>,
+    /// 文件检查点存储（每轮写文件前快照，支持回退）。
+    pub checkpoints: Arc<crate::checkpoint::CheckpointStore>,
+    /// MCP 服务器管理器（stdio 客户端舰队）。
+    pub mcp: Arc<crate::mcp::McpManager>,
 }
 
 impl AgentRuntime {
@@ -182,6 +186,7 @@ impl AgentRuntime {
         workspace: &PathBuf,
         opts: &TurnOptions,
         session_id: &str,
+        turn_id: &str,
         call_id: &str,
         search_key: &str,
         search_pref: &str,
@@ -212,6 +217,13 @@ impl AgentRuntime {
                     0
                 }
             },
+            hooks: Arc::new({
+                let cfg = self.config.read().await;
+                cfg.hooks.clone()
+            }),
+            checkpoint: Some(self.checkpoints.clone()),
+            turn_id: turn_id.to_string(),
+            mcp: Some(self.mcp.clone()),
         }
     }
 }
@@ -307,6 +319,10 @@ impl AgentRuntime {
             usage: None,
             computer: Arc::new(crate::computer::ComputerBridge::new()),
             desktop: Arc::new(crate::desktop::DesktopBridge::new()),
+            checkpoints: Arc::new(crate::checkpoint::CheckpointStore::new(
+                Config::home_dir().join("checkpoints"),
+            )),
+            mcp: Arc::new(crate::mcp::McpManager::new()),
         }
     }
 
@@ -1071,15 +1087,31 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
         );
 
         // ---- resolve model + workspace + turn 级行为开关
-        let (workspace, model_sel, ctx_limit, search_key, search_pref, tcfg) = {
+        let (workspace, model_sel, ctx_limit, search_key, search_pref, tcfg, opts) = {
             let cfg = self.config.read().await;
             let ws = if cfg.workspace.is_empty() {
                 std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
             } else {
                 PathBuf::from(&cfg.workspace)
             };
+            // 项目级设置覆盖（.parable/settings.json → overrides，白名单键）：
+            // 项目显式声明的键压过全局；UI 未显式选择的模型让位给项目默认。
+            let overlay = crate::config::project_overlay(&ws);
+            let ov_s = |k: &str| {
+                overlay
+                    .as_ref()
+                    .and_then(|v| v.get(k))
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_string())
+            };
+            let ov_n = |k: &str| {
+                overlay
+                    .as_ref()
+                    .and_then(|v| v.get(k))
+                    .and_then(|x| x.as_u64())
+            };
             let sel = if opts.model_sel.is_empty() {
-                cfg.model.clone()
+                ov_s("model").unwrap_or_else(|| cfg.model.clone())
             } else {
                 opts.model_sel.clone()
             };
@@ -1089,13 +1121,31 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
                 .map(|(_, m)| m.context)
                 .unwrap_or(128_000);
             let tcfg = TurnCfg {
-                max_steps: cfg.max_steps.max(1) as usize,
-                compaction_enabled: cfg.compaction_enabled,
-                compaction_pct: cfg.compaction_pct as u64,
+                max_steps: ov_n("max_steps")
+                    .unwrap_or(cfg.max_steps as u64)
+                    .clamp(1, 5000) as usize,
+                compaction_enabled: overlay
+                    .as_ref()
+                    .and_then(|v| v.get("compaction_enabled"))
+                    .and_then(|x| x.as_bool())
+                    .unwrap_or(cfg.compaction_enabled),
+                compaction_pct: ov_n("compaction_pct")
+                    .unwrap_or(cfg.compaction_pct as u64)
+                    .clamp(50, 95),
                 keep_awake: cfg.keep_awake,
                 model_io_log: cfg.model_io_log,
             };
-            (ws, sel, limit, cfg.search_key.clone(), cfg.search_pref.clone(), tcfg)
+            // 权限模式：项目覆盖压过全局（文档化语义：项目设置赢）
+            let mut o = opts;
+            if let Some(pm) = ov_s("permission_mode") {
+                if crate::config::PERMISSION_MODES.contains(&pm.as_str()) {
+                    o.permission_mode = pm;
+                }
+            }
+            if let Some(plan) = overlay.as_ref().and_then(|v| v.get("plan_mode")).and_then(|x| x.as_bool()) {
+                o.plan_mode = plan;
+            }
+            (ws, sel, limit, cfg.search_key.clone(), cfg.search_pref.clone(), tcfg, o)
         };
 
         // 防休眠看门狗：独立线程周期性持锁，turn 结束即归还
@@ -1175,6 +1225,25 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
         // 每轮一个 Registry（带 search 配置），specs() 与工具执行共用同一实例，
         // 修复搜索配置到不了执行现场的问题。
         let registry = Arc::new(Registry::new(workspace.clone()).with_search(&search_pref, &search_key));
+        // MCP 工具清单刷新（≤8s）：写入共享缓存供 specs() 同步读取；
+        // 没配 MCP 时 all_tools 立即返回空。
+        {
+            let mcp = self.mcp.clone();
+            if let Ok(tools) =
+                tokio::time::timeout(std::time::Duration::from_secs(8), mcp.all_tools()).await
+            {
+                crate::tools::mcp_set_tools(
+                    tools
+                        .into_iter()
+                        .map(|(n, d, sc)| crate::provider::ToolSpec {
+                            name: n,
+                            description: d,
+                            input_schema: sc,
+                        })
+                        .collect(),
+                );
+            }
+        }
         let system = self.compose_system(session_id, &workspace, &opts).await;
 
         let mut steps = 0usize;
@@ -1519,7 +1588,7 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
                     )> = Vec::new();
                     for (id, name, args) in batch {
                         let reg = Arc::clone(&registry);
-                        let ctx = self.tool_ctx(&workspace, &opts, session_id, &id, &search_key, &search_pref).await;
+                        let ctx = self.tool_ctx(&workspace, &opts, session_id, turn_id, &id, &search_key, &search_pref).await;
                         let cancel_tool = cancel.clone();
                         let t0 = std::time::Instant::now();
                         handles.push((id.clone(), name.clone(), tokio::spawn(async move {
@@ -1558,7 +1627,7 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
                     let (id, name, args) = calls[i].clone();
                     i += 1;
                     let reg = Arc::clone(&registry);
-                    let ctx = self.tool_ctx(&workspace, &opts, session_id, &id, &search_key, &search_pref).await;
+                    let ctx = self.tool_ctx(&workspace, &opts, session_id, turn_id, &id, &search_key, &search_pref).await;
                     let t0 = std::time::Instant::now();
                     let r = tokio::select! {
                         biased;
@@ -1756,6 +1825,19 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
                 let instant_tps = out_tokens as f64 * 1000.0 / wall as f64;
                 let instant_tps = instant_tps.min(2000.0);
                 s.tps = if s.tps == 0.0 { instant_tps } else { s.tps * 0.6 + instant_tps * 0.4 };
+            }
+        }
+                // Stop hook：通知型（v1 只记录，不阻止停止；阻断语义留给未来）
+        {
+            let cfg = self.config.read().await;
+            let hooks = cfg.hooks.clone();
+            if !crate::hooks::is_empty(&hooks, crate::hooks::HookEvent::Stop) {
+                let payload = json!({"event":"stop","session":session_id});
+                tokio::spawn(async move {
+                    if let Err(reason) = crate::hooks::run_stop(&hooks, payload).await {
+                        tracing::info!("stop hook 建议继续: {reason}");
+                    }
+                });
             }
         }
         self.hub.publish(

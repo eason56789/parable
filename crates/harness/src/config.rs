@@ -264,7 +264,87 @@ pub struct Config {
     /// 发送键策略：`enter` = Enter 发送 / Ctrl+Enter 换行；`ctrl` = 反之。
     #[serde(default = "default_enter_mode")]
     pub enter_mode: String,
+
+    // ---- 数据治理 -----------------------------------------------------
+    /// 已归档会话保留天数（0 = 永不清理）。超期归档会话在启动时删除。
+    #[serde(default)]
+    pub session_retention_days: u32,
+
+    // ---- 生命周期 hooks ------------------------------------------------
+    /// 生命周期钩子（设置 → Hooks；Claude Code 方言子集）。
+    #[serde(default)]
+    pub hooks: Vec<crate::hooks::HookConfig>,
+
+    // ---- MCP 服务器 ----------------------------------------------------
+    /// stdio MCP 服务器清单（设置 → MCP；工具暴露为 mcp_<server>_<tool>）。
+    #[serde(default)]
+    pub mcp_servers: Vec<crate::mcp::McpServerConfig>,
+
+    // ---- 多 Profile ----------------------------------------------------
+    /// 命名配置束：模型 + 权限 + 思考强度一键切换。
+    #[serde(default)]
+    pub profiles: Vec<ProfileConfig>,
+    /// 当前激活的 Profile id（空 = 未启用）。
+    #[serde(default)]
+    pub active_profile: String,
 }
+
+/// 命名配置束（工作/个人一键切换）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProfileConfig {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default = "default_perm")]
+    pub permission_mode: String,
+    #[serde(default = "default_lvl")]
+    pub thinking_level: u32,
+}
+
+use serde_json::Value;
+
+/// 项目级设置覆盖：工作区 `.parable/settings.json` 里的键在 run_turn 时
+/// 压过全局配置（仅限白名单键）。缓存按路径 + mtime。
+pub fn project_overlay(workspace: &std::path::Path) -> Option<Value> {
+    use std::sync::atomic::{AtomicPtr, Ordering};
+    static CACHE: AtomicPtr<(std::path::PathBuf, u64, Option<Value>)> =
+        AtomicPtr::new(std::ptr::null_mut());
+    let f = workspace.join(".parable").join("settings.json");
+    let meta = std::fs::metadata(&f).ok()?;
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    // 读取缓存
+    let cached = unsafe { CACHE.load(Ordering::Relaxed).as_ref() }.cloned();
+    if let Some((p, m, v)) = cached {
+        if p == f && m == mtime {
+            return v;
+        }
+    }
+    let v: Option<Value> = std::fs::read_to_string(&f)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok());
+    let out = v.as_ref().and_then(|v| v.get("overrides")).cloned();
+    let boxd = Box::new((f, mtime, out.clone()));
+    unsafe { CACHE.store(Box::into_raw(boxd), Ordering::Relaxed) };
+    out
+}
+
+/// 项目覆盖白名单键：只允许这些键生效（防项目文件越权改 provider/key）。
+pub const OVERLAY_KEYS: [&str; 8] = [
+    "permission_mode",
+    "model",
+    "max_steps",
+    "compaction_enabled",
+    "compaction_pct",
+    "system_prompt",
+    "plan_mode",
+    "notify",
+];
 
 fn default_compaction_pct() -> u32 {
     85
@@ -386,6 +466,11 @@ impl Default for Config {
             http_no_proxy: String::new(),
             model_io_log: false,
             enter_mode: default_enter_mode(),
+            session_retention_days: 0,
+            hooks: Vec::new(),
+            mcp_servers: Vec::new(),
+            profiles: Vec::new(),
+            active_profile: String::new(),
         }
     }
 }

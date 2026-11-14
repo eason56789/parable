@@ -2,7 +2,10 @@
 
 pub mod agent;
 pub mod computer;
+pub mod checkpoint;
 pub mod desktop;
+pub mod hooks;
+pub mod mcp;
 pub mod config;
 pub mod error;
 pub mod event;
