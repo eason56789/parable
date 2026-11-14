@@ -1775,7 +1775,7 @@ const L = {
     auto_no_chat:'当前没有会话，不能投递到当前对话', disc:'Parable 是 AI，可能会出错，请核实重要内容',
     sp_title:'新标签页', sp_title_h:'选择要打开的工具面板。',
     sp_files:'文件', sp_files_h:'浏览工作区目录与文件。',
-    sp_browser:'浏览器', sp_browser_h:'浏览网页和预览应用。',
+    sp_browser:'内置浏览器', sp_browser_h:'Parable 自有浏览器窗口——地址栏与 agent 操作共用同一视图，实况刷新。',
     sp_term:'终端', sp_term_h:'运行命令和查看输出。',
     sp_review:'审查', sp_review_h:'查看代码变更与差异。',
     sp_deploy:'部署', sp_deploy_h:'查看站点、部署记录和用量。',
@@ -1984,7 +1984,7 @@ const L = {
     auto_no_chat:'No active chat to deliver to', disc:'Parable is AI and can make mistakes. Please double-check important content',
     sp_title:'New tab', sp_title_h:'Choose a tool panel to open.',
     sp_files:'Files', sp_files_h:'Browse workspace files and folders.',
-    sp_browser:'Browser', sp_browser_h:'Browse pages and preview the app.',
+    sp_browser:'Built-in browser', sp_browser_h:'A Parable-owned browser window — the address bar and agent actions share the same view, live-refreshed.',
     sp_term:'Terminal', sp_term_h:'Run commands and see their output.',
     sp_review:'Review', sp_review_h:'Inspect code changes and diffs.',
     sp_deploy:'Deploy', sp_deploy_h:'Review sites, deploy records and usage.',
@@ -10440,6 +10440,17 @@ function spRenderBrowser(host, tab) {
   };
   url.onkeydown = e => { if (e.key === 'Enter') go.click(); };
   if (tab.st.url) spBrowserState(tab);
+  // 实况轮询：内置浏览器是 agent 与用户共用的视图，agent 操作期间面板
+  // 跟随刷新。3s 一次（BitBlt + PNG ~100ms，常驻开销可接受）。
+  if (tab.st.poll) clearInterval(tab.st.poll);
+  tab.st.poll = setInterval(() => {
+    if (SP.active !== tab.id || !SP.tabs.some(x => x.id === tab.id)) {
+      clearInterval(tab.st.poll);
+      tab.st.poll = 0;
+      return;
+    }
+    spBrowserState(tab);
+  }, 3000);
 }
 
 async function spBrowserState(tab) {

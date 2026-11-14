@@ -25,6 +25,19 @@ fn main() {
 
     let app = tauri::Builder::default()
         .setup(|app| {
+            // 内置浏览器：给 harness 的 ComputerBridge 和内嵌 WebView2 窗口
+            // 统一一个 CDP 端口。agent 的全部浏览器工具（a11y 树 / 截图 /
+            // ref 点击）驱动的是【应用自己的孩子窗口】，不再是外置 Edge。
+            let cdp_port: u16 = std::env::var("PARABLE_CDP_PORT")
+                .ok()
+                .and_then(|p| p.parse().ok())
+                .unwrap_or_else(|| {
+                    std::net::TcpListener::bind(("127.0.0.1", 0))
+                        .and_then(|l| l.local_addr())
+                        .map(|a| a.port())
+                        .unwrap_or(0)
+                });
+            std::env::set_var("PARABLE_CDP_PORT", cdp_port.to_string());
             let _ = Config::ensure_home();
             let mut cfg = Config::load();
             if cfg.workspace.is_empty() {
@@ -66,6 +79,46 @@ fn main() {
                         {
                             tracing::error!("failed to create window: {e}");
                             handle.exit(1);
+                        }
+
+                        // 内置浏览器窗口：WebView2 + 专用调试端口。独立
+                        // user-data-dir 保证它是一个独立的浏览器进程——
+                        // /json 目标列表里只有它自己，agent 无法触达主界面。
+                        let bw_url: tauri::Url = "about:blank"
+                            .parse()
+                            .expect("about:blank must parse");
+                        let bw_args = format!(
+                            "--remote-debugging-port={cdp_port} --user-data-dir={} --no-first-run --no-default-browser-check",
+                            Config::home_dir().join("parable-browser").display()
+                        );
+                        #[cfg(windows)]
+                        {
+                            let builder = WebviewWindowBuilder::new(
+                                &handle,
+                                "browser",
+                                WebviewUrl::External(bw_url),
+                            )
+                            .title("Parable Browser")
+                            .inner_size(1280.0, 860.0)
+                            .additional_browser_args(&bw_args);
+                            if let Err(e) = builder.build() {
+                                tracing::error!("built-in browser window failed: {e}");
+                            }
+                        }
+                        #[cfg(not(windows))]
+                        {
+                            let _ = bw_args;
+                            if let Err(e) = WebviewWindowBuilder::new(
+                                &handle,
+                                "browser",
+                                WebviewUrl::External(bw_url),
+                            )
+                            .title("Parable Browser")
+                            .inner_size(1280.0, 860.0)
+                            .build()
+                            {
+                                tracing::error!("built-in browser window failed: {e}");
+                            }
                         }
                     }
                     Err(e) => {

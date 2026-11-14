@@ -256,6 +256,8 @@ pub fn build_router(state: SharedState) -> Router {
         // 文件检查点：列出某会话的可回退点 / 执行回退
         .route("/sessions/{id}/checkpoints", get(list_checkpoints))
         .route("/sessions/{id}/rewind", post(rewind_session))
+        // 内置浏览器 app 模式的引导页（无敏感信息、无需鉴权——本地 only）
+        .route("/browser-boot", get(browser_boot))
         // MCP 服务器舰队：读取（含状态）/ 保存并应用 / 显式连接
         .route("/mcp", get(mcp_state))
         .route("/mcp", post(mcp_save))
@@ -2739,6 +2741,15 @@ async fn git_diff(
 }
 
 /// GET /api/browser/state — the controlled browser's current page.
+/// GET /browser-boot — 内置浏览器 app 窗口的引导页：--app= 需要真实 URL，
+/// about:blank 会被 Chromium 无视而回退普通窗口。页面本身是惰性占位。
+async fn browser_boot() -> Response {
+    axum::response::Html(
+        "<!doctype html><title>Parable Browser</title>         <body style=\"margin:0;display:grid;place-items:center;height:100vh;         background:#1f1e1d;color:#8a8a85;font:14px/1.6 system-ui\">         Parable Browser</body>",
+    )
+    .into_response()
+}
+
 async fn browser_state(State(state): State<SharedState>, headers: HeaderMap) -> Response {
     if !check_auth(&headers, None, &state) {
         return unauthorized();
@@ -3108,6 +3119,11 @@ pub async fn serve_in(
         store.clone(),
     )
     .with_usage(usage.clone());
+    // 内置浏览器 app 模式引导页：注入 harness 自身的端口
+    agent_base
+        .computer
+        .set_boot_url(&format!("http://127.0.0.1:{port}/browser-boot"));
+
     let subagents: crate::subagent::SharedSubagents = Arc::new(
         crate::subagent::SubagentService::new(hub.clone()).with_store(store.clone()),
     );

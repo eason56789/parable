@@ -119,10 +119,22 @@ pub struct ComputerBridge {
     target_id: Mutex<Option<String>>,
     /// 最近一次快照的 ref → 节点映射。ref 只对最近一次快照负责。
     ax_nodes: Mutex<HashMap<i64, AxNode>>,
+    /// app 窗口标题只设置一次。
+    titled_once: std::sync::OnceLock<bool>,
+    /// app 模式引导页 URL（--app= 需要真实 URL，about:blank 会被 Edge 无视
+    /// 而回退普通窗口）。由 serve_in 注入 harness 自身的 /browser-boot 页。
+    boot_url: std::sync::RwLock<String>,
     pending: Mutex<Option<PendingImage>>,
 }
 
 impl ComputerBridge {
+    /// 注入 app 模式引导页（serve_in 拿到端口后调用）。
+    pub fn set_boot_url(&self, url: &str) {
+        if let Ok(mut g) = self.boot_url.write() {
+            *g = url.to_string();
+        }
+    }
+
     pub fn new() -> Self {
         // 调试端口随机取一个空闲端口,不再固定 9222:固定端口等于给本机其他
         // 进程一个可抢占/伪装的稳定入口。PARABLE_CDP_PORT 仍可显式指定。
@@ -136,6 +148,8 @@ impl ComputerBridge {
             cdp: Mutex::new(None),
             target_id: Mutex::new(None),
             ax_nodes: Mutex::new(HashMap::new()),
+            titled_once: std::sync::OnceLock::new(),
+            boot_url: std::sync::RwLock::new(String::new()),
             pending: Mutex::new(None),
         }
     }
@@ -318,7 +332,19 @@ impl ComputerBridge {
             .ok_or_else(|| HarnessError::Tool("页面目标缺少调试 WS 地址".into()))?
             .to_string();
         let tid = chosen["id"].as_str().unwrap_or("").to_string();
-        let cdp = Cdp::connect(&ws_url).await?;
+        let mut cdp = Cdp::connect(&ws_url).await?;
+        // app 窗口的标题 = 页面标题：首次连接时占名，窗口一眼可辨是内置浏览器
+        if self.titled_once.set(true).is_ok() {
+            let _ = cdp
+                .cmd(
+                    "Runtime.evaluate",
+                    json!({
+                        "expression": "document.title = 'Parable Browser'",
+                        "returnByValue": true,
+                    }),
+                )
+                .await;
+        }
         *self.cdp.lock().await = Some(cdp);
         *self.target_id.lock().await = if tid.is_empty() { None } else { Some(tid) };
         Ok(())
@@ -371,7 +397,14 @@ impl ComputerBridge {
                 "--force-device-scale-factor=1",
                 "--restore-last-session=false",
                 "--window-size=1440,900",
-                "about:blank",
+                // app 模式：无边框应用窗口（无地址栏/书签/标签栏）——
+                // Parable 拥有的内置浏览器观感。--app 需要真实 URL
+                // （about:blank 会被 Edge 无视而回退普通窗口），所以用
+                // harness 自己的惰性引导页。
+                &format!(
+                    "--app={}",
+                    self.boot_url.read().map(|g| g.clone()).unwrap_or_default()
+                ),
             ])
             .spawn()
             .map_err(|e| HarnessError::Tool(format!("启动浏览器失败: {e}")))?;
