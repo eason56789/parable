@@ -456,14 +456,20 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 #pg h2{font:400 32px/1.25 var(--serif);margin:0 0 10px}
 #pg p{color:var(--fg2);margin:0;line-height:1.6}
 /* 插件 / 自动化页：列表式布局 */
-#pg .page{width:min(720px,100%);max-width:720px;max-height:100%;padding:32px 28px;text-align:left;overflow-y:auto}
-#pg .page h2{font-size:26px}
+/* 排版对齐技能页：1000px 容器、衬线大标题、skl 分组列表 */
+#pg .page{width:min(1000px,100%);max-width:1000px;max-height:100%;padding:38px 44px 60px;text-align:left;overflow-y:auto}
 #pg .pload{display:grid;place-items:center;width:100%;padding:60px 0}
-.pg-head p{margin:0 0 18px;color:var(--fg2);line-height:1.6}
+.pg-head{margin-bottom:12px}
+.pg-head p{margin:0;color:var(--fg2);line-height:1.6}
 .pempty{color:var(--fg2);padding:22px 0;font-size:14px}
-.taskrow{display:flex;gap:12px;align-items:flex-start;padding:14px 16px;border:.5px solid var(--line);border-radius:12px;margin:0 0 10px;background:var(--side);transition:border-color calc(.2s * var(--animd))}
-.taskrow:hover{border-color:color-mix(in srgb,var(--fg) 16%,var(--line))}
+.taskrow{display:flex;gap:12px;align-items:flex-start;padding:14px 16px;border:.5px solid var(--line);border-radius:12px;margin:0 0 10px;background:var(--side);transition:background-color calc(.2s * var(--animd))}
+/* skl 分组列表内的行：去卡片化，行内分隔线（与技能页 .skr 一致） */
+.skl .taskrow{display:block;padding:15px 18px;border:0;border-bottom:.5px solid var(--line);border-radius:0;margin:0;background:transparent}
+.skl .taskrow:last-child{border-bottom:0}
+.skl .taskrow:hover{background:var(--hov)}
 .taskrow.col{display:block}
+.skl .pempty{padding:30px;text-align:center}
+.skl .taskrow.col .tk-prompt{background:color-mix(in srgb,var(--bg) 62%,transparent)}
 .tk-main{flex:1;min-width:0}
 .tk-top{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .tk-name{font-size:14px;font-weight:600}
@@ -2437,9 +2443,10 @@ async function renderAutoPage() {
   }).join('');
   return '<div class="pg-head"><h2>' + (z ? '自动化' : 'Automation') + '</h2>' +
     '<p>' + (z ? '定时把提示词投递为一次对话——比如每分钟巡检、每天晨报。' : 'Deliver a prompt on a schedule — periodic checks, daily digests.') + '</p></div>' +
-    (rows || '<div class="pempty">' + (z ? '还没有定时任务。' : 'No scheduled tasks yet.') + '</div>') +
+    '<div class="sksh"><b>' + (z ? '定时任务' : 'Scheduled tasks') + '</b><em>' + tasks.length + '</em></div>' +
+    '<div class="skl">' + (rows || '<div class="pempty">' + (z ? '还没有定时任务。' : 'No scheduled tasks yet.') + '</div>') + '</div>' +
+    '<div class="sksh"><b>' + (z ? '新建任务' : 'New task') + '</b></div>' +
     '<div class="tk-form">' +
-      '<h3>' + (z ? '新建任务' : 'New task') + '</h3>' +
       '<input id="nt-name" placeholder="' + (z ? '任务名称' : 'Task name') + '">' +
       '<textarea id="nt-prompt" rows="2" placeholder="' + (z ? '触发时投递的提示词' : 'Prompt delivered when it fires') + '"></textarea>' +
       '<div class="tk-row">' +
@@ -2569,8 +2576,10 @@ async function renderPluginsPage() {
   }).join('');
   return '<div class="pg-head"><h2>' + (z ? '插件' : 'Plugins') + '</h2>' +
     '<p>' + (z ? '插件目录 ~/.parable/plugins。Agent 可通过 plugin_create 自己写工具（支持内联 Python / PowerShell / Node 代码）和斜杠命令；工具保存后立即热生效，命令与提示词段下一次对话生效。也兼容 dsh（deepseek-harness）插件包，dsh 代码插件静态提取其声明部分。' : 'Plugin dir ~/.parable/plugins. Agents can author tools (inline Python / PowerShell / Node code) and slash commands with plugin_create; tools hot-reload immediately, while new commands and prompt sections apply on the next turn. dsh (deepseek-harness) packages are compatible at the manifest layer; dsh code plugins contribute their declarations.') + '</p></div>' +
-    (rows || '<div class="pempty">' + (z ? '还没有插件。把插件包放进 ~/.parable/plugins 后点刷新。' : 'No plugins yet. Drop a package into ~/.parable/plugins and refresh.') + '</div>') +
-    '<div class="tk-acts" style="margin-top:14px"><button class="btn" id="pl-refresh">' + (z ? '刷新' : 'Refresh') + '</button></div>';
+    '<div class="sksh"><b>' + (z ? '已安装' : 'Installed') + '</b><em>' + plugins.length + '</em>' +
+      '<span class="fl"></span>' +
+      '<button class="ib" id="pl-refresh" title="' + (z ? '重新扫描插件目录' : 'Rescan the plugin directory') + '">' + ic('refresh') + '</button></div>' +
+    '<div class="skl">' + (rows || '<div class="pempty">' + (z ? '还没有插件。把插件包放进 ~/.parable/plugins 后点刷新。' : 'No plugins yet. Drop a package into ~/.parable/plugins and refresh.') + '</div>') + '</div>';
 }
 
 function bindPluginsPage(root) {
@@ -2712,10 +2721,10 @@ async function renderTeamPage() {
       (enabled ? '<span class="tk-ver">' + (z ? '团队已开启' : 'team mode on') + '</span>'
                : '<span class="tk-ver">' + (z ? '团队未开启——模型看不到任务板' : 'team mode off — the model cannot see the board') + '</span>') +
     '</div>' +
-    '<h3>' + (z ? '成员' : 'Members') + ' (' + members.length + ')</h3>' +
-    (memberRows || '<div class="pempty">' + (z ? '还没有子代理。用 spawn_agent 委派任务。' : 'No subagents yet. Delegate work with spawn_agent.') + '</div>') +
-    '<h3 style="margin-top:22px">' + (z ? '任务板' : 'Task board') + ' (' + tasks.length + ')</h3>' +
-    (taskRows || '<div class="pempty">' + (z ? '还没有共享任务。' : 'No shared tasks yet.') + '</div>');
+    '<div class="sksh"><b>' + (z ? '成员' : 'Members') + '</b><em>' + members.length + '</em></div>' +
+    '<div class="skl">' + (memberRows || '<div class="pempty">' + (z ? '还没有子代理。用 spawn_agent 委派任务。' : 'No subagents yet. Delegate work with spawn_agent.') + '</div>') + '</div>' +
+    '<div class="sksh"><b>' + (z ? '任务板' : 'Task board') + '</b><em>' + tasks.length + '</em></div>' +
+    '<div class="skl">' + (taskRows || '<div class="pempty">' + (z ? '还没有共享任务。' : 'No shared tasks yet.') + '</div>') + '</div>';
 }
 
 function bindTeamPage(root) {
