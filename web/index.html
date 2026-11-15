@@ -9792,7 +9792,10 @@ function mpOpenEditor(idx) {
       const models = (p.models || []).slice();
       if (isNew) models.push(m); else models[idx] = m;
       api('/config', { method: 'PATCH', body: { providers: [{ id: p.id, models: models }] } })
-        .then(() => { close(); loadProviders().then(() => { mpList(); mpDetail(); }); toast(t('mp_save')); })
+        // 模型清单是 /api/models 单独拉的一份（选择器用它）；只刷新 /providers
+        // 会让新模型在聊天选择器里「看不见」，直到改一次供应商名（那条路径
+        // 恰好会顺带 loadModels）。保存后两份一起刷。
+        .then(() => { close(); refreshModelCatalog(); toast(t('mp_save')); })
         .catch(x => err(x.message));
       return;
     }
@@ -9879,7 +9882,7 @@ function mpPickUpstream(list) {
       if (!add.length) { close(); return; }
       const models = (p.models || []).concat(add);
       api('/config', { method: 'PATCH', body: { providers: [{ id: p.id, models: models }] } })
-        .then(() => { close(); loadProviders().then(() => { mpList(); mpDetail(); }); toast(t('mp_imp_done').replace('{n}', String(add.length))); })
+        .then(() => { close(); refreshModelCatalog(); toast(t('mp_imp_done').replace('{n}', String(add.length))); })
         .catch(x => toast(x.message));
       return;
     }
@@ -9888,9 +9891,18 @@ function mpPickUpstream(list) {
 
 function pushProvider(p) {
   api('/config', { method: 'PATCH', body: { providers: [p] } })
-    .then(() => loadProviders())
-    .then(() => loadModels())
+    .then(() => refreshModelCatalog())
     .catch(e => toast(e.message));
+}
+
+/**
+ * 供应商/模型改动后的统一刷新：设置页（MPROV）和聊天选择器（MODELS）是
+ * 两份独立数据，只刷一半就会出现「设置里有了、选择器里没有」。
+ */
+function refreshModelCatalog() {
+  return loadProviders()
+    .then(() => loadModels())
+    .then(() => { if ($('#mpl')) { mpList(); mpDetail(); } });
 }
 
 /* ==================================================================
@@ -10921,7 +10933,7 @@ $('#sp').addEventListener('click', async e => {
       }
     }).then(() => {
       mpSel = id;
-      loadProviders().then(() => { mpList(); mpDetail(); });
+      return refreshModelCatalog();
     }).catch(e => toast(e.message));
     return;
   }
@@ -10976,7 +10988,7 @@ $('#sp').addEventListener('click', async e => {
         .catch(err => toast(err.message));
       return;
     }
-    loadProviders().then(() => { mpList(); mpDetail(); toast(t('mp_refreshed') || 'ok'); });
+    refreshModelCatalog().then(() => toast(t('mp_refreshed') || 'ok'));
     return;
   }
 });
