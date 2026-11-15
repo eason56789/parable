@@ -144,8 +144,13 @@ body.chat #chat{opacity:1;pointer-events:auto}
 .th{margin:0 0 10px;font:14px var(--sans);color:var(--fg2)}
 .thh{display:flex;align-items:center;gap:4px;background:none;border:0;cursor:pointer;padding:4px 0;color:inherit}
 .thh svg{width:14px;height:14px;transition:transform calc(.45s * var(--animd)) cubic-bezier(.32,.72,0,1)}.th.open .thh svg{transform:rotate(180deg)}
-.shim{background:linear-gradient(90deg,var(--fg2) 35%,var(--fg) 50%,var(--fg2) 65%) 0 0/250% 100%;-webkit-background-clip:text;background-clip:text;color:transparent;animation:shim calc(1.8s * var(--animd)) linear infinite}
-@keyframes shim{to{background-position:-250% 0}}
+/* 走光（shimmer）：2.5 倍宽的渐变条整体左移一个身位。
+   位置必须用百分比 0%→100%——百分比对齐的是「图右边缘贴容器右边缘」，
+   位移正好是一个图宽；写成 0→-250% 会把图整块推出容器，背景不再覆盖
+   文字，而 color:transparent 下没背景＝隐形：光扫一半、字直接消失、
+   一个周期后再从头开始。 */
+.shim{background:linear-gradient(90deg,var(--fg2) 35%,var(--fg) 50%,var(--fg2) 65%) 0 0/250% 100%;-webkit-background-clip:text;background-clip:text;color:transparent;animation:shim calc(1.8s * var(--animd)) linear infinite;animation-delay:var(--shimd,0s)}
+@keyframes shim{from{background-position:0% 0}to{background-position:100% 0}}
 .thb{display:grid;grid-template-rows:0fr;opacity:0;transition:grid-template-rows calc(.55s * var(--animd)) cubic-bezier(.32,.72,0,1),opacity calc(.45s * var(--animd))}
 .th.open .thb{grid-template-rows:1fr;opacity:1}
 .thb>div{position:relative;overflow:hidden;border-left:2px solid var(--line);padding-left:12px;margin-left:4px;line-height:1.6}
@@ -256,7 +261,7 @@ body.chat #chat{opacity:1;pointer-events:auto}
 .wk.done .wd{animation:none;opacity:.55;transform:none}
 /* ---- 顶部状态行（ZCode 式）：运行中「工作中 x 秒」钉在消息最上方不收起；
    完成后变「已工作 x 秒」开合头，点击折叠过程、只留最后一条消息 ---- */
-.wktop{display:flex;align-items:center;gap:7px;font:12px var(--sans);color:var(--fg2);margin:0 0 2px;min-height:18px}
+.wktop{display:flex;align-items:center;gap:7px;font:13.5px/1.35 var(--sans);color:var(--fg2);margin:0 0 3px;min-height:20px}
 .wktop .wkd{width:6px;height:6px;border-radius:50%;background:var(--accent);opacity:.55;flex:none}
 .wktop.on .wkd{width:11px;height:11px;background:none;border:2px solid color-mix(in srgb,var(--accent) 30%,transparent);border-top-color:var(--accent);opacity:1;animation:wkspin calc(.9s * var(--animd)) linear infinite}
 @keyframes wkspin{to{transform:rotate(360deg)}}
@@ -3841,8 +3846,11 @@ function uMsg(q, idx, atts) {
   if (idx != null) d.dataset.mi = idx;
   const b = document.createElement('div');
   b.className = 'ub';
+  // 附件芯片放在黑色气泡外面（气泡只包正文）：芯片自带药丸底色，
+  // 塞进气泡里会变成「黑框包着两块浅色药丸」，层级看着很脏。
+  let row = null;
   if (atts && atts.length) {
-    const row = document.createElement('div');
+    row = document.createElement('div');
     row.className = 'uatt';
     atts.forEach(a => {
       const s = document.createElement('span');
@@ -3859,7 +3867,6 @@ function uMsg(q, idx, atts) {
       }
       row.append(s);
     });
-    b.append(row);
   }
   if (q) {
     // 保存原文：显示层会去 emoji、Markdown 会丢格式，复制必须给用户原样内容。
@@ -3876,7 +3883,10 @@ function uMsg(q, idx, atts) {
     '<button class="ib" data-ue="' + idx + '" title="' + t('editmsg_q') + '">' + ic('edit') + '</button>' +
     '<button class="ib" data-uc="' + idx + '" title="' + t('copy') + '">' + ic('copy') + '</button>' +
     '<button class="ib danger" data-ud="' + idx + '" title="' + t('delmsg') + '">' + ic('trash') + '</button>';
-  d.append(b, acts);
+  // 芯片行在气泡之上；纯附件消息（无正文）就不再画一个空黑框。
+  if (row) d.append(row);
+  if (q) d.append(b);
+  d.append(acts);
   // 用户气泡不渲染时间戳：实时视图从不显示，历史重放一显示就成了
   // 「来回切换会多出来」的多余时间（回答侧的时间戳 + 计时条已足够定位）。
   feed.append(d);
@@ -4005,7 +4015,36 @@ function stopSpin(a, ms) {
     if (tx) tx.textContent = t('worked_done').replace('{t}', fmtDur(total));
   }
   wkStart = 0;
+  tgSettle(a);
   foldTurnProcess(a);
+}
+
+/**
+ * 收尾/被用户打断后把「运行态」收干净：
+ *  - 组头预览的走光是 CSS 无限动画，打断时后端不再吐 tool.end，卡片停在
+ *    run 态、组头也不会再被重绘，光就一直扫下去 —— 必须显式收回；
+ *  - 卡在「正在运行」的卡片标成已中断，否则看着像命令还在跑。
+ */
+function tgSettle(a) {
+  const host = (a && a.isConnected) ? a : feed;
+  if (!host) return;
+  host.querySelectorAll('.st-tx.run').forEach(st => {
+    const card = st.closest('.ec');
+    if (!card) return;
+    st.classList.remove('run');
+    st.textContent = runLabel('stop', card.dataset.tool);
+  });
+  // 重绘组头（回统计文案）。此刻 busy 可能还是 true，tgPaint 的 running
+  // 判定会把走光再挂回来、文案也停在「最新命令预览」——临时按结束态重绘，
+  // 末尾再兜底剥一次，顺序不能反。
+  const wasBusy = busy;
+  busy = false;
+  host.querySelectorAll('.tgrp').forEach(g => tgPaint(g));
+  busy = wasBusy;
+  host.querySelectorAll('.tgrp-tx.shim').forEach(tx => {
+    tx.classList.remove('shim');
+    tx.style.removeProperty('--shimd');
+  });
 }
 
 /**
@@ -4168,6 +4207,22 @@ function tgFollow(bin) {
   if (atBottom) bin.scrollTop = bin.scrollHeight;
 }
 
+/**
+ * 走光相位同步：节点被移动/重建时浏览器会把 CSS 动画从 0 重新播放，
+ * 肉眼看就是「光扫到一半突然停住、从头再来」。用墙钟算一个负的
+ * animation-delay，让新节点直接接上全局相位，任何时刻重建都无缝。
+ */
+const SHIM_P = 1.8;
+const SHIM_T0 = performance.now();
+function shimSync(el) {
+  if (!el) return el;
+  const raw = getComputedStyle(document.documentElement).getPropertyValue('--animd').trim();
+  const p = SHIM_P * (parseFloat(raw) || 1);
+  const off = ((performance.now() - SHIM_T0) / 1000) % p;
+  el.style.setProperty('--shimd', '-' + off.toFixed(3) + 's');
+  return el;
+}
+
 /** 刷新组头：运行中（收起态）显示滚动预览，其余显示统计。只写有变化的部分。 */
 function tgPaint(g) {
   const bin = g.querySelector('.tgrp-bin');
@@ -4185,6 +4240,7 @@ function tgPaint(g) {
     const fi = act.querySelector('.fi b');
     want = (fi && fi.textContent) || act.dataset.desc || act.dataset.tool || '';
     tx.classList.add('shim');
+    shimSync(tx);
   } else {
     want = tgStats(cards);
     tx.classList.remove('shim');
@@ -5138,6 +5194,7 @@ function renderReasoning(text) {
     curThinkEl.className = 'th open';
     curThinkEl.innerHTML = '<button class="thh"><span class="shim">' + t('thinking') + '</span>' +
       ic('chev') + '</button><div class="thb"><div class="thbody"></div></div>';
+    shimSync(curThinkEl.querySelector('.shim'));
     const thinkEl = curThinkEl;
     bindThink(thinkEl);
     // Append at the current end of the body: reasoning that happens after a
@@ -6235,6 +6292,9 @@ async function refreshGoalBadge() {
 /** Stop the in-flight turn; first-message turns defer until the session id exists. */
 function stopTurn() {
   if (sig) sig.stop = true;
+  // 立刻收回运行态走光与「正在运行」标签，不等 abort 往返；否则用户按下
+  // 停止后，正在执行的那条命令还在扫光，看着像没打断成功。
+  if (curA) tgSettle(curA);
   if (conv && conv.id) api('/interrupt', { method: 'POST', body: { session_id: conv.id } }).catch(() => {});
   else pendingInterrupt = true;
 }
@@ -6345,7 +6405,7 @@ feed.addEventListener('click', e => {
   if (uc) {
     const m = uc.closest('.u');
     // 优先复制存储的原文（未被 emoji 过滤、未丢 Markdown 空白）。
-    copyText(m ? (m.dataset.raw != null ? m.dataset.raw : m.querySelector('.ub').innerText) : '');
+    copyText(m ? (m.dataset.raw != null ? m.dataset.raw : ((m.querySelector('.ub') || {}).innerText || '')) : '');
     return;
   }
   const ud = e.target.closest('[data-ud]');
@@ -6476,8 +6536,9 @@ function editUser(el) {
   if (!conv || !conv.id || idx == null || idx === 'null') { toast(t('toast')); return; }
   if (el.dataset.editing === '1') return;
   const b = el.querySelector('.ub');
+  if (!b) return;                        // 纯附件消息没有正文气泡
   const orig = el.dataset.raw != null ? el.dataset.raw : b.innerText.trim();
-  // 文本行 = .ub 里非附件行的第一个块；附件行（.uatt）原样保留。
+  // 正文块 = 气泡里第一个非附件子节点（附件行现在挂在气泡外面，这里只是兜底）。
   const txDiv = [...b.children].find(n => !n.classList.contains('uatt')) || b.lastElementChild;
   if (!txDiv) return;
   el.dataset.editing = '1';
@@ -7877,7 +7938,11 @@ async function restamp() {
       node.dataset.mi = i;
       node.dataset.miEnd = i + 1;
       // restamp 会先清掉 raw；用户消息的原文在存储里，补回来供复制使用。
-      node.dataset.raw = tx.map(x => x.text).join('\n\n');
+      // 附件散文注记（The user attached…）不是用户说的：重放时已由芯片
+      // 取代，这里也剥掉——否则编辑框会把整段附注倒回输入框。
+      node.dataset.raw = tx.map(x => x.text)
+        .filter(t => !/^The user attached the following files:/.test(String(t).trim()))
+        .join('\n\n');
       light(node);
       ni++;
     } else {
@@ -8110,6 +8175,7 @@ function runLabel(state, tool) {
   const cmd = tool === 'bash' || tool === 'shell';
   if (state === 'run') return zh ? (cmd ? '正在运行命令' : '正在运行') : 'Running';
   if (state === 'err') return zh ? (cmd ? '命令失败' : '运行失败') : 'Failed';
+  if (state === 'stop') return zh ? (cmd ? '命令已中断' : '已中断') : 'Stopped';
   return zh ? (cmd ? '已运行命令' : '已运行') : 'Ran';
 }
 
@@ -8384,7 +8450,7 @@ async function exportChat() {
     const walk = feed.querySelectorAll('.u, .a');
     walk.forEach(el => {
       if (el.classList.contains('u')) {
-        md += '## You\n\n' + el.querySelector('.ub').innerText + '\n\n';
+        md += '## You\n\n' + (((el.querySelector('.ub') || {}).innerText) || '') + '\n\n';
       } else {
         md += '## Parable\n\n' + el.querySelector('.ab').innerText + '\n\n';
       }
