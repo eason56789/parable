@@ -941,6 +941,10 @@ async fn patch_config(
         return unauthorized();
     }
     let mut cfg = state.config.write().await;
+    // 别的进程可能刚改过配置（桌面壳 + 浏览器开发网关共用一份 config.toml）：
+    // 先取盘上最新状态再合并本次 PATCH，否则旧快照落盘会把对方新增的
+    // 供应商整段抹掉——这就是「重启后配置好的供应商消失」的根因。
+    cfg.refresh_from_disk();
     // 先处理删除标记({id, deleted:true}),再做字段合并。
     crate::config::apply_patch_deletions(&mut cfg, &v);
     merge_config(&mut cfg, &v);
@@ -1971,6 +1975,7 @@ async fn apply_profile(
         return unauthorized();
     }
     let mut cfg = state.config.write().await;
+    cfg.refresh_from_disk();
     let Some(p) = cfg.profiles.iter().find(|p| p.id == r.id).cloned() else {
         return bad_request("profile 不存在");
     };
@@ -2084,6 +2089,7 @@ async fn mcp_save(
     }
     {
         let mut cfg = state.config.write().await;
+        cfg.refresh_from_disk();
         cfg.mcp_servers = r.servers.clone();
         if let Err(e) = cfg.save() {
             return server_error(e);
@@ -3623,6 +3629,9 @@ pub async fn serve_in(
                 }
             };
             let mut cfg = config.write().await;
+            // 启动时后台补免费目录也会落盘：先取盘上最新配置，别把别的
+            // 进程（桌面壳）刚写入的供应商用启动时的旧快照盖掉。
+            cfg.refresh_from_disk();
             let Some(p) = cfg.providers.iter_mut().find(|p| p.id == "opencode-free") else {
                 return;
             };

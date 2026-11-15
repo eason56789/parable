@@ -675,6 +675,25 @@ impl Config {
         Ok(())
     }
 
+    /// 写配置前先把盘上的最新状态取回来。
+    ///
+    /// 一份 config.toml 可能同时被多个进程使用（桌面壳、浏览器里的开发网关、
+    /// CLI）。每个进程启动时各读一份内存快照，之后任何一次 save() 都会把
+    /// **整份快照**写回去——不先取盘，就会用旧快照覆盖别的进程刚写进去的
+    /// 供应商/模型，表现为「配好的供应商一重启就没了」。所有写配置的入口
+    /// 都先调本方法，再做自己的增量修改。
+    pub fn refresh_from_disk(&mut self) {
+        let path = Self::config_path();
+        let Ok(s) = std::fs::read_to_string(&path) else {
+            return;
+        };
+        let Ok(disk) = toml::from_str::<Config>(&s) else {
+            return;
+        };
+        *self = disk;
+        self.normalize();
+    }
+
     /// A provider + model resolved from the `providerId/modelId` selector string.
     pub fn resolve_model(&self, sel: &str) -> Option<(&ProviderConfig, &ModelConfig)> {
         let sel = if sel.is_empty() { self.model.as_str() } else { sel };
