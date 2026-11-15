@@ -1210,6 +1210,24 @@ body.dragging #main{outline:2px dashed var(--accent);outline-offset:-8px}
 #jump:hover{color:var(--fg)}
 #jump svg{width:17px;height:17px}
 
+/* ============ 左侧快速跳转（ZCode turn navigator） ============
+   每条用户提问一根短条，位置按它在会话里的顺序排；滚动时当前轮高亮，
+   悬停哪根就把附近几根按距离放大（山的形状），点一下平滑滚到那一轮。 */
+#tnav{position:absolute;left:0;top:0;bottom:0;width:48px;z-index:4;pointer-events:none;opacity:0;visibility:hidden;transform:translateX(-6px);transition:opacity calc(.18s * var(--animd)),transform calc(.22s * var(--animd)),visibility calc(.18s * var(--animd))}
+#tnav.on{opacity:1;visibility:visible;transform:none}
+/* 窄窗口正文会贴到这条轨道上，直接隐藏（ZCode 的门槛同款语义） */
+@media(max-width:1000px){#tnav{display:none}}
+#tnav-rail{pointer-events:auto;position:absolute;left:12px;top:50%;transform:translateY(-50%);width:36px;max-height:calc(100% - 150px);overflow-y:auto;overflow-x:hidden;padding:3px 0;scrollbar-width:none}
+#tnav-rail::-webkit-scrollbar{display:none}
+.tn{display:flex;align-items:center;width:36px;height:10px;padding:0;border:0;background:none;cursor:pointer;outline:none}
+.tn i{display:block;width:12px;height:2px;border-radius:99px;background:var(--fg2);transform-origin:left center;transition:transform calc(.18s * var(--animd)) cubic-bezier(.32,.72,0,1),opacity calc(.18s * var(--animd)),background-color calc(.18s * var(--animd))}
+.tn.on i{background:var(--fg)}
+.tn:focus-visible i{background:var(--accent)}
+#tnav-card{position:fixed;z-index:75;width:320px;max-width:calc(100vw - 24px);padding:11px 13px;background:var(--input);border:.5px solid var(--line);border-radius:12px;box-shadow:0 12px 36px rgba(0,0,0,.28);opacity:0;pointer-events:none;transform:translateX(-4px);transition:opacity calc(.14s * var(--animd)),transform calc(.16s * var(--animd))}
+#tnav-card.on{opacity:1;transform:none}
+#tnav-card .tnu{font:13.5px/1.45 var(--sans);font-weight:500;color:var(--fg);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;white-space:pre-line;overflow-wrap:anywhere}
+#tnav-card .tna{margin-top:7px;font:13px/1.5 var(--sans);color:var(--fg2);display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;white-space:pre-line;overflow-wrap:anywhere}
+
 /* ============ 长会话折叠占位条 ============ */
 .foldsent{display:flex;justify-content:center;padding:10px 0 4px}
 .foldsent .btn{font-size:12px;color:var(--fg2);padding:5px 14px;border-radius:99px;background:var(--hov);border:0}
@@ -1557,6 +1575,8 @@ body.dragging #main{outline:2px dashed var(--accent);outline-offset:-8px}
       <div id="mh"><span id="ttl"></span><span data-ic="chev" style="width:14px;color:var(--fg2)"></span></div>
       <div id="chat"><div class="col" id="feed"></div></div>
       <button id="jump" title="回到最新"><span data-ic="chev"></span></button>
+      <div id="tnav"><div id="tnav-rail"></div></div>
+      <div id="tnav-card"><div class="tnu"></div><div class="tna"></div></div>
       <div id="pg"><div></div></div>
       <div id="comp">
         <div class="gr"><span id="gt"></span></div>
@@ -1768,6 +1788,7 @@ const L = {
     working:'工作中', worked_done:'已工作 {t}', sec_unit:'秒',
     dur_s:'{n} 秒', dur_m:'{n} 分',
     copy:'复制', copied:'已复制', save:'保存', saved:'已保存', rd:'已读取', rdn:'{n} 行', ed:'已编辑',
+    tnav_jump:'跳到第 {n} 轮', tnav_run:'正在工作中…', tnav_empty:'（本轮还没有正文）', tnav_noq:'（只有附件）',
     fetched:'已获取', searched:'已搜索',
     dnd:'已拒绝，未修改文件', wt:'等待权限…', wp:'Parable 想要执行这个操作',
     fail:'失败',
@@ -2000,6 +2021,7 @@ const L = {
     working:'Working', worked_done:'Worked for {t}', sec_unit:'s',
     dur_s:'{n}s', dur_m:'{n}m',
     copy:'Copy', copied:'Copied', save:'Save', saved:'Saved', rd:'Read', rdn:'{n} lines', ed:'Edited',
+    tnav_jump:'Jump to turn {n}', tnav_run:'Working…', tnav_empty:'(no reply text yet)', tnav_noq:'(attachments only)',
     fetched:'Fetched', searched:'Searched',
     dnd:'Denied, file unchanged', wt:'Waiting for permission…', wp:'Parable wants to run this',
     fail:'failed',
@@ -3199,6 +3221,144 @@ $('#jump').onclick = () => {
   chat.scrollTo({ top: chat.scrollHeight, behavior: 'smooth' });
   $('#jump').classList.remove('on');
 };
+
+/* ---------------------------------------------------------------- 左侧快速跳转 */
+/**
+ * 会话轨道：每条用户提问一根短条（ZCode 的 turn navigator）。
+ *  - 当前轮（视口顶部落在哪一轮）那根变亮；
+ *  - 鼠标悬停时按距离放大成「山」（0→×2.6，1→×1.7，2→×1.25，其余×1），
+ *    并弹出这一轮的问 + 答摘要；
+ *  - 点一下平滑滚到那一轮。
+ * 顶位缓存进 items[].top，滚动时只做比较，不逐条量布局。
+ */
+const TNAV = { items: [], active: -1, hover: -1, timer: 0 };
+
+/** 建目录：只记节点与轮次顶位；摘要文字在悬停时现算，流式期间不反复读全文。 */
+function tnavBuild() {
+  const us = [...feed.children].filter(n => n.classList.contains('u'));
+  const items = us.map(u => {
+    let a = null;
+    for (let n = u.nextElementSibling; n && !n.classList.contains('u'); n = n.nextElementSibling) {
+      if (n.classList.contains('a')) a = n;
+    }
+    return { el: u, a: a, top: u.offsetTop };
+  });
+  TNAV.items = items;
+  tnavPaint();
+  tnavTrack();
+}
+
+function tnavPaint() {
+  const wrap = $('#tnav'), rail = $('#tnav-rail');
+  if (!wrap || !rail) return;
+  const n = TNAV.items.length;
+  const show = n >= 2 && !!(conv && conv.id);
+  wrap.classList.toggle('on', !!show);
+  if (!show) { if (rail.childElementCount) rail.innerHTML = ''; return; }
+  if (rail.childElementCount !== n) {
+    rail.innerHTML = '';
+    TNAV.items.forEach((it, i) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'tn';
+      b.dataset.i = i;
+      b.setAttribute('aria-label', t('tnav_jump').replace('{n}', String(i + 1)));
+      b.innerHTML = '<i></i>';
+      rail.append(b);
+    });
+  }
+  const focus = TNAV.hover >= 0 ? TNAV.hover : TNAV.active;
+  [...rail.children].forEach((b, i) => {
+    const d = focus < 0 ? 9 : Math.abs(i - focus);
+    b.firstElementChild.style.transform = 'scaleX(' + (d === 0 ? 2.6 : d === 1 ? 1.7 : d === 2 ? 1.25 : 1) + ')';
+    b.firstElementChild.style.opacity = String(d === 0 ? 1 : d === 1 ? .86 : d === 2 ? .72 : .58);
+    b.classList.toggle('on', i === TNAV.active);
+  });
+}
+
+/** 视口顶部落在哪一轮，哪根条就是「当前」；轮次多时轨道自己跟着滚。 */
+function tnavTrack() {
+  if (!TNAV.items.length) return;
+  const probe = chat.scrollTop + 72;
+  let idx = 0;
+  TNAV.items.forEach((it, i) => { if (it.top <= probe) idx = i; });
+  if (idx === TNAV.active) return;
+  TNAV.active = idx;
+  tnavPaint();
+  const rail = $('#tnav-rail'), b = rail && rail.children[idx];
+  if (!b) return;
+  const rt = rail.scrollTop, rb = rt + rail.clientHeight;
+  const bt = b.offsetTop, bb = bt + b.offsetHeight;
+  if (bt < rt) rail.scrollTop = Math.max(0, bt - 6);
+  else if (bb > rb) rail.scrollTop = bb - rail.clientHeight + 6;
+}
+
+/** 悬停摘要：现读这一轮的问与答（折叠不影响正文，.ab 一直在）。 */
+function tnavPreview(i) {
+  const it = TNAV.items[i];
+  if (!it) return { user: '', asst: '' };
+  const ub = it.el.querySelector('.ub');
+  const user = ((it.el.dataset.raw != null ? it.el.dataset.raw : (ub ? ub.innerText : '')) || '').trim() || t('tnav_noq');
+  let asst = '';
+  if (it.a) {
+    const ab = it.a.querySelector('.ab');
+    asst = ab ? ab.innerText.trim() : '';
+    if (!asst) asst = it.a.querySelector('.wktop.on') ? t('tnav_run') : t('tnav_empty');
+  }
+  return { user: user, asst: asst || t('tnav_empty') };
+}
+
+function tnavCard(i, open) {
+  const card = $('#tnav-card');
+  if (!card) return;
+  const rail = $('#tnav-rail'), b = rail && rail.children[i];
+  if (!open || !b) { card.classList.remove('on'); return; }
+  const p = tnavPreview(i);
+  card.querySelector('.tnu').textContent = p.user.slice(0, 220);
+  card.querySelector('.tna').textContent = p.asst.slice(0, 320);
+  card.classList.add('on');
+  const r = b.getBoundingClientRect();
+  const w = card.offsetWidth || 320, h = card.offsetHeight || 90;
+  card.style.left = Math.max(8, Math.min(r.right + 10, innerWidth - w - 8)) + 'px';
+  card.style.top = Math.max(8, Math.min(r.top + r.height / 2 - h / 2, innerHeight - h - 8)) + 'px';
+}
+
+const tnavRail = $('#tnav-rail');
+if (tnavRail) {
+  tnavRail.onpointerover = e => {
+    const b = e.target.closest && e.target.closest('.tn');
+    if (!b) return;
+    const i = +b.dataset.i;
+    if (i === TNAV.hover) return;
+    TNAV.hover = i;
+    tnavPaint();
+    tnavCard(i, true);
+  };
+  tnavRail.onpointerleave = () => {
+    TNAV.hover = -1;
+    tnavPaint();
+    tnavCard(0, false);
+  };
+  tnavRail.onclick = e => {
+    const b = e.target.closest && e.target.closest('.tn');
+    const it = b && TNAV.items[+b.dataset.i];
+    if (!it) return;
+    stick = false;
+    chat.scrollTo({ top: Math.max(0, it.el.offsetTop - 16), behavior: 'smooth' });
+  };
+}
+// 滚动只读缓存里的顶位，不触发布局。
+chat.addEventListener('scroll', tnavTrack, { passive: true });
+// 会话渲染/流式追加/轮次折叠都会改 DOM：节流重建目录（每 400ms 至多一次）。
+const tnavSchedule = () => {
+  if (TNAV.timer) return;
+  TNAV.timer = setTimeout(() => { TNAV.timer = 0; tnavBuild(); }, 400);
+};
+if (typeof MutationObserver !== 'undefined') {
+  new MutationObserver(tnavSchedule).observe(feed, { childList: true, subtree: true });
+}
+new ResizeObserver(tnavSchedule).observe(feed);
+new ResizeObserver(tnavSchedule).observe($('#main'));
 
 /** Full render of a markdown-ish string into `cur` (animated unless `inst`). */
 async function inline(cur, text, sig, inst, sp0) {
