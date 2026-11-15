@@ -320,8 +320,9 @@ textarea::placeholder{color:var(--fg2)}
 .ms>span{min-width:0;max-width:9.5rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ms.todo{color:var(--fg2)}.ms.todo svg{opacity:.7}
 /* ZCode 风格模型选择器：左供应商 / 右模型清单 / 底部思考强度滑杆 */
-.pk{display:flex;align-items:stretch;width:min(568px,calc(100vw - 32px));max-height:min(520px,70vh)}
-.pkl{width:198px;flex:none;display:flex;flex-direction:column;border-right:.5px solid var(--line);min-height:0}
+/* --pkmax 由 placeMM() 按胶囊上方实际可用高度写入：窗口再矮也不会顶出屏幕。 */
+.pk{display:flex;align-items:stretch;width:min(480px,calc(100vw - 24px));max-height:var(--pkmax,min(440px,70vh))}
+.pkl{width:176px;flex:none;display:flex;flex-direction:column;border-right:.5px solid var(--line);min-height:0}
 .pklst{flex:1;min-height:0;overflow:auto;padding:2px}
 .pkp{display:flex;align-items:center;gap:8px;width:100%;padding:9px 9px;border:0;background:none;color:var(--fg);border-radius:9px;cursor:pointer;text-align:left}
 .pkp:hover{background:var(--hov)}.pkp.on{background:var(--hov)}
@@ -332,8 +333,8 @@ textarea::placeholder{color:var(--fg2)}
 .pkmanage{border:0;border-top:.5px solid var(--line);background:none;color:var(--fg2);padding:11px 12px;font:12.5px var(--sans);cursor:pointer;text-align:left;border-radius:0 0 0 12px}
 .pkmanage:hover{color:var(--fg);background:var(--hov)}
 .pkr{flex:1;min-width:0;display:flex;flex-direction:column;padding:6px 8px 10px}
-.pkml{flex:1;min-height:0;overflow:auto;max-height:330px}
-.pkm{display:flex;align-items:center;gap:8px;width:100%;padding:9px 8px;border:0;background:none;color:var(--fg);border-radius:8px;cursor:pointer;text-align:left}
+.pkml{flex:1;min-height:0;overflow:auto}
+.pkm{display:flex;align-items:center;gap:8px;width:100%;padding:7px 8px;border:0;background:none;color:var(--fg);border-radius:8px;cursor:pointer;text-align:left}
 .pkm:hover{background:var(--hov)}.pkm.on{background:var(--hov)}
 .pkm .pknm{font:14px var(--sans);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .pkm svg{width:15px;height:15px;flex:none;color:var(--accent)}
@@ -349,7 +350,10 @@ textarea::placeholder{color:var(--fg2)}
 .tools{min-width:0}
 /* 计划模式开启时的可见标识 */
 #planflag{display:none;align-items:center;gap:4px;padding:3px 9px;border-radius:99px;background:color-mix(in srgb,var(--accent) 14%,transparent);color:var(--accent);font:12px var(--sans);white-space:nowrap}
-#mm{right:0;bottom:calc(100% + 6px);min-width:280px;transform-origin:bottom right}
+/* 模型弹层：position:fixed + JS 摆位（placeMM）。原先贴在胶囊上用 absolute
+   right:0/bottom:100%，窗口一矮或面板一窄就直接顶出屏幕——fixed 才能按视口
+   夹取左上角。 */
+#mm{position:fixed;left:auto;right:auto;bottom:auto;min-width:0;transform-origin:bottom right;z-index:70}
 .send{width:32px;height:32px;border-radius:8px;border:0;background:var(--accent);color:#fff;display:grid;place-items:center;cursor:pointer;margin-left:4px;transition:opacity calc(.3s * var(--animd)),transform calc(.3s * var(--animd)),filter calc(.2s * var(--animd))}
 .send svg{width:18px;height:18px}.send:disabled{opacity:.35;cursor:default}
 .send:not(:disabled):hover{filter:brightness(1.08)}.send:not(:disabled):active{transform:scale(.9)}
@@ -8891,15 +8895,52 @@ function pkRenderInto(root) {
   };
 }
 
-function renderMM() { pkRenderInto($('#mm')); }
+/**
+ * 模型弹层摆位：贴在模型胶囊上方，但四边都夹进视口。
+ *  - 高度上限 = 胶囊顶到视口顶之间的实际空间（留 12px 呼吸位），写进
+ *    --pkmax；内容超出让 .pklst/.pkml 自己滚，弹层永远不出屏。
+ *  - 横向优先右对齐胶囊，左侧越界时往右推；视口比弹层还窄就吃满。
+ */
+function placeMM() {
+  const m = $('#mm'), btn = $('#mb');
+  if (!m || !btn) return;
+  // #comp 在落地页带 transform（translateY 过渡），会把 position:fixed 的包含块
+  // 从视口改成它自己——弹层坐标就整体偏移。挂到 body 下才真的是视口 fixed。
+  if (m.parentElement !== document.body) document.body.append(m);
+  const r = btn.getBoundingClientRect();
+  // 垂直锚点用整个输入框的顶边，而不是胶囊的顶边：胶囊在输入框底部那一行，
+  // 贴着它会让弹层压住正文输入区。横向仍对齐胶囊右缘。
+  const boxEl = btn.closest('.box') || btn;
+  const top0 = boxEl.getBoundingClientRect().top;
+  const pad = 8, gap = 6;
+  // 弹层自身还有 padding+边框（约 12px）：只把剩下的空间给 .pk，否则总量
+  // 超出去，top 被夹到 8 后反而压住输入框。下限只保 96px：极矮窗口宁可
+  // 矮到只剩两行（列表自己滚），也不能盖住输入框。
+  const avail = Math.max(96, top0 - gap - pad - 12);
+  m.style.setProperty('--pkmax', avail + 'px');
+  // 先让受 --pkmax 约束的宽度/高度落定，再量真实尺寸做水平夹取。
+  const w = m.offsetWidth || 480, h = m.offsetHeight || 320;
+  let left = r.right - w;                          // 右对齐胶囊
+  left = Math.max(pad, Math.min(left, innerWidth - w - pad));
+  let top = top0 - gap - h;                        // 贴在输入框上方
+  top = Math.max(pad, top);
+  m.style.left = left + 'px';
+  m.style.top = top + 'px';
+}
+
+function renderMM() { pkRenderInto($('#mm')); placeMM(); }
+// 切供应商 / 换模型后高度会变（模型条数不同）：内容一变就重新夹取位置。
+$('#mm').__place = placeMM;
 
 $('#mb').onclick = e => {
   e.stopPropagation();
   const m = $('#mm'), o = m.classList.contains('open');
   document.querySelectorAll('.pop.open').forEach(p => p.classList.remove('open'));
   document.querySelectorAll('.pickm').forEach(p => p.remove());
-  if (!o) { renderMM(); m.classList.add('open'); }
+  if (!o) { renderMM(); m.classList.add('open'); requestAnimationFrame(placeMM); }
 };
+// 视口变化（窗口缩放 / 侧栏开关）时重贴一次，别让已打开的弹层留在屏外。
+addEventListener('resize', () => { if ($('#mm') && $('#mm').classList.contains('open')) placeMM(); });
 
 /* ==================================================================
    settings modal
