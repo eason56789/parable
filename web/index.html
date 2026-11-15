@@ -6562,7 +6562,7 @@ sd.onclick = () => send();
 feed.addEventListener('click', e => {
   // ---- 用户消息 ----
   const ur = e.target.closest('[data-ur]');
-  if (ur) { if (persisted(ur.closest('.u'))) retryUser(ur.closest('.u')); return; }
+  if (ur) { regenUser(ur.closest('.u')); return; }
   const ue = e.target.closest('[data-ue]');
   if (ue) { if (persisted(ue.closest('.u'))) editUser(ue.closest('.u')); return; }
   const uc = e.target.closest('[data-uc]');
@@ -6579,7 +6579,9 @@ feed.addEventListener('click', e => {
   const b = e.target.closest('[data-a]');
   if (!b) return;
   const a = b.closest('.a'), k = b.dataset.a;
-  if (k !== 'copy' && !persisted(a)) return;
+  // 重新生成不受「已落库」限制：失败轮次/零产出的气泡本来就没有存储下标，
+  // regenFrom 会用 tailVirtualFrom 推出「从最后一条已落库消息之后重跑」。
+  if (k !== 'copy' && k !== 're' && !persisted(a)) return;
   if (k === 'copy') {
     copyText(a.dataset.raw != null ? a.dataset.raw : a.querySelector('.ab').innerText);
   } else if (k === 're' && !busy && conv && conv.id) {
@@ -6760,23 +6762,60 @@ function editUser(el) {
 }
 
 /**
- * 重试一条用户提问：只影响它下方的 agent 回应 —— 追加一个新回答到会话
- * 末尾，不删除、不改写任何既有消息。后端把原问题以 hidden 指令回灌并
- * 以空 prompt 重跑模型。
+ * 用户消息的「重新生成」：替换这条提问下面的回答，而不是在末尾凭空叠一条。
+ *  - 提问已落库：删掉它之后的一切（后续轮次一并重来），再以空 prompt 重跑；
+ *  - 提问没落库（失败发生在落库之前，或那轮直接被拒）：退回「原句重发」。
+ * 都不再受「还没落库」的限制——那正是执行失败后点重试没用的问题。
  */
-async function retryUser(el) {
+async function regenUser(el) {
   if (!el || busy) return;
+  if (!conv || !conv.id) { toast(t('toast')); return; }
   const idx = el.dataset.mi;
-  if (!conv || !conv.id || idx == null || idx === 'null') { toast(t('toast')); return; }
+  if (idx != null && idx !== 'null') { await regenFrom(el, +idx + 1, true); return; }
+  const v = tailVirtualFrom(el);
+  if (v != null) { await regenFrom(el, v, true); return; }
+  const text = (el.dataset.raw != null
+    ? el.dataset.raw
+    : ((el.querySelector('.ub') || {}).innerText || '')).trim();
+  if (!text) { toast(t('toast')); return; }
+  await resendUser(el, text);
+}
+
+/** 未落库的提问「原句重发」：摘掉尾部气泡，按普通发送重新跑一轮。 */
+async function resendUser(el, text) {
+  const sid = conv.id, gen = convGen;
+  const anchor = el.previousElementSibling;
+  const nodes = [];
+  let n = el;
+  while (n) { const nx = n.nextElementSibling; nodes.push(n); n = nx; }
+  nodes.forEach(x => x.remove());
+  resetTurn();
   busy = true;
+  expectBubble = false;   // 让 turn.start 用事件里的 text 把气泡补回来
+  sig = { stop: false };
   sync();
   try {
-    await api('/sessions/' + conv.id + '/messages/' + idx + '/retry', { method: 'POST' });
-    // 新回答由 SSE 驱动（turn.start → 流式增量），无需本地补画。
-  } catch (e) {
+    await api('/chat', {
+      method: 'POST',
+      body: {
+        session_id: sid,
+        text: text,
+        model: S.model,
+        permission_mode: S.perm,
+        thinking_level: Math.max(0, Math.min(3, +S.lvl || 0))
+      }
+    });
+    if (gen !== convGen || !conv || conv.id !== sid) return;
+    startTurnProbe();
+    restamp();
+  } catch (err) {
+    if (gen !== convGen || !conv || conv.id !== sid) return;
     busy = false;
-    toast(e.message);
+    stopTurnProbe();
     sync();
+    const ref = (anchor && anchor.parentNode === feed) ? anchor.nextSibling : null;
+    nodes.forEach(x => { try { feed.insertBefore(x, ref); } catch (e) {} });
+    toast(err.message);
   }
 }
 
@@ -6874,14 +6913,20 @@ function editAgent(el) {
  * Truncate the thread from `el` on and re-run the model on what's left — the
  * history then ends with the user's question again and the reply is a fresh
  * generation (POST /chat with retry: nothing new is appended).
+ *
+ * `fromArg` 让调用方指定截断起点：用户消息的「重新生成」要从 idx+1 起删
+ * （提问本身留着），agent 消息的「重新生成」从它自己的 idx 起删。
+ * `keepEl` = 保留 el 自己（用户消息场景）：只摘它后面的节点。
  */
-async function regenFrom(el) {
+async function regenFrom(el, fromArg, keepEl) {
   if (!el || busy || !conv || !conv.id) return;
   // 有待发送的编辑时先撤回：否则重跑的 DELETE 与编辑的 DELETE 会各截各的。
   if (pendingEdit) { restorePendingEdit(); ta.value = ''; fit(); sync(); }
   const idx = el.dataset.mi;
   let from;
-  if (idx == null || idx === 'null') {
+  if (fromArg != null) {
+    from = fromArg;
+  } else if (idx == null || idx === 'null') {
     // 未落库的尾部空气泡（模型零产出 / 失败）：按「最后一条已落库消息之后」
     // 重跑——这正是重新生成的语义，不必对着「还没落库」干等。
     const v = tailVirtualFrom(el);
@@ -6895,9 +6940,9 @@ async function regenFrom(el) {
   const sid = conv.id, gen = convGen;
   // 摘除前记住原位置：失败时按原顺序插回。直接 append 会把旧尾巴排到
   // 期间新增的气泡之后，问答顺序整个颠倒。
-  const anchor = el.previousElementSibling;
+  const anchor = keepEl ? el : el.previousElementSibling;
   const nodes = [];
-  let n = el;
+  let n = keepEl ? el.nextElementSibling : el;
   while (n) { const nx = n.nextElementSibling; nodes.push(n); n = nx; }
   nodes.forEach(x => x.remove());
   resetTurn();

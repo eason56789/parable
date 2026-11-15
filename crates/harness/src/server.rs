@@ -1528,11 +1528,11 @@ struct EditMessageReq {
 #[derive(Debug, Deserialize)]
 struct RetryMessageReq {}
 
-/// POST /api/sessions/{id}/messages/{idx}/retry — 重试一条用户提问。
+/// POST /api/sessions/{id}/messages/{idx}/retry — 重新生成一条用户提问的回答。
 ///
-/// 语义：不删除、不改写任何既有消息。读出该条用户消息原文，追加一条
-/// hidden 指令（「请重新回答这个问题」）后以空 prompt 重跑模型 —— 新
-/// 回答追加在会话末尾，用户看得见，指令本身不可见。idx 为存储下标。
+/// 语义：**替换**，不是追加。删掉这条提问之后的整段（含后续轮次），让历史
+/// 重新以这条提问收尾，再以空 prompt 重跑模型 —— 新回答落在原来的位置，
+/// 不会在会话末尾凭空多出一条。idx 为存储下标。
 async fn retry_message(
     State(state): State<SharedState>,
     headers: HeaderMap,
@@ -1551,28 +1551,15 @@ async fn retry_message(
     let Some(q) = crate::session::message_text(&m.parts) else {
         return bad_request("message has no text to retry");
     };
-    let q = q.trim().to_string();
-    if q.is_empty() {
+    if q.trim().is_empty() {
         return bad_request("message has no text to retry");
     }
-    let instruct = format!(
-        "请重新回答用户之前提出的这个问题 —— 这是对该消息的重试，请直接给出完整的新回答（不要复述这个问题本身）：
-
-{q}"
-    );
+    // 截断这条提问之后的一切：留下「以提问收尾」的历史，模型自然会作答。
+    // 旧实现是追加一条 hidden 指令 + 末尾再生成一条回答，看起来像凭空多
+    // 出来一条 agent 消息，且原回答还留在上面。
     if let Err(e) = state
         .store
-        .append_message(
-            &id,
-            crate::session::StoredMessage {
-                role: "user".into(),
-                parts: json!({"User": [{"Text": instruct}]}),
-                displays: Vec::new(),
-                turn: String::new(),
-                hidden: true,
-                created_at: crate::event::now_ms(),
-            },
-        )
+        .delete_range(&id, idx + 1, Some(msgs.len()))
         .await
     {
         return bad_request(&e.to_string());

@@ -1219,21 +1219,6 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
             }
         }
 
-        // ---- provider
-        let (provider, model_id) = match self.resolve_provider(&model_sel).await {
-            Ok(x) => x,
-            Err(e) => {
-                // 提前失败也要统一记账 + 发布 turn.end（stopReason: error）。
-                // 还没有解析出具体模型，model 留空。
-                self.finalize_turn(
-                    session_id, turn_id, t_start, &Usage::default(), 0, "error",
-                    ctx_limit, 0, 0, 0, 0, "", &Default::default(),
-                )
-                .await;
-                return Err(e);
-            }
-        };
-
         // ---- message history
         let mut history: Vec<Msg> = self.store.neutral_messages(session_id).await;
         let mut user_parts: Vec<UserPart> = Vec::new();
@@ -1270,6 +1255,24 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
                 .ok();
             history.push(Msg::User(user_parts));
         }
+
+        // ---- provider
+        // 先落库再解析供应商：供应商没配好（缺 key / 模型被删）也是「这一轮
+        // 失败」，用户的提问必须留在历史里——否则界面上那个气泡没有存储
+        // 下标，点「重新生成」只会得到一句「这条消息不在存储里」。
+        let (provider, model_id) = match self.resolve_provider(&model_sel).await {
+            Ok(x) => x,
+            Err(e) => {
+                // 提前失败也要统一记账 + 发布 turn.end（stopReason: error）。
+                // 还没有解析出具体模型，model 留空。
+                self.finalize_turn(
+                    session_id, turn_id, t_start, &Usage::default(), 0, "error",
+                    ctx_limit, 0, 0, 0, 0, "", &Default::default(),
+                )
+                .await;
+                return Err(e);
+            }
+        };
 
         // 每轮一个 Registry（带 search 配置），specs() 与工具执行共用同一实例，
         // 修复搜索配置到不了执行现场的问题。
