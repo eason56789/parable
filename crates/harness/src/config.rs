@@ -235,6 +235,10 @@ pub struct Config {
     /// 关闭 = 可见 app 窗口（围观 agent 操作）。
     #[serde(default = "default_true")]
     pub browser_headless: bool,
+    /// 用户点链接时去哪里打开："side"（内置浏览器右侧面板）/ "window"
+    /// （内置浏览器独立窗口）/ "system"（系统默认浏览器）。
+    #[serde(default = "default_link_target")]
+    pub link_target: String,
 
     // ---- 通知 ---------------------------------------------------------
     /// turn 结束且页面在后台时弹系统通知。
@@ -364,6 +368,11 @@ fn default_max_steps() -> u32 {
 fn default_ctx_warn() -> u32 {
     80
 }
+/// 默认把用户点开的链接放进内置浏览器的右侧面板：不离开当前会话，
+/// 也不打断 agent 与用户共用的那个视图。想用系统浏览器可在设置里改。
+fn default_link_target() -> String {
+    "side".into()
+}
 fn default_enter_mode() -> String {
     "enter".into()
 }
@@ -472,6 +481,7 @@ impl Default for Config {
             keep_awake: false,
             ctx_warn_pct: default_ctx_warn(),
             browser_headless: true,
+            link_target: default_link_target(),
             notify: true,
             notify_sound: false,
             auto_archive_days: 0,

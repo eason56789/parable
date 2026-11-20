@@ -1980,6 +1980,8 @@ const L = {
     askAuto:'提问自动裁决', askAutoH:'ask_user 提问 120 秒无应答时自动选第一项（适合无人值守/定时任务）',
     keepAwake:'运行中阻止休眠', keepAwakeH:'turn 运行期间阻止系统进入睡眠',
     bhHeadless:'隐藏浏览器窗口', bhHeadlessH:'内置浏览器无头运行——桌面零窗口，侧栏「内置浏览器」面板的实况截图就是视图；关闭后弹出可见 app 窗口可围观操作',
+    linkT:'链接打开位置', linkTH:'点正文里的链接、关于页的项目地址、获取 Key 这些外链时去哪里打开。内置浏览器与 agent 共用同一视图；系统浏览器则用你自己平时的登录态',
+    link_in_browser:'已在内置浏览器打开',
     ctxWarn:'上下文告警阈值', ctxWarnH:'状态栏的上下文占用百分比达到该值时变警示色（+10% 转红色）',
     notify:'后台完成通知', notifySound:'通知提示音', notifyH:'页面在后台时，一轮结束弹系统通知',
     notifySoundH:'通知伴随一声短提示音（需要允许通知）',
@@ -2234,6 +2236,8 @@ const L = {
     askAuto:'Auto-resolve questions', askAutoH:'After 120s without an answer, pick the first option (good for unattended runs)',
     keepAwake:'Keep system awake', keepAwakeH:'Prevent system sleep while a turn is running',
     bhHeadless:'Hide browser window', bhHeadlessH:'Run the built-in browser headless — no window on your desktop; the side-pane live screenshots ARE the view. Off = visible app window to watch the agent',
+    linkT:'Open links in', linkTH:'Where links from replies, the About page and the Get-key buttons open. The built-in browser shares one view with the agent; the system browser uses your own sessions and extensions',
+    link_in_browser:'Opened in the built-in browser',
     ctxWarn:'Context warn threshold', ctxWarnH:'The status-bar context percentage turns warning-colored at this percent (red at +10%)',
     notify:'Background notifications', notifySound:'Notification sound', notifyH:'System notification when a turn finishes while the page is hidden',
     notifySoundH:'Play a short beep with the notification (permission required)',
@@ -2472,7 +2476,7 @@ const DEF = {
   compactionEnabled:true, compactionPct:85, maxSteps:100, askAutoResolve:false, keepAwake:false, ctxWarnPct:80,
   notify:true, notifySound:false, autoArchiveDays:0,
   codeLineNumbers:true, codeWrap:false,
-  httpProxy:'', httpNoProxy:'', modelIoLog:false, enterMode:'enter', browserHeadless:true,
+  httpProxy:'', httpNoProxy:'', modelIoLog:false, enterMode:'enter', browserHeadless:true, linkTarget:'side',
   sessionRetentionDays:0, hooks:[], profiles:[], activeProfile:''
 };
 let S = { ...DEF };
@@ -2593,7 +2597,7 @@ function apply(pushToServer) {
         askAutoResolve: S.askAutoResolve, keepAwake: S.keepAwake, ctxWarnPct: S.ctxWarnPct,
         notify: S.notify, notifySound: S.notifySound, autoArchiveDays: S.autoArchiveDays,
         codeLineNumbers: S.codeLineNumbers, codeWrap: S.codeWrap,
-        httpProxy: S.httpProxy, httpNoProxy: S.httpNoProxy, modelIoLog: S.modelIoLog, enterMode: S.enterMode, browserHeadless: S.browserHeadless,
+        httpProxy: S.httpProxy, httpNoProxy: S.httpNoProxy, modelIoLog: S.modelIoLog, enterMode: S.enterMode, browserHeadless: S.browserHeadless, linkTarget: S.linkTarget,
         sessionRetentionDays: S.sessionRetentionDays, hooks: S.hooks, profiles: S.profiles, activeProfile: S.activeProfile
       }}).catch(() => {});
     }
@@ -6605,6 +6609,24 @@ document.addEventListener('click', e => {
   }
 });
 
+/* 外链统一路由。放在捕获阶段：正文渲染出的 markdown 链接、关于页的项目
+   按钮、模型页的「获取 Key」都是普通 <a href>，各处的 target="_blank" 在
+   WebView2 里其实打不开新标签（壳没实现 new-window handler），点下去
+   毫无反应。这里一次性接管：阻止默认行为，交给 openLink 按设置分流。
+   站内锚点（#foo）和 javascript: 不拦。 */
+document.addEventListener('click', e => {
+  const a = e.target.closest && e.target.closest('a[href]');
+  if (!a) return;
+  const href = a.getAttribute('href') || '';
+  if (!href || href.startsWith('#') || href.startsWith('javascript:')) return;
+  const abs = a.href || href;
+  if (!/^https?:/i.test(abs)) return;
+  // 本服务自己的地址（关于页「在浏览器中打开」用的是原生按钮，不是链接）
+  // 也走统一入口：系统浏览器模式下正好就是想要的落点。
+  e.preventDefault();
+  openLink(abs);
+}, true);
+
 /* ==================================================================
    send / run
    ================================================================== */
@@ -9747,7 +9769,8 @@ const SC = {
     { k:'askAutoResolve', t:'tg', l:'askAuto', h:'askAutoH' },
     { k:'keepAwake', t:'tg', l:'keepAwake', h:'keepAwakeH' },
     { k:'ctxWarnPct', t:'rg', l:'ctxWarn', h:'ctxWarnH', min:50, max:95, step:5, u:'%' },
-    { k:'browserHeadless', t:'tg', l:'bhHeadless', h:'bhHeadlessH' }
+    { k:'browserHeadless', t:'tg', l:'bhHeadless', h:'bhHeadlessH' },
+    { k:'linkTarget', t:'seg', l:'linkT', h:'linkTH', o:[['side','内置浏览器·侧栏'],['window','内置浏览器·窗口'],['system','系统浏览器']] }
   ],
   net:[
     { k:'httpProxy', t:'tx', l:'proxy', h:'proxyH' },
@@ -12514,6 +12537,62 @@ function spAddTab() {
   spRender();
 }
 
+/* ------------------------------------------------------------ 外链路由 */
+
+/**
+ * 按设置里的「链接打开位置」打开一个外部地址。
+ *
+ * - `side`   ：内置浏览器的右侧面板（默认）。不离开当前会话，和 agent
+ *              共用同一个视图，agent 之后的导航/截图都会体现在这里。
+ * - `window` ：内置浏览器的独立窗口（有壳时由桌面进程按需创建）。
+ * - `system` ：系统默认浏览器。用户自己平时的登录态、扩展、密码管理器
+ *              都在那边，适合真的要"去那个网站办事"的场景。
+ *
+ * 失败路径一律回落到系统浏览器：内部浏览器起不来（无头被禁用、CDP 端口
+ * 被占）时不该让链接变成点的没反应。
+ */
+async function openLink(url, opts) {
+  const target = (S && S.linkTarget) || 'side';
+  if (target === 'system') { openExternal(url); return; }
+  try {
+    if (target === 'side') {
+      // 已有浏览器标签就复用那一个：点第二个链接是"去下一个页面"，
+      // 不是又开一个面板（用户要的是同一个浏览器里的历史前进后退）。
+      let tab = SP.tabs.find(x => x.kind === 'browser');
+      if (!tab) tab = spOpen('browser', { url });
+      tab.st.url = url;
+      document.body.classList.remove('sp0');
+      SP.open = true;
+      SP.active = tab.id;
+      spRender();
+      await api('/browser/navigate', { method: 'POST', body: { url } });
+      setTimeout(() => { try { spBrowserState(tab); } catch (e) {} }, 900);
+      return;
+    }
+    // window：显式按可见窗口模式打开（后端会无视无头设置重建实例），
+    // 桌面壳在时由壳建窗口，否则退回外置 Chromium 的 app 窗口。
+    await api('/browser/navigate', { method: 'POST', body: { url, mode: 'window' } });
+    toast(t('link_in_browser'));
+  } catch (e) {
+    openExternal(url);
+  }
+}
+
+/**
+ * 交给系统默认浏览器。桌面壳里用 `window.open(..., '_blank')` 会被
+ * WebView2 拦下（没有实现 new-window handler），所以走服务端的
+ * /service/open —— 它只允许 loopback 地址，因此这里对普通外链改用
+ * 一个专用端点。
+ */
+function openExternal(url) {
+  try {
+    const w = window.open(url, '_blank', 'noopener');
+    if (w) return;
+  } catch (e) {}
+  api('/open-external', { method: 'POST', body: { url } })
+    .catch(() => copyText(url));
+}
+
 /** 打开某个面板类型的新标签。 */
 function spOpen(kind, opts) {
   document.body.classList.remove('sp0');
@@ -14606,6 +14685,8 @@ async function boot() {
       httpNoProxy: c.http_no_proxy ?? S.httpNoProxy,
       modelIoLog: c.model_io_log ?? S.modelIoLog,
       enterMode: c.enter_mode ?? S.enterMode,
+      browserHeadless: c.browser_headless ?? S.browserHeadless,
+      linkTarget: c.link_target ?? S.linkTarget,
       sessionRetentionDays: c.session_retention_days ?? S.sessionRetentionDays,
       hooks: c.hooks ?? S.hooks,
       profiles: c.profiles ?? S.profiles,

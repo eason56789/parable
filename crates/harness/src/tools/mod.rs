@@ -392,6 +392,7 @@ fn settings_snapshot(cfg: &crate::config::Config) -> Vec<(String, String, String
         ("auto_archive_days".into(), cfg.auto_archive_days.to_string(), "archive idle sessions after N days (0=off)".into()),
         ("code_line_numbers".into(), b(cfg.code_line_numbers), "line numbers in code blocks".into()),
         ("code_wrap".into(), b(cfg.code_wrap), "wrap long code lines".into()),
+        ("link_target".into(), cfg.link_target.clone(), "where clicked links open: side | window | system".into()),
         ("prefs".into(), cfg.prefs.clone(), "free-form user preferences, injected into the prompt".into()),
     ]
 }
@@ -507,6 +508,7 @@ fn apply_setting(
         }
         "code_line_numbers" => cfg.code_line_numbers = as_bool()?,
         "code_wrap" => cfg.code_wrap = as_bool()?,
+        "link_target" => cfg.link_target = one_of(&["side", "window", "system"])?,
         "prefs" => cfg.prefs = as_str()?,
         other => return Err(format!("unknown setting key `{other}`")),
     }
@@ -3073,7 +3075,7 @@ mod tests {
             "lang", "name", "think", "stream", "side", "thinking_level", "permission_mode",
             "followup_mode", "compaction_enabled", "compaction_pct", "max_steps", "ctx_warn_pct",
             "notify", "notify_sound", "ask_auto_resolve", "keep_awake", "auto_archive_days",
-            "code_line_numbers", "code_wrap", "prefs",
+            "code_line_numbers", "code_wrap", "link_target", "prefs",
         ];
         for (k, v, _) in settings_snapshot(&cfg) {
             assert!(allowed.contains(&k.as_str()), "snapshot advertises `{k}`");

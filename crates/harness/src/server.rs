@@ -281,6 +281,7 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/files/reveal", post(reveal_file))
         // 设置 → 关于：用系统浏览器打开本机页面 / 停止服务进程
         .route("/service/open", post(service_open))
+        .route("/open-external", post(open_external))
         .route("/shutdown", post(shutdown_service))
         // 侧边栏(side pane):文件浏览 / git 审查 / 浏览器 / 终端
         .route("/fs/tree", get(fs_tree))
@@ -842,6 +843,24 @@ struct OpenUrlReq {
     url: String,
 }
 
+/// 用系统默认浏览器打开一个 URL（调用方已校验协议）。
+fn spawn_system_browser(url: &str) -> std::io::Result<std::process::Child> {
+    #[cfg(windows)]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .spawn()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open").arg(url).spawn()
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open").arg(url).spawn()
+    }
+}
+
 /// POST /api/service/open —— 用系统默认浏览器打开本服务的页面。
 ///
 /// 设置 → 关于 →「在浏览器中打开」用它：桌面壳里的内嵌 WebView 与浏览器标签
@@ -862,15 +881,35 @@ async fn service_open(
     if !ok {
         return bad_request("only loopback URLs may be opened from here");
     }
-    #[cfg(windows)]
-    let spawned = std::process::Command::new("cmd")
-        .args(["/C", "start", "", url])
-        .spawn();
-    #[cfg(target_os = "macos")]
-    let spawned = std::process::Command::new("open").arg(url).spawn();
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let spawned = std::process::Command::new("xdg-open").arg(url).spawn();
-    match spawned {
+    match spawn_system_browser(url) {
+        Ok(_) => Json(json!({"ok": true})).into_response(),
+        Err(e) => server_error(e),
+    }
+}
+
+/// POST /api/open-external —— 用户点外链时交给系统默认浏览器。
+///
+/// 与 `service_open` 的区别是这里接受任意 http/https 地址：它是 WebView
+/// 打不开新标签（没有 new-window handler）时的唯一出路。仍然只认
+/// http/https，避免这个接口被当成任意命令启动器使用。
+async fn open_external(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(r): Json<OpenUrlReq>,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    let url = r.url.trim();
+    let lower = url.to_ascii_lowercase();
+    if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+        return bad_request("only http(s) URLs may be opened");
+    }
+    // 控制字符会把 cmd /C start 拆成多条命令，必须在拼进 shell 前挡掉。
+    if url.chars().any(|c| c.is_control()) {
+        return bad_request("invalid URL");
+    }
+    match spawn_system_browser(url) {
         Ok(_) => Json(json!({"ok": true})).into_response(),
         Err(e) => server_error(e),
     }
@@ -1123,6 +1162,15 @@ fn merge_config(cfg: &mut Config, v: &Value) {
                 }
                 "browserHeadless" | "browser_headless" => {
                     cfg.browser_headless = val.as_bool().unwrap_or(true);
+                }
+                "linkTarget" | "link_target" => {
+                    // 只接受已知值：未知值原样落盘会让前端路由到不存在的分支。
+                    let s = val.as_str().unwrap_or("side");
+                    cfg.link_target = if matches!(s, "side" | "window" | "system") {
+                        s.to_string()
+                    } else {
+                        "side".to_string()
+                    };
                 }
                 // ---- 通知 ----
                 "notify" => cfg.notify = val.as_bool().unwrap_or(true),
@@ -3419,6 +3467,11 @@ async fn browser_state(State(state): State<SharedState>, headers: HeaderMap) -> 
 #[derive(Debug, Deserialize)]
 struct BrowserNavigateReq {
     url: String,
+    /// "window" 时按可见窗口模式打开（不管 browser_headless 设置）：
+    /// 用户选了「内置浏览器·窗口」就是要看见窗口。缺省 / 其它值按普通
+    /// 导航处理（沿用当前 headless 状态）。
+    #[serde(default)]
+    mode: Option<String>,
 }
 
 /// POST /api/browser/navigate — point the controlled browser at a URL.
@@ -3431,7 +3484,12 @@ async fn browser_navigate(
         return unauthorized();
     }
     let bridge = state.agent.computer.clone();
-    match bridge.navigate_to(&r.url).await {
+    let res = if r.mode.as_deref() == Some("window") {
+        bridge.navigate_in_window(&r.url).await
+    } else {
+        bridge.navigate_to(&r.url).await
+    };
+    match res {
         Ok(()) => Json(json!({"ok": true})).into_response(),
         Err(e) => bad_request(&e.to_string()),
     }

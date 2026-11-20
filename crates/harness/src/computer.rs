@@ -155,6 +155,23 @@ impl ComputerBridge {
         self.headless.read().map(|g| *g).unwrap_or(true)
     }
 
+    /// 为「在独立窗口里打开这个链接」显式拉起可见浏览器并在其中导航。
+    ///
+    /// 与 `navigate_to` 的区别是它不管 `browser_headless` 设置：用户主动
+    /// 选「内置浏览器·窗口」就是想要一个看得见的窗口，无头实例根本没有
+    /// 窗口可看，链接会像是点了没反应。先按可见模式重建，再导航。
+    pub async fn navigate_in_window(&self, url: &str) -> Result<(), HarnessError> {
+        let url = normalize_url(url)?;
+        if self.is_headless() {
+            if let Ok(mut g) = self.headless.write() {
+                *g = false;
+            }
+            self.kill_browser();
+        }
+        self.cmd("Page.navigate", json!({ "url": url })).await?;
+        Ok(())
+    }
+
     pub fn new() -> Self {
         // 调试端口随机取一个空闲端口,不再固定 9222:固定端口等于给本机其他
         // 进程一个可抢占/伪装的稳定入口。PARABLE_CDP_PORT 仍可显式指定。
