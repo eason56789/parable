@@ -40,6 +40,9 @@ use crate::error::HarnessError;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+/// profile Markdown 最大读取字节数（AG-01）：超出跳过，防超大文件撑爆内存。
+const MAX_AGENT_BYTES: usize = 256 * 1024;
+
 /// Identity colors, in picker order (mirrors ZCode's palette).
 pub const COLORS: [&str; 8] = [
     "red", "blue", "green", "yellow", "purple", "orange", "pink", "cyan",
@@ -161,7 +164,8 @@ fn scan(dir: &Path, scope: &str, disabled: &[String], out: &mut AgentListing) {
     for e in rd.flatten() {
         let p = e.path();
         // 只认第一层的 *.md —— 与 ZCode 一致，子目录不是 profile。
-        if !p.is_file() {
+        // AG-01：跳过符号链接，避免链接指向 agents 根之外的文件。
+        if !p.is_file() || p.is_symlink() {
             continue;
         }
         let is_md = p
@@ -177,6 +181,17 @@ fn scan(dir: &Path, scope: &str, disabled: &[String], out: &mut AgentListing) {
             .and_then(|s| s.to_str())
             .unwrap_or("")
             .to_string();
+        let Ok(meta) = std::fs::metadata(&p) else {
+            continue;
+        };
+        if meta.len() as usize > MAX_AGENT_BYTES {
+            out.problems.push(AgentProblem {
+                path: p.display().to_string(),
+                reason: format!("profile 超过 {MAX_AGENT_BYTES} 字节，已跳过"),
+                scope: scope.to_string(),
+            });
+            continue;
+        }
         let Ok(text) = std::fs::read_to_string(&p) else {
             out.problems.push(AgentProblem {
                 path: p.display().to_string(),
@@ -280,6 +295,16 @@ fn parse(id: &str, scope: &str, text: &str) -> Result<AgentDef, String> {
     }
     let body = text.get(body_start..).unwrap_or("").trim().to_string();
     let mut warnings = Vec::new();
+    // AG-02：工具引用只允许标识符字符，含换行/ shell 元字符的条目过滤掉并留痕。
+    let invalid_tools: Vec<String> = tools
+        .iter()
+        .filter(|t| !valid_tool_ref(t))
+        .cloned()
+        .collect();
+    if !invalid_tools.is_empty() {
+        warnings.push(format!("忽略非法工具名: {}", invalid_tools.join(", ")));
+    }
+    tools.retain(|t| valid_tool_ref(t));
     let mut color_v = color.trim().to_string();
     if !color_v.is_empty() && !COLORS.contains(&color_v.as_str()) {
         warnings.push(format!("unknown color `{color_v}`; using blue"));
@@ -541,6 +566,14 @@ fn is_cjk(c: char) -> bool {
 
 fn yaml_str(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// 工具引用合法性（AG-02）：非空、≤64 字符，只含字母数字 `-_.:`。
+fn valid_tool_ref(t: &str) -> bool {
+    !t.is_empty()
+        && t.len() <= 64
+        && t.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':'))
 }
 
 /// Inverse of [`yaml_str`] for the quoted `name`/`description` values.

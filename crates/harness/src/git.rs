@@ -9,8 +9,11 @@
 
 use crate::error::HarnessError;
 use serde::Serialize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// git stdout 最大保留字节数（G-02）：超出截断，防超大 diff/status 撑爆内存。
+const MAX_GIT_OUTPUT: usize = 2 * 1024 * 1024;
 
 /// One changed file.
 #[derive(Debug, Clone, Serialize)]
@@ -108,7 +111,50 @@ fn git(workspace: &Path, args: &[&str]) -> Result<String, HarnessError> {
             err
         }));
     }
-    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    // G-02：stdout 带上限后再转字符串。
+    let mut stdout = out.stdout;
+    if stdout.len() > MAX_GIT_OUTPUT {
+        stdout.truncate(MAX_GIT_OUTPUT);
+    }
+    Ok(String::from_utf8_lossy(&stdout).to_string())
+}
+
+/// 校验相对路径落在 workspace 内（G-01）：拒绝绝对路径与 `..` 段；词法
+/// 规范化后仍须以 workspace 为前缀，防止 `../../etc/...` 越界读文件。
+fn check_within(workspace: &Path, path: &str) -> Result<PathBuf, HarnessError> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err(HarnessError::Tool("path is required".into()));
+    }
+    if Path::new(trimmed).is_absolute() {
+        return Err(HarnessError::Tool(format!("拒绝绝对路径: {trimmed}")));
+    }
+    if trimmed.split('/').any(|seg| seg == "..") {
+        return Err(HarnessError::Tool(format!("路径含 `..`，已拒绝: {trimmed}")));
+    }
+    let joined = workspace.join(trimmed);
+    let ws_norm = lexical_normalize(workspace);
+    let joined_norm = lexical_normalize(&joined);
+    if !joined_norm.starts_with(&ws_norm) {
+        return Err(HarnessError::Tool(format!("路径越出工作区: {trimmed}")));
+    }
+    Ok(joined_norm)
+}
+
+/// 不依赖文件系统的词法路径规范化（解析 `.` / `..`）。
+fn lexical_normalize(p: &Path) -> PathBuf {
+    use std::path::Component::*;
+    let mut out = PathBuf::new();
+    for comp in p.components() {
+        match comp {
+            CurDir => {}
+            ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 /// `true` when the workspace is inside a git work tree.
@@ -160,19 +206,20 @@ pub fn status(workspace: &Path) -> Result<Status, HarnessError> {
             "1" => {
                 let f: Vec<&str> = rest.split(' ').collect();
                 let xy = f.first().copied().unwrap_or("..").to_string();
-                let path = f.get(7).copied().unwrap_or("").to_string();
+                // G-03：路径可能含空格，第 7 段之后整体拼回作为路径。
+                let path = f.get(7).map(|_| f[7..].join(" ")).unwrap_or_default();
                 (xy, path)
             }
             "2" => {
                 let f: Vec<&str> = rest.split(' ').collect();
                 let xy = f.first().copied().unwrap_or("..").to_string();
-                let path = f.get(8).copied().unwrap_or("").to_string();
+                let path = f.get(8).map(|_| f[8..].join(" ")).unwrap_or_default();
                 (xy, path)
             }
             "u" => {
                 let f: Vec<&str> = rest.split(' ').collect();
                 let xy = f.first().copied().unwrap_or("..").to_string();
-                let path = f.get(9).copied().unwrap_or("").to_string();
+                let path = f.get(9).map(|_| f[9..].join(" ")).unwrap_or_default();
                 (xy, path)
             }
             _ => continue,
@@ -226,6 +273,8 @@ pub fn diff(workspace: &Path, path: &str) -> Result<FileDiff, HarnessError> {
     if path.is_empty() {
         return Err(HarnessError::Tool("path is required".into()));
     }
+    // G-01：路径必须落在工作区内，拒绝绝对路径与 `..` 穿越。
+    let abs = check_within(workspace, &path)?;
     if !is_repo(workspace) {
         return Ok(FileDiff {
             path,
@@ -251,7 +300,6 @@ pub fn diff(workspace: &Path, path: &str) -> Result<FileDiff, HarnessError> {
 
     if raw.trim().is_empty() {
         // Untracked file: show it as a whole-file addition.
-        let abs = workspace.join(&path);
         if abs.is_file() {
             if let Ok(text) = std::fs::read_to_string(&abs) {
                 let lines: Vec<DiffLine> = text

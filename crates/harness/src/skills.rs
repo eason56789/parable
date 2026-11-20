@@ -32,6 +32,9 @@ use crate::error::HarnessError;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+/// SKILL.md 最大读取字节数（SK-02）：超出跳过，防超大文件撑爆内存。
+const MAX_SKILL_BYTES: usize = 256 * 1024;
+
 /// Front matter + body of one skill file.
 #[derive(Debug, Clone, Serialize)]
 pub struct Skill {
@@ -128,7 +131,8 @@ fn scan(dir: &Path, scope: &str, disabled: &[String], out: &mut SkillListing) {
     };
     for e in rd.flatten() {
         let p = e.path();
-        if !p.is_dir() {
+        // SK-02：跳过符号链接目录，避免链接指向 skills 根之外的文件。
+        if !p.is_dir() || p.is_symlink() {
             continue;
         }
         let file = p.join("SKILL.md");
@@ -140,6 +144,17 @@ fn scan(dir: &Path, scope: &str, disabled: &[String], out: &mut SkillListing) {
             .and_then(|s| s.to_str())
             .unwrap_or("")
             .to_string();
+        let Ok(meta) = std::fs::metadata(&file) else {
+            continue;
+        };
+        if meta.len() as usize > MAX_SKILL_BYTES {
+            out.problems.push(SkillProblem {
+                path: file.display().to_string(),
+                reason: format!("SKILL.md 超过 {MAX_SKILL_BYTES} 字节，已跳过"),
+                scope: scope.to_string(),
+            });
+            continue;
+        }
         let Ok(text) = std::fs::read_to_string(&file) else {
             out.problems.push(SkillProblem {
                 path: file.display().to_string(),
@@ -190,7 +205,8 @@ fn parse(id: &str, scope: &str, text: &str) -> Result<Skill, String> {
         let v = v.trim().trim_matches('"').trim_matches('\'').to_string();
         match k.trim() {
             "name" => name = v,
-            "description" => description = v,
+            // SK-03：描述压成单行，避免 front matter 里的换行破坏菜单格式。
+            "description" => description = v.lines().next().unwrap_or("").trim().to_string(),
             "enabled" => enabled_flag = Some(!matches!(v.as_str(), "false" | "no" | "0")),
             _ => {}
         }
@@ -327,13 +343,27 @@ pub fn set_enabled(
 }
 
 /// Load one skill's full body, for the `read_skill` tool.
+///
+/// SK-01：被 sidecar 或 front matter 禁用的技能不可读，返回 None（与菜单
+/// 里不出现保持一致），而不是绕过禁用把正文交给模型。
 pub fn read_body(workspace: &Path, scope: &str, id: &str) -> Option<Skill> {
     let slug = slugify(id);
-    let file = scope_dir(scope, workspace).join(&slug).join("SKILL.md");
+    let dir = scope_dir(scope, workspace);
+    let disabled = read_disabled(&dir);
+    if disabled.iter().any(|d| d == &slug) {
+        return None;
+    }
+    let file = dir.join(&slug).join("SKILL.md");
+    let meta = std::fs::metadata(&file).ok()?;
+    if meta.len() as usize > MAX_SKILL_BYTES {
+        return None;
+    }
     let text = std::fs::read_to_string(&file).ok()?;
     let mut s = parse(&slug, scope, &text).ok()?;
+    if !s.enabled {
+        return None;
+    }
     s.path = file.display().to_string();
-    s.enabled = true;
     Some(s)
 }
 

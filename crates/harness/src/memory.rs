@@ -15,6 +15,13 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tokio::sync::RwLock;
 
+/// 记忆条数上限（MEM-01）：超出拒绝新增，防无限堆积撑爆系统提示。
+const MAX_MEMORIES: usize = 500;
+/// 单条记忆字符上限（MEM-01）。
+const MAX_MEMORY_CHARS: usize = 2000;
+/// memory.json 读取字节上限（MEM-02）。
+const MAX_MEMORY_FILE_BYTES: u64 = 2 * 1024 * 1024;
+
 /// Which bucket a memory belongs to. The UI shows these as coloured chips.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -95,6 +102,11 @@ impl MemoryStore {
         if text.is_empty() {
             return Err(HarnessError::Config("memory text is empty".into()));
         }
+        if text.chars().count() > MAX_MEMORY_CHARS {
+            return Err(HarnessError::Config(format!(
+                "memory 超过 {MAX_MEMORY_CHARS} 字符，已拒绝"
+            )));
+        }
         let today = crate::usage::today_key();
         let mut items = self.items.write().await;
         let item = match input.id {
@@ -108,6 +120,11 @@ impl MemoryStore {
                 m.clone()
             }
             _ => {
+                if items.len() >= MAX_MEMORIES {
+                    return Err(HarnessError::Config(format!(
+                        "memory 已达上限 {MAX_MEMORIES} 条，请先删除旧记忆"
+                    )));
+                }
                 let id = items.iter().map(|m| m.id).max().unwrap_or(0) + 1;
                 let m = Memory {
                     id,
@@ -181,6 +198,13 @@ impl MemoryStore {
 }
 
 fn load(path: &Path) -> Vec<Memory> {
+    // MEM-02：文件过大直接按空表处理，不读进内存。
+    if let Ok(meta) = std::fs::metadata(path) {
+        if meta.len() > MAX_MEMORY_FILE_BYTES {
+            tracing::warn!("memory.json 超过 {MAX_MEMORY_FILE_BYTES} 字节，按空表加载");
+            return Vec::new();
+        }
+    }
     let Ok(text) = std::fs::read_to_string(path) else {
         return Vec::new();
     };
