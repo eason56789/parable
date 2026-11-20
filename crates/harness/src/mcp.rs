@@ -67,6 +67,15 @@ pub struct McpStatus {
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 /// stderr 尾部最多保留的行数（错误报告用）。
 const STDERR_TAIL_LINES: usize = 16;
+/// 单行 stdout 最大字节数（MCP-01）：超限整行丢弃，防恶意/故障服务器用
+/// 无限长行把内存撑爆。
+const MAX_LINE_BYTES: usize = 256 * 1024;
+/// tools/call 返回文本最大字节数（MCP-02）：超出截断并标注，防超大结果
+/// 把上下文/内存撑爆。
+const MAX_RESULT_BYTES: usize = 64 * 1024;
+/// 单次调用超时上下限（MCP-03）：配置值先钳制到该区间，避免 0 或过大值。
+const MIN_TIMEOUT_MS: u64 = 1_000;
+const MAX_TIMEOUT_MS: u64 = 300_000;
 
 // ------------------------------------------------------------------ 解析层
 //
@@ -217,7 +226,12 @@ fn text_blocks(result: &Value) -> Vec<String> {
 /// tools/call 的 result → 文本：content[] 里 type=="text" 的 text 以换行拼接；
 /// isError==true → Err（文本作为错误详情返回给模型）。
 fn extract_call_text(result: &Value) -> Result<String, HarnessError> {
-    let text = text_blocks(result).join("\n");
+    let mut text = text_blocks(result).join("\n");
+    // MCP-02：结果文本带上限，超出截断并标注。
+    if text.len() > MAX_RESULT_BYTES {
+        text.truncate(MAX_RESULT_BYTES);
+        text.push_str(&format!("\n…[结果超过 {MAX_RESULT_BYTES} 字节，已截断]"));
+    }
     if result
         .get("isError")
         .and_then(|v| v.as_bool())
@@ -230,6 +244,11 @@ fn extract_call_text(result: &Value) -> Result<String, HarnessError> {
         }));
     }
     Ok(text)
+}
+
+/// 单次调用超时（毫秒），钳制在 [MIN_TIMEOUT_MS, MAX_TIMEOUT_MS] 区间（MCP-03）。
+fn effective_timeout(cfg: &McpServerConfig) -> Duration {
+    Duration::from_millis(cfg.timeout_ms.clamp(MIN_TIMEOUT_MS, MAX_TIMEOUT_MS))
 }
 
 // ------------------------------------------------------------------ 在线会话
@@ -364,16 +383,70 @@ async fn write_line(shared: &Shared, line: &str) -> Result<(), HarnessError> {
 
 /// stdout 读行任务：解析每行 JSON，按 id 分发响应；通知/横幅忽略。
 /// EOF（进程退出）→ fail_all + 标记断开。
+///
+/// MCP-01：单行带上限（`MAX_LINE_BYTES`），超限整行丢弃并留痕，避免
+/// 恶意/故障服务器用无限长行把内存撑爆。
 async fn read_loop<R: AsyncRead + Unpin + Send + 'static>(reader: R, shared: Arc<Shared>) {
-    let mut reader = tokio::io::BufReader::new(reader);
-    let mut buf = Vec::with_capacity(4096);
+    use tokio::io::AsyncReadExt;
+    let mut reader = reader;
+    let mut pending: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 8192];
+
     loop {
-        buf.clear();
-        match reader.read_until(b'\n', &mut buf).await {
-            Ok(0) | Err(_) => break,
-            Ok(_) => {}
+        let mut line: Vec<u8> = Vec::new();
+        // 先消费上一段残留里的换行。
+        if let Some(pos) = pending.iter().position(|b| *b == b'\n') {
+            line.extend_from_slice(&pending[..pos]);
+            pending.drain(..=pos);
+        } else {
+            line.append(&mut pending);
+            let mut truncated = false;
+            loop {
+                if line.len() >= MAX_LINE_BYTES {
+                    truncated = true;
+                    break;
+                }
+                let cap = (MAX_LINE_BYTES - line.len()).min(chunk.len());
+                match reader.read(&mut chunk[..cap]).await {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let slice = &chunk[..n];
+                        match slice.iter().position(|b| *b == b'\n') {
+                            Some(pos) => {
+                                line.extend_from_slice(&slice[..pos]);
+                                pending.extend_from_slice(&slice[pos + 1..]);
+                                break;
+                            }
+                            None => line.extend_from_slice(slice),
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            if truncated {
+                // 丢弃到行尾（含换行），再继续读下一行。
+                loop {
+                    match reader.read(&mut chunk).await {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            if chunk[..n].iter().any(|&b| b == b'\n') {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                tracing::warn!(
+                    "MCP 服务器输出超过单行 {MAX_LINE_BYTES} 字节，已截断丢弃"
+                );
+                continue;
+            }
+            // EOF：没有残留字节就退出；末尾无换行的残行留到本轮解析。
+            if line.is_empty() {
+                break;
+            }
         }
-        let line = String::from_utf8_lossy(&buf);
+        let line = String::from_utf8_lossy(&line);
         match parse_line(&line) {
             Line::Response { id, result, error } => {
                 let reply: Reply = match error {
@@ -482,6 +555,14 @@ async fn spawn_and_init(
     cfg: &McpServerConfig,
 ) -> Result<(tokio::process::Child, Arc<Shared>, Vec<McpTool>), HarnessError> {
     let mut cmd = tokio::process::Command::new(&cfg.command);
+    // SEC-01：清空继承环境，只回填运行必需的系统变量，避免父进程持有的
+    // provider key / token / secret 泄漏进 MCP 子进程；cfg.env 显式项随后注入。
+    cmd.env_clear();
+    for key in crate::CHILD_ENV_WHITELIST {
+        if let Ok(v) = std::env::var(key) {
+            cmd.env(key, v);
+        }
+    }
     cmd.args(&cfg.args)
         .envs(cfg.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         .stdin(Stdio::piped())
@@ -739,7 +820,7 @@ impl McpManager {
             .request(
                 "tools/call",
                 json!({"name": tool, "arguments": args}),
-                Duration::from_millis(cfg.timeout_ms),
+                effective_timeout(&cfg),
             )
             .await
         {

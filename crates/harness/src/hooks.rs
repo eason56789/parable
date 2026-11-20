@@ -22,6 +22,11 @@ use tokio::process::Command;
 const BLOCK_EXIT_CODE: i32 = 2;
 /// 阻断原因（stderr / deny reason）的最大字符数。
 const MAX_REASON_CHARS: usize = 500;
+/// hook 超时上下限（H-01）：配置值先钳制到该区间，避免 0 或过大值。
+const MIN_HOOK_TIMEOUT_MS: u64 = 1_000;
+const MAX_HOOK_TIMEOUT_MS: u64 = 60_000;
+/// stdout/stderr 最大保留字节数（H-02）：超出截断，防失控 hook 灌满内存。
+const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -175,7 +180,7 @@ async fn run_one_hook(hook: HookConfig, stdin_json: String) -> HookOutcome {
     // 协议规定超时 = 忽略该 hook（不阻断）；hook 若留下持管道的后台孙进程，
     // 最坏也退化成超时忽略——这正是超时的安全阀语义。
     let waited =
-        tokio::time::timeout(Duration::from_millis(hook.timeout_ms), child.wait_with_output()).await;
+        tokio::time::timeout(Duration::from_millis(clamp_timeout(hook.timeout_ms)), child.wait_with_output()).await;
     match waited {
         Err(_) => HookOutcome {
             timed_out: true,
@@ -187,11 +192,16 @@ async fn run_one_hook(hook: HookConfig, stdin_json: String) -> HookOutcome {
         },
         Ok(Ok(output)) => HookOutcome {
             exit_code: output.status.code(),
-            stdout: decode_bytes(&output.stdout),
-            stderr: decode_bytes(&output.stderr),
+            stdout: decode_capped(&output.stdout),
+            stderr: decode_capped(&output.stderr),
             ..Default::default()
         },
     }
+}
+
+/// 超时钳制到 [MIN, MAX]（H-01）。
+fn clamp_timeout(ms: u64) -> u64 {
+    ms.clamp(MIN_HOOK_TIMEOUT_MS, MAX_HOOK_TIMEOUT_MS)
 }
 
 /// 把 hook 命令包进 shell。Windows 用 `cmd /C <command>`，且必须用 `raw_arg`
@@ -204,6 +214,7 @@ fn make_command(command: &str) -> Command {
         let mut cmd = Command::new("cmd");
         cmd.raw_arg("/C");
         cmd.raw_arg(command);
+        sanitize_env(&mut cmd);
         return cmd;
     }
     #[cfg(not(windows))]
@@ -211,7 +222,19 @@ fn make_command(command: &str) -> Command {
         let mut cmd = Command::new("sh");
         cmd.arg("-c");
         cmd.arg(command);
+        sanitize_env(&mut cmd);
         return cmd;
+    }
+}
+
+/// SEC-01：清空继承环境，只回填运行必需的系统变量，避免父进程持有的
+/// provider key / token / secret 泄漏进 hook 子进程。
+fn sanitize_env(cmd: &mut Command) {
+    cmd.env_clear();
+    for key in crate::CHILD_ENV_WHITELIST {
+        if let Ok(v) = std::env::var(key) {
+            cmd.env(key, v);
+        }
     }
 }
 
@@ -316,6 +339,7 @@ fn truncate_chars(s: &str, max: usize) -> String {
 
 /// stdout/stderr 解码：严格 UTF-8 优先；不是合法 UTF-8 时按 GB18030 解
 /// （Windows cmd 的系统 ANSI 码页，中文是 GBK/GB18030），与 tools/shell.rs 同策略。
+/// H-02：先按字节截断到上限再解码，防失控 hook 灌满内存。
 fn decode_bytes(raw: &[u8]) -> String {
     match std::str::from_utf8(raw) {
         Ok(s) => s.to_owned(),
@@ -324,6 +348,12 @@ fn decode_bytes(raw: &[u8]) -> String {
             cow.into_owned()
         }
     }
+}
+
+/// 截断到 `MAX_OUTPUT_BYTES` 后解码（H-02）。
+fn decode_capped(raw: &[u8]) -> String {
+    let capped = raw.get(..MAX_OUTPUT_BYTES).unwrap_or(raw);
+    decode_bytes(capped)
 }
 
 #[cfg(all(test, windows))]

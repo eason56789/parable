@@ -19,6 +19,11 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
 
+/// manifest 文件最大字节数（PL-06）：超出拒绝解析，防恶意插件塞满内存。
+const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
+/// 内联脚本源码最大字节数（PL-06）。
+const MAX_SCRIPT_BYTES: usize = 256 * 1024;
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PluginCommand {
     pub name: String,
@@ -111,20 +116,27 @@ impl PluginStore {
     }
 
     fn enabled_map(&self) -> HashMap<String, bool> {
-        std::fs::read_to_string(self.enabled_path())
-            .ok()
-            .and_then(|t| serde_json::from_str(&t).ok())
-            .unwrap_or_default()
+        match std::fs::read_to_string(self.enabled_path()) {
+            Ok(t) => match serde_json::from_str::<HashMap<String, bool>>(&t) {
+                Ok(m) => m,
+                Err(e) => {
+                    // PL-01：损坏的 enabled.json 回退空表并留痕，不当成全启用。
+                    tracing::warn!(error = %e, "enabled.json 解析失败，按空表处理");
+                    HashMap::new()
+                }
+            },
+            Err(_) => HashMap::new(),
+        }
     }
 
     pub fn toggle(&self, id: &str) -> Result<bool, HarnessError> {
         let mut m = self.enabled_map();
-        let next = !m.get(id).copied().unwrap_or(true);
+        let next = !m.get(id).copied().unwrap_or(false);
         m.insert(id.to_string(), next);
-        let _ = std::fs::write(
-            self.enabled_path(),
-            serde_json::to_string_pretty(&m).unwrap_or_default(),
-        );
+        // PL-01：原子写盘，避免断电/磁盘满留下半截 JSON。
+        let bytes = serde_json::to_string_pretty(&m).unwrap_or_else(|_| "{}".into());
+        crate::atomic_write(&self.enabled_path(), bytes.as_bytes())
+            .map_err(|e| HarnessError::Tool(format!("写入 enabled.json 失败: {e}")))?;
         Ok(next)
     }
 
@@ -154,7 +166,8 @@ impl PluginStore {
             } else {
                 continue;
             };
-            p.enabled = enabled.get(&id).copied().unwrap_or(true);
+            // PL-05：未在 enabled.json 显式登记的插件默认禁用，不随目录扫描自动启用。
+            p.enabled = enabled.get(&id).copied().unwrap_or(false);
             out.push(p);
         }
         out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -175,12 +188,30 @@ impl PluginStore {
     /// `id` must be a plain directory name — it becomes the plugin's identity.
     pub fn save_manifest(&self, id: &str, m: &PluginManifest) -> Result<std::path::PathBuf, HarnessError> {
         Self::check_id(id)?;
+        // PL-02：命令/工具名只允许字母数字 - _ .，拒绝空格与 shell 元字符，
+        // 避免后续拼命令行时被注入。
+        for c in &m.commands {
+            if !valid_decl_name(&c.name) {
+                return Err(HarnessError::Tool(format!(
+                    "命令名 `{}` 非法：只允许字母数字、`-`、`_`、`.`",
+                    c.name
+                )));
+            }
+        }
+        for t in &m.tools {
+            if !valid_decl_name(&t.name) {
+                return Err(HarnessError::Tool(format!(
+                    "工具名 `{}` 非法：只允许字母数字、`-`、`_`、`.`",
+                    t.name
+                )));
+            }
+        }
         let dir = self.root.join(id);
         std::fs::create_dir_all(&dir)
             .map_err(|e| HarnessError::Tool(format!("无法创建插件目录 {}: {e}", dir.display())))?;
         let json = serde_json::to_string_pretty(m)
             .map_err(|e| HarnessError::Tool(format!("manifest 序列化失败: {e}")))?;
-        std::fs::write(dir.join("plugin.json"), json)
+        crate::atomic_write(&dir.join("plugin.json"), json.as_bytes())
             .map_err(|e| HarnessError::Tool(format!("写入 plugin.json 失败: {e}")))?;
         Ok(dir)
     }
@@ -197,6 +228,12 @@ impl PluginStore {
         code: &str,
     ) -> Result<(String, String), HarnessError> {
         Self::check_id(id)?;
+        // PL-02：脚本文件名同样只允许安全字符，防路径穿越。
+        if !valid_decl_name(tool) {
+            return Err(HarnessError::Tool(format!(
+                "工具名 `{tool}` 非法：只允许字母数字、`-`、`_`、`.`"
+            )));
+        }
         let lang = if language.trim().is_empty() {
             "python".to_string()
         } else {
@@ -229,6 +266,12 @@ impl PluginStore {
         let dir = self.root.join(id).join("scripts");
         std::fs::create_dir_all(&dir)
             .map_err(|e| HarnessError::Tool(format!("无法创建脚本目录 {}: {e}", dir.display())))?;
+        // PL-06：内联脚本源码带上限，防超大代码块写盘/执行。
+        if code.len() > MAX_SCRIPT_BYTES {
+            return Err(HarnessError::Tool(format!(
+                "脚本源码超过 {MAX_SCRIPT_BYTES} 字节，已拒绝写入"
+            )));
+        }
         let path = dir.join(format!("{tool}.{ext}"));
         std::fs::write(&path, code)
             .map_err(|e| HarnessError::Tool(format!("写入脚本 {} 失败: {e}", path.display())))?;
@@ -247,10 +290,8 @@ impl PluginStore {
             .map_err(|e| HarnessError::Tool(format!("删除插件目录失败: {e}")))?;
         let mut m = self.enabled_map();
         if m.remove(id).is_some() {
-            let _ = std::fs::write(
-                self.enabled_path(),
-                serde_json::to_string_pretty(&m).unwrap_or_default(),
-            );
+            let bytes = serde_json::to_string_pretty(&m).unwrap_or_else(|_| "{}".into());
+            let _ = crate::atomic_write(&self.enabled_path(), bytes.as_bytes());
         }
         Ok(())
     }
@@ -283,8 +324,25 @@ impl PluginStore {
     }
 }
 
+/// 命令/工具声明名合法性（PL-02）：非空、≤64 字符，只含字母数字 `-_.`。
+fn valid_decl_name(n: &str) -> bool {
+    !n.is_empty()
+        && n.len() <= 64
+        && n.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+/// 读文本文件并带上限（PL-06）：超限或读取失败返回 None。
+fn read_capped(path: &Path, max: usize) -> Option<String> {
+    let meta = std::fs::metadata(path).ok()?;
+    if meta.len() as usize > max {
+        return None;
+    }
+    std::fs::read_to_string(path).ok()
+}
+
 fn parse_manifest(id: &str, dir: &Path) -> Plugin {
-    let raw = std::fs::read_to_string(dir.join("plugin.json")).unwrap_or_default();
+    let raw = read_capped(&dir.join("plugin.json"), MAX_MANIFEST_BYTES).unwrap_or_default();
     let m: PluginManifest = serde_json::from_str(&raw).unwrap_or_default();
     Plugin {
         id: id.into(),
@@ -522,13 +580,22 @@ pub async fn run_plugin_tool(
         c
     } else if cfg!(target_os = "windows") {
         let mut c = tokio::process::Command::new("cmd");
-        c.args(["/C", &cmd]);
+        // PL-03：raw_arg 原样透传整条命令，避免 MSVCRT 引号转义被 cmd.exe 弄坏。
+        c.raw_arg("/C");
+        c.raw_arg(&cmd);
         c
     } else {
         let mut c = tokio::process::Command::new("sh");
         c.arg("-c").arg(&cmd);
         c
     };
+    // SEC-01：清空继承环境，只回填运行必需的系统变量；PARABLE_* 显式项随后注入。
+    command.env_clear();
+    for key in crate::CHILD_ENV_WHITELIST {
+        if let Ok(v) = std::env::var(key) {
+            command.env(key, v);
+        }
+    }
     command
         .env("PARABLE_TOOL_ARGS", &args_json)
         .env("PARABLE_TOOL_NAME", &t.name)

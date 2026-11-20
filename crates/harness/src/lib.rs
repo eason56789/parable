@@ -61,3 +61,25 @@ pub fn atomic_write(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()>
         }
     }
 }
+
+/// 子进程环境白名单（SEC-01）：`env_clear` 后只回填运行必需的系统变量，
+/// 不把父进程持有的 provider key / token / secret / auth 带进子进程。
+/// 配置里显式声明的 env 由调用方在此之后单独注入。
+pub const CHILD_ENV_WHITELIST: &[&str] = &[
+    "PATH",
+    "HOME",
+    "USERPROFILE",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "SystemRoot",
+    "ComSpec",
+    "ProgramData",
+    "ProgramFiles",
+    "ProgramFiles(x86)",
+    "LOCALAPPDATA",
+    "APPDATA",
+    "NODE_PATH",
+    "PATHEXT",
+    "NUMBER_OF_PROCESSORS",
+];
