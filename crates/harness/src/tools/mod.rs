@@ -1635,7 +1635,7 @@ impl Registry {
             };
             let job = terms
                 .start(ctx.hub.clone(), cwd.clone(), command.to_string())
-                .await;
+                .await?;
             let body = format!(
                 "Started in the background as job `{id}`.\n\
 Command: {command}\n\

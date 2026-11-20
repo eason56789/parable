@@ -1884,7 +1884,13 @@ fn pdf_apply_op(
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "document".into());
-            let out = path.with_file_name(format!("{stem}-pages.pdf"));
+            // B-13：输出名固定会静默覆盖已有副本；存在时追加 -1/-2 序号避让。
+            let mut out = path.with_file_name(format!("{stem}-pages.pdf"));
+            let mut n = 1;
+            while out.exists() {
+                out = path.with_file_name(format!("{stem}-pages-{n}.pdf"));
+                n += 1;
+            }
             let tmp = tmp_path(&out);
             doc.save(&tmp).map_err(|e| {
                 HarnessError::Tool(format!("保存 {} 失败: {e}", out.display()))

@@ -2623,7 +2623,10 @@ async fn run_task_now(
             std::path::PathBuf::from(&cfg.workspace)
         };
         drop(cfg);
-        let job = state.terms.start(state.hub.clone(), ws, command).await;
+        let job = match state.terms.start(state.hub.clone(), ws, command).await {
+            Ok(j) => j,
+            Err(e) => return bad_request(&e.to_string()),
+        };
         let label = format!("{} · {}", task.name, job.id);
         let now_iso = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         if let Err(e) = state
@@ -3809,7 +3812,10 @@ async fn term_start(
             Err(e) => return bad_request(&e.to_string()),
         }
     };
-    let job = state.terms.start(state.hub.clone(), cwd, command).await;
+    let job = match state.terms.start(state.hub.clone(), cwd, command).await {
+        Ok(j) => j,
+        Err(e) => return bad_request(&e.to_string()),
+    };
     Json(json!({ "job": job })).into_response()
 }
 

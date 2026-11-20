@@ -1159,7 +1159,7 @@ function (wanted) {
         let client = reqwest::Client::new();
         let url = normalize_url(url)?;
         let resp = client
-            .put(format!("http://127.0.0.1:{}/json/new?{}", self.port, url))
+            .put(format!("http://127.0.0.1:{}/json/new?{}", self.port, encode_query(&url)))
             .timeout(std::time::Duration::from_secs(5))
             .send()
             .await
@@ -1320,7 +1320,20 @@ fn normalize_url(url: &str) -> Result<String, HarnessError> {
     Ok(url.to_string())
 }
 
-// ------------------------------------------------------------------ tools
+/// B-19：把 URL 按 query 参数规则 percent-encode，避免 `#`/`&` 等字符
+/// 被当成 CDP `/json/new` 查询串的分隔符而改错导航地址。
+fn encode_query(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*b as char)
+            }
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
+}
 
 fn need_str(a: &Value, key: &str) -> Result<String, HarnessError> {
     a.get(key)

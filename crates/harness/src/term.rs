@@ -14,6 +14,7 @@
 //! Jobs are user-typed commands, not model proposals, so they do not go
 //! through the permission gateway — same rule as the side-pane terminal.
 
+use crate::error::HarnessError;
 use crate::event::{now_ms, EventHub};
 use serde::Serialize;
 use serde_json::json;
@@ -24,6 +25,8 @@ use tokio::sync::Mutex;
 
 /// Keep at most this many finished jobs around; running ones are never pruned.
 const MAX_JOBS: usize = 40;
+/// B-36：运行中后台终端的硬上限（MAX_JOBS 只约束已结束任务的留存）。
+const MAX_RUNNING: usize = 16;
 /// Only the tail of the output is kept in the registry (SSE already streamed
 /// the whole thing live).
 const MAX_TAIL: usize = 24_000;
@@ -103,7 +106,26 @@ impl TerminalRegistry {
     }
 
     /// Spawn a command and return the job id immediately.
-    pub async fn start(&self, hub: EventHub, cwd: PathBuf, command: String) -> TermJob {
+    pub async fn start(
+        &self,
+        hub: EventHub,
+        cwd: PathBuf,
+        command: String,
+    ) -> Result<TermJob, HarnessError> {
+        // B-36：运行中任务也设硬上限，避免无限挂子进程。
+        {
+            let inner = self.inner.lock().await;
+            let running = inner
+                .jobs
+                .values()
+                .filter(|j| j.status == "running")
+                .count();
+            if running >= MAX_RUNNING {
+                return Err(HarnessError::Tool(format!(
+                    "运行中的后台终端已达上限 {MAX_RUNNING}，请先结束部分任务"
+                )));
+            }
+        }
         let id = short_id();
         let call_id = id.clone();
         let job = TermJob {
@@ -155,7 +177,7 @@ impl TerminalRegistry {
         inner.handles.insert(id.clone(), handle);
         inner.order.push(id);
         Self::prune(&mut inner);
-        inner.jobs.get(&job.id).cloned().unwrap_or(job)
+        Ok(inner.jobs.get(&job.id).cloned().unwrap_or(job))
     }
 
     async fn finish(&self, id: &str, exit: i32, output: String, ok: bool) {

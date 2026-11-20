@@ -203,8 +203,11 @@ pub fn read(workspace: &Path, raw: &str, offset: u64, limit: u64) -> Result<File
     }
 
     let bytes = std::fs::read(&path).map_err(HarnessError::Io)?;
-    let binary = String::from_utf8(bytes.clone()).is_err();
-    let text = String::from_utf8_lossy(&bytes).to_string();
+    // B-17：先尝试一次性 UTF-8 解码，避免为判定编码先克隆整份字节。
+    let (binary, text) = match String::from_utf8(bytes) {
+        Ok(s) => (false, s),
+        Err(e) => (true, String::from_utf8_lossy(e.as_bytes()).into_owned()),
+    };
     let lines: Vec<&str> = text.lines().collect();
     let total_lines = lines.len() as u64;
 
