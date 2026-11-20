@@ -261,7 +261,7 @@ fn evict_text_cache(idx: &mut HashMap<String, TextEntry>, budget: usize) {
 
 impl SessionStore {
     pub fn new() -> Self {
-        let root = Config::home_dir().join("sessions");
+        let root = Config::sessions_dir();
         let _ = std::fs::create_dir_all(&root);
         Self {
             root,
@@ -1358,6 +1358,67 @@ pub type SharedStore = Arc<SessionStore>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    /// PARABLE_HOME 是进程级环境变量，相关测试必须串行持锁，避免互相串目录。
+    fn env_lock() -> &'static Mutex<()> {
+        static L: OnceLock<Mutex<()>> = OnceLock::new();
+        L.get_or_init(|| Mutex::new(()))
+    }
+
+    struct Scratch {
+        root: PathBuf,
+        prev: Option<std::ffi::OsString>,
+        _guard: MutexGuard<'static, ()>,
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            match self.prev.take() {
+                Some(v) => std::env::set_var("PARABLE_HOME", v),
+                None => std::env::remove_var("PARABLE_HOME"),
+            }
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            let guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+            let root = std::env::temp_dir().join(format!(
+                "parable-session-home-{tag}-{}-{}",
+                std::process::id(),
+                crate::event::now_ms()
+            ));
+            std::fs::create_dir_all(&root).unwrap();
+            let prev = std::env::var_os("PARABLE_HOME");
+            std::env::set_var("PARABLE_HOME", &root);
+            Self { root, prev, _guard: guard }
+        }
+    }
+
+    /// PARABLE_HOME 隔离：`SessionStore::new()` 的根必须跟随环境变量，
+    /// 新建会话落到临时目录，且不写进真实 `~/.parable/sessions`。
+    #[tokio::test]
+    async fn new_store_follows_parable_home() {
+        let sc = Scratch::new("isolated");
+        let store = SessionStore::new();
+        let expected_root = sc.root.join("sessions");
+        assert_eq!(store.root, expected_root);
+
+        let s = store.create(".", "isolated-stub").await;
+        let stub = expected_root.join(format!("{}.json", s.meta.id));
+        assert!(stub.exists(), "会话 stub 必须落在 PARABLE_HOME 下：{}", stub.display());
+
+        // 直接取真实用户主目录（绕过 PARABLE_HOME），确认没有在那边落 stub。
+        if let Some(real) = dirs::home_dir() {
+            let real_sessions = real.join(".parable").join("sessions");
+            assert!(
+                !real_sessions.join(format!("{}.json", s.meta.id)).exists(),
+                "会话不得绕过 PARABLE_HOME 写进真实 home"
+            );
+        }
+    }
 
     /// 导入必须保留消息与统计，且拒绝覆盖同 ID 的本地会话。
     #[tokio::test]

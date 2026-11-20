@@ -374,7 +374,7 @@ pub struct ScheduleStore {
 
 impl ScheduleStore {
     pub fn new() -> Self {
-        let path = crate::config::Config::home_dir().join("schedule.json");
+        let path = crate::config::Config::schedule_path();
         let inner = match std::fs::read_to_string(&path) {
             Ok(s) => match serde_json::from_str::<Persisted>(&s) {
                 Ok(p) => p.tasks.into_iter().map(|t| (t.id.clone(), t)).collect(),

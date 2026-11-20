@@ -74,7 +74,7 @@ pub struct MemoryStore {
 impl MemoryStore {
     /// Open (or create) the store at `<home>/memory.json`.
     pub fn new() -> Self {
-        Self::with_path(crate::config::Config::home_dir().join("memory.json"))
+        Self::with_path(crate::config::Config::memory_path())
     }
 
     pub fn with_path(path: PathBuf) -> Self {

@@ -87,7 +87,7 @@ pub struct SkillInput {
 
 /// Where the two scopes live for this process.
 pub fn user_dir() -> PathBuf {
-    crate::config::Config::home_dir().join("skills")
+    crate::config::Config::skills_dir()
 }
 
 pub fn project_dir(workspace: &Path) -> PathBuf {

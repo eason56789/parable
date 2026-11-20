@@ -126,7 +126,7 @@ pub struct CookieJar {
 }
 
 pub fn jar_path() -> PathBuf {
-    crate::config::Config::home_dir().join("browser-cookies.json")
+    crate::config::Config::cookies_path()
 }
 
 impl CookieJar {

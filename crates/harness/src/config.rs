@@ -37,6 +37,10 @@ pub struct ModelConfig {
     pub structured: bool,
     #[serde(default)]
     pub native_search: bool,
+    /// 备用模型 id（同 provider 内）：主模型连接失败 / 5xx / 429 / 超时且尚未
+    /// 产生部分输出时，按列表顺序降级一次。留空 = 不启用 fallback 链。
+    #[serde(default)]
+    pub fallbacks: Vec<String>,
 }
 
 impl Default for ModelConfig {
@@ -54,6 +58,7 @@ impl Default for ModelConfig {
             mapping: String::new(),
             structured: false,
             native_search: false,
+            fallbacks: Vec::new(),
         }
     }
 }
@@ -88,6 +93,32 @@ fn default_color() -> String {
 }
 fn default_api() -> String {
     "anthropic".to_string()
+}
+
+/// 阶段四·沙箱 v1 配置。默认 `off`：与改前行为完全一致，不拦截、不标注。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SandboxConfig {
+    /// `off`（默认，保持既有行为）| `warn`（越权只记录并在结果里标注）|
+    /// `enforce`（越出工作区的写直接拒绝；出站网络默认拒，仅白名单放行）。
+    #[serde(default = "default_sandbox_mode")]
+    pub mode: String,
+    /// 出站网络允许的域名/IP 前缀白名单（大小写不敏感、按后缀匹配）。
+    /// 空 = 不额外放行。仅在 `enforce` 下参与拦截；`off`/`warn` 不读它。
+    #[serde(default)]
+    pub network_allow: Vec<String>,
+}
+
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        Self {
+            mode: default_sandbox_mode(),
+            network_allow: Vec::new(),
+        }
+    }
+}
+
+fn default_sandbox_mode() -> String {
+    "off".to_string()
 }
 
 impl ProviderConfig {
@@ -268,6 +299,9 @@ pub struct Config {
     /// 不走代理的主机后缀/网段列表，逗号分隔。
     #[serde(default)]
     pub http_no_proxy: String,
+    /// 阶段四·沙箱 v1：工作区写白名单 + 出站网络开关。默认 off，不改既有行为。
+    #[serde(default)]
+    pub sandbox: SandboxConfig,
     /// 调试：把每次发往模型的请求体（system+tools+history）追加落盘到
     /// logs/model-io.jsonl。只记请求侧（流式响应无完整原文）。
     #[serde(default)]
@@ -489,6 +523,7 @@ impl Default for Config {
             code_wrap: false,
             http_proxy: String::new(),
             http_no_proxy: String::new(),
+            sandbox: SandboxConfig::default(),
             model_io_log: false,
             enter_mode: default_enter_mode(),
             session_retention_days: 0,
@@ -526,6 +561,7 @@ pub fn default_providers() -> Vec<ProviderConfig> {
                 structured: false,
                 native_search: false,
                 enabled: true,
+                fallbacks: Vec::new(),
             },
             ModelConfig {
                 id: "deepseek-reasoner".into(),
@@ -540,6 +576,7 @@ pub fn default_providers() -> Vec<ProviderConfig> {
                 structured: false,
                 native_search: false,
                 enabled: true,
+                fallbacks: Vec::new(),
             },
         ],
     }]
@@ -573,6 +610,7 @@ pub fn free_provider() -> ProviderConfig {
             structured: false,
             native_search: false,
             enabled: true,
+            fallbacks: Vec::new(),
         }],
     }
 }
@@ -606,6 +644,45 @@ impl Config {
 
     pub fn logs_dir() -> PathBuf {
         Self::home_dir().join("logs")
+    }
+
+    // ---- 阶段四·PARABLE_HOME 收口：所有子系统目录统一从这里派生，
+    // 不再各自 join home_dir，避免出现绕过环境变量的第二条解析路径。
+
+    pub fn sessions_dir() -> PathBuf {
+        Self::home_dir().join("sessions")
+    }
+
+    pub fn checkpoints_dir() -> PathBuf {
+        Self::home_dir().join("checkpoints")
+    }
+
+    pub fn agents_dir() -> PathBuf {
+        Self::home_dir().join("agents")
+    }
+
+    pub fn skills_dir() -> PathBuf {
+        Self::home_dir().join("skills")
+    }
+
+    pub fn plugins_dir() -> PathBuf {
+        Self::home_dir().join("plugins")
+    }
+
+    pub fn uploads_dir() -> PathBuf {
+        Self::home_dir().join("uploads")
+    }
+
+    pub fn memory_path() -> PathBuf {
+        Self::home_dir().join("memory.json")
+    }
+
+    pub fn schedule_path() -> PathBuf {
+        Self::home_dir().join("schedule.json")
+    }
+
+    pub fn cookies_path() -> PathBuf {
+        Self::home_dir().join("browser-cookies.json")
     }
 
     /// 修复历史遗留的非法值：模型 context = 0（旧版 UI 落库）会让压缩判定

@@ -106,7 +106,7 @@ impl Default for PluginStore {
 
 impl PluginStore {
     pub fn new() -> Self {
-        let root = crate::config::Config::home_dir().join("plugins");
+        let root = crate::config::Config::plugins_dir();
         let _ = std::fs::create_dir_all(&root);
         Self { root }
     }
