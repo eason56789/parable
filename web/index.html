@@ -6734,13 +6734,13 @@ function dispatch(ev) {
           toast(ev.message);
           if (curA && curText.trim() === '') {
             const p = document.createElement('p');
-            p.style.color = '#f87171';
+            p.style.color = 'var(--danger-text)';
             p.textContent = ev.message;
             curA.querySelector('.ab').append(p);
           }
         } else {
           const p = document.createElement('p');
-          p.style.color = '#f87171';
+          p.style.color = 'var(--danger-text)';
           p.textContent = '⚠ ' + ev.message;
           if (curA) curA.querySelector('.ab').append(p);
         }
@@ -6842,9 +6842,14 @@ document.addEventListener('click', e => {
   const a = e.target.closest && e.target.closest('a[href]');
   if (!a) return;
   const href = a.getAttribute('href') || '';
-  if (!href || href.startsWith('#') || href.startsWith('javascript:')) return;
+  if (!href || href.startsWith('#')) return;
   const abs = a.href || href;
-  if (!/^https?:/i.test(abs)) return;
+  let proto = '';
+  try { proto = new URL(abs, location.origin).protocol.toLowerCase(); }
+  catch (err) { e.preventDefault(); return; }
+  // 协议白名单：只放行 http/https；javascript:/data:/vbscript: 等一律拦下（A-07）。
+  if (proto === 'javascript:' || proto === 'data:' || proto === 'vbscript:') { e.preventDefault(); return; }
+  if (proto !== 'http:' && proto !== 'https:') return;
   // 本服务自己的地址（关于页「在浏览器中打开」用的是原生按钮，不是链接）
   // 也走统一入口：系统浏览器模式下正好就是想要的落点。
   // Shift+点击 = 只这一次强制走系统浏览器（不用去设置里改默认值）。
@@ -7031,7 +7036,7 @@ async function run(q) {
       toast(e.message);
       if (!curA) curA = aMsg(null, false, Date.now());
       const p = document.createElement('p');
-      p.style.color = '#f87171';
+      p.style.color = 'var(--danger-text)';
       p.dataset.err = '1';
       p.textContent = '⚠ ' + e.message;
       if (curA) curA.querySelector('.ab').append(p);
@@ -8089,9 +8094,15 @@ function sbNode(c) {
     d = document.createElement('div');
     d.className = 'rc';
     d.dataset.id = c.id;
+    // 会话行是可点击的 div：补按钮语义与键盘可达（D-10）。
+    d.setAttribute('role', 'button');
+    d.setAttribute('tabindex', '0');
     d.innerHTML = '<span class="sdot"></span><span class="rci">' + ic('pin') + '</span><span class="rct"></span>' +
       '<span class="rcmeta"><span class="rcdt"></span><span class="rcd"></span></span>';
     d.onclick = () => openSession(c.id);
+    d.onkeydown = e => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openSession(c.id); }
+    };
     d.oncontextmenu = e => {
       e.preventDefault();
       e.stopPropagation();
@@ -8103,6 +8114,7 @@ function sbNode(c) {
   }
   d.dataset.ts = c.ts || Date.now();
   d.querySelector('.rct').textContent = noEmoji(c.t || '');
+  d.setAttribute('aria-label', noEmoji(c.t || '') || t('sb_all'));
   d.querySelector('.rcd').textContent = fmtAgo(+d.dataset.ts);
   // 状态小球 = 未读徽标 + 实时转圈：
   //  - 转圈（运行中）是实时态：不在看它就显示——点进去消失、离开又出现；
@@ -8482,7 +8494,11 @@ async function openSession(id, focusMsg) {
   convGen++;
   qsReset(true);
   stopTurnProbe();   // 上一个会话的轮询不能再对新会话下结论
+  // 切会话时一并清掉「等待首条会话回执」的在途标记，避免旧会话的 sessionId
+  // 被误判成当前会话的回执（B-09）。
   expectBubble = false;
+  awaitingSession = false;
+  pendingSid = null;
   try {
     const res = await api('/sessions/' + id + '/messages');
     if (my !== openTok) return;
@@ -8734,8 +8750,18 @@ async function openSession(id, focusMsg) {
     // 否则用户在定位/重放期间切走，旧会话的内容会画进新会话。
     if (my !== openTok || convGen !== gen + 1) return;
     if (focusMsg != null) {
-      const hit = [...feed.querySelectorAll('[data-mi]')]
+      const byMi = () => [...feed.querySelectorAll('[data-mi]')]
         .find(n => n.dataset.mi === String(focusMsg));
+      let hit = byMi();
+      // 目标消息被早期折叠收进占位条：先展开折叠再定位，保证跳转不丢消息（B-03）。
+      if (!hit) {
+        const fs = feed.querySelector(':scope > .foldsent');
+        if (fs && fs._hidden) {
+          fs._hidden.forEach(n2 => feed.insertBefore(n2, fs));
+          fs.remove();
+          hit = byMi();
+        }
+      }
       if (hit) {
         hit.scrollIntoView({ block: 'center', behavior: 'smooth' });
         hit.classList.add('flash');
@@ -8972,10 +8998,15 @@ function foldEarlyTurns() {
   const hidden = kids.slice(0, cut);
   // 只折叠「确实有内容」的那部分：全是空白就不值得做一个占位条。
   if (!hidden.length) return;
+  // 折叠前量一次高度：占位条保留估算高度，滚动尺不至于塌成一条；
+  // 被隐藏节点仍挂在 box._hidden 上，跳转/展开时按原序恢复。
+  const est = hidden.reduce((s, n2) => s + (n2.offsetHeight || 0), 0);
   const box = document.createElement('div');
   box.className = 'foldsent';
   const n = userIdx.length - FOLD_KEEP_TURNS;
   box.innerHTML = '<button class="btn">' + esc(t('fold_early').replace('{n}', n)) + '</button>';
+  if (est > 0) box.style.minHeight = Math.min(est, 240) + 'px';
+  box._hidden = hidden;
   feed.insertBefore(box, hidden[0]);
   hidden.forEach(n2 => { n2.style.display = 'none'; });
   box.querySelector('button').onclick = () => {
@@ -10096,7 +10127,7 @@ function nav() {
     '<div id="sback"><button data-back title="' + t('close') + '">' + ic('back') + '</button>' +
     '<span class="sbx"><b>' + t('set') + '</b><span>' + (z ? '返回工作区' : 'Back to workspace') + '</span></span></div>' +
     '<input id="sfind" placeholder="' + (z ? '搜索设置' : 'Search settings') + '" spellcheck="false" autocomplete="off">' +
-    TGRP.map(g => '<div class="sgrp" data-grp="' + g.k + '">' + t(g.k) + '</div>' +
+    TGRP.map(g => (g.tabs.length > 1 ? '<div class="sgrp" data-grp="' + g.k + '">' + t(g.k) + '</div>' : '') +
       g.tabs.map(btn).join('')).join('');
   const f = $('#sfind');
   if (f) {
