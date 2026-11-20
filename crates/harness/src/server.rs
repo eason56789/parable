@@ -7,7 +7,7 @@ use crate::event::EventHub;
 use crate::permission::{Decision, PermissionBroker};
 use crate::session::{SessionStore, SharedStore};
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::Next;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
@@ -834,7 +834,7 @@ async fn upload_attachment(
         )
             .into_response();
     }
-    let dir = crate::config::Config::home_dir().join("uploads");
+    let dir = crate::config::Config::uploads_dir();
     if let Err(e) = std::fs::create_dir_all(&dir) {
         return server_error(e);
     }
@@ -975,7 +975,7 @@ async fn reveal_file(
     }
     // C-18：只允许定位工作区或 ~/.parable/uploads 下的文件，避免借资源管理器
     // 暴露本机任意路径的文件名/位置。
-    let uploads = crate::config::Config::home_dir().join("uploads");
+    let uploads = crate::config::Config::uploads_dir();
     let mut allowed_roots: Vec<std::path::PathBuf> = vec![uploads];
     for s in state.store.list("").await {
         if !s.workspace.is_empty() {
@@ -3897,7 +3897,7 @@ async fn get_usage(
         Some("30d") => "30d",
         _ => "all",
     };
-    let sessions_root = Config::home_dir().join("sessions");
+    let sessions_root = Config::sessions_dir();
     let mut snap = state.usage.snapshot(range, &sessions_root).await;
     // The journal only knows session ids; the title lives in the session
     // file. Enrich the "top sessions" list so the UI can show something
@@ -3932,8 +3932,27 @@ async fn tools(State(state): State<SharedState>, headers: HeaderMap) -> Response
         (cfg.search_pref.clone(), cfg.search_key.clone(), cfg.anysearch_key.clone())
     };
     let reg = crate::tools::Registry::new(std::path::PathBuf::from(".")).with_search(&pref, &key, &akey);
+    // 阶段四：强 ETag（schema 版本 + 插件数量 + MCP 数量/世代 + search_pref）。
+    // 命中 If-None-Match 返回 304，不序列化工具 body。
+    let etag = reg.schema_etag();
+    let etag_value = HeaderValue::from_str(&etag).unwrap_or_else(|_| HeaderValue::from_static(""));
+    if let Some(incoming) = headers
+        .get(axum::http::header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+    {
+        if incoming.trim() == etag {
+            return (
+                StatusCode::NOT_MODIFIED,
+                [(axum::http::header::ETAG, etag_value)],
+            )
+                .into_response();
+        }
+    }
     let specs = reg.specs();
-    Json(json!({"tools": specs.as_ref()})).into_response()
+    let mut resp = Json(json!({"tools": specs.as_ref()})).into_response();
+    resp.headers_mut()
+        .insert(axum::http::header::ETAG, etag_value);
+    resp
 }
 
 // ------------------------------------------------------------------ bootstrap
@@ -4005,6 +4024,7 @@ pub async fn serve_in(
                         structured: false,
                         native_search: false,
                         enabled: true,
+                        fallbacks: Vec::new(),
                     });
                     changed = true;
                 }
@@ -4236,7 +4256,7 @@ pub async fn serve_in(
     }
 
     let memory = Arc::new(crate::memory::MemoryStore::with_path(
-        crate::config::Config::home_dir().join("memory.json"),
+        crate::config::Config::memory_path(),
     ));
 
     let state: SharedState = Arc::new(AppState {

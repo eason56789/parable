@@ -138,6 +138,20 @@ fn check_within(workspace: &Path, path: &str) -> Result<PathBuf, HarnessError> {
     if !joined_norm.starts_with(&ws_norm) {
         return Err(HarnessError::Tool(format!("路径越出工作区: {trimmed}")));
     }
+    // G-01：词法规范化挡不住工作区内指向外部的符号链接。直读分支会跟随
+    // 链接读文件，这里在存在时拒绝链接，并 canonicalize 后复核仍在工作区内。
+    if let Ok(md) = std::fs::symlink_metadata(&joined) {
+        if md.file_type().is_symlink() {
+            return Err(HarnessError::Tool(format!(
+                "拒绝跟随符号链接: {trimmed}"
+            )));
+        }
+        if let (Ok(ws_real), Ok(abs_real)) = (workspace.canonicalize(), joined.canonicalize()) {
+            if !abs_real.starts_with(&ws_real) {
+                return Err(HarnessError::Tool(format!("路径越出工作区: {trimmed}")));
+            }
+        }
+    }
     Ok(joined_norm)
 }
 

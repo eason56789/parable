@@ -620,6 +620,16 @@ static MCP_TOOLS: std::sync::RwLock<Vec<crate::provider::ToolSpec>> =
     std::sync::RwLock::new(Vec::new());
 static MCP_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// FNV-1a 64 位哈希：仅用于 ETag 输入指纹，不引入新依赖。
+fn fnv1a_64(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in s.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
 /// run_turn 调用：刷新 MCP 工具缓存（并 bump 世代）。
 pub fn mcp_set_tools(specs: Vec<crate::provider::ToolSpec>) {
     if let Ok(mut g) = MCP_TOOLS.write() {
@@ -716,6 +726,17 @@ impl Registry {
         let mut cache = specs_cache().lock().unwrap_or_else(|e| e.into_inner());
         *cache = Some((cache_key, std::sync::Arc::clone(&specs)));
         specs
+    }
+
+    /// 阶段四·/api/tools 强 ETag：schema 版本 + 插件数量 + MCP 数量/世代 + search_pref。
+    /// 任一输入变化 ETag 即变化；同参数二次请求可命中 304，不序列化 body。
+    pub fn schema_etag(&self) -> String {
+        const SCHEMA_VERSION: u64 = 1;
+        let plugin_n = self.plugin_tools.read().map(|g| g.len()).unwrap_or(0);
+        let mcp_n = MCP_TOOLS.read().map(|g| g.len()).unwrap_or(0);
+        let mcp_gen = mcp_gen();
+        let pref_hash = fnv1a_64(&self.search_pref);
+        format!("\"v{SCHEMA_VERSION}-p{plugin_n}-m{mcp_n}-g{mcp_gen}-{pref_hash:016x}\"")
     }
 
     fn build_specs(&self) -> Vec<crate::provider::ToolSpec> {
@@ -1620,6 +1641,31 @@ impl Registry {
         let timeout = a["timeout_ms"].as_u64().unwrap_or(120_000);
         // 模型写的调用意图（可选）：进工具卡标题与 hooks 载荷。
         let description = a["description"].as_str().unwrap_or_default();
+
+        // 阶段四·沙箱 v1：默认 off，与改前行为完全一致；enforce 越权直接结构化
+        // 拒绝（不弹审批）；warn 只在结果里标注。检查基于命令前置声明的 cwd +
+        // 显式绝对路径/联网主机，不做脆弱的命令正则拆解。
+        let policy = match ctx.config.as_ref() {
+            Some(c) => crate::permission::SandboxPolicy::from_config(&*c.read().await),
+            None => crate::permission::SandboxPolicy::off(),
+        };
+        let mut sandbox_notes: Vec<String> = Vec::new();
+        for verdict in [
+            policy.check_cwd(&self.workspace, &cwd),
+            policy.check_command_paths(&self.workspace, command),
+            policy.check_network_command(command),
+        ] {
+            match verdict {
+                crate::permission::SandboxVerdict::Deny { code, message, suggestion } => {
+                    return Err(HarnessError::PermissionDenied(format!(
+                        "[{code}] {message}\n建议：{suggestion}"
+                    )));
+                }
+                crate::permission::SandboxVerdict::Warn { notes } => sandbox_notes.extend(notes),
+                crate::permission::SandboxVerdict::Allow => {}
+            }
+        }
+
         // 命令原文进权限链:面板上能看到真正要执行的命令,Always 规则按命令精确匹配
         ctx.authorize_shell("bash", &cwd.to_string_lossy(), Risk::Shell, command)
             .await?;
@@ -1636,7 +1682,7 @@ impl Registry {
             let job = terms
                 .start(ctx.hub.clone(), cwd.clone(), command.to_string())
                 .await?;
-            let body = format!(
+            let mut body = format!(
                 "Started in the background as job `{id}`.\n\
 Command: {command}\n\
 Working directory: {cwd}\n\n\
@@ -1646,6 +1692,10 @@ Poll `background_list` to check status/output, or `background_kill` to stop it."
                 command = command,
                 cwd = cwd.display(),
             );
+            if !sandbox_notes.is_empty() {
+                body.push_str("\n[沙箱提示] ");
+                body.push_str(&sandbox_notes.join("；"));
+            }
             return Ok(ToolOutcome {
                 ok: true,
                 title: format!("Started in background · {}", truncate(if description.trim().is_empty() { command } else { description }, 60)),
@@ -1653,7 +1703,7 @@ Poll `background_list` to check status/output, or `background_kill` to stop it."
                 for_model: body,
             });
         }
-        shell::bash(
+        let mut outcome = shell::bash(
             command,
             &cwd,
             timeout,
@@ -1662,7 +1712,12 @@ Poll `background_list` to check status/output, or `background_kill` to stop it."
             &ctx.call_id,
             description,
         )
-        .await
+        .await?;
+        if !sandbox_notes.is_empty() {
+            let note = format!("[沙箱提示] {}", sandbox_notes.join("；"));
+            outcome.for_model = format!("{note}\n{}", outcome.for_model);
+        }
+        Ok(outcome)
     }
 
     /// `background_list` —— 看后台 job 的状态与输出尾巴。
@@ -3245,5 +3300,16 @@ mod tests {
             string_array(&serde_json::json!({"k": ["a", 1, "b"]}), "k"),
             vec!["a".to_string(), "b".to_string()]
         );
+    }
+
+    #[test]
+    fn etag_stable_for_same_state_and_changes_with_pref() {
+        let a = Registry::new(std::path::PathBuf::from(".")).with_search("auto", "", "");
+        let b = Registry::new(std::path::PathBuf::from(".")).with_search("auto", "", "");
+        // 同参数两次构造：ETag 必须一致（可命中 304）。
+        assert_eq!(a.schema_etag(), b.schema_etag());
+        // 搜索偏好变化：ETag 必须随之变化。
+        let c = Registry::new(std::path::PathBuf::from(".")).with_search("deepseek", "", "");
+        assert_ne!(a.schema_etag(), c.schema_etag());
     }
 }

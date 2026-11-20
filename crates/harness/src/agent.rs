@@ -5,7 +5,7 @@ use crate::config::Config;
 use crate::error::HarnessError;
 use crate::event::EventHub;
 use crate::permission::PermissionBroker;
-use crate::provider::{self, AsstPart, ChatRequest, Msg, StreamChunk, ToolSpec, UserPart};
+use crate::provider::{self, AsstPart, ChatRequest, ChunkStream, Msg, StreamChunk, ToolSpec, UserPart};
 use crate::session::{PendingInput, SharedStore, StoredMessage};
 use crate::token::Usage;
 use crate::tools::{DisplayKind, Registry, ToolCtx};
@@ -350,7 +350,7 @@ impl AgentRuntime {
             computer: Arc::new(crate::computer::ComputerBridge::new()),
             desktop: Arc::new(crate::desktop::DesktopBridge::new()),
             checkpoints: Arc::new(crate::checkpoint::CheckpointStore::new(
-                Config::home_dir().join("checkpoints"),
+                Config::checkpoints_dir(),
             )),
             mcp: Arc::new(crate::mcp::McpManager::new()),
             terms: None,
@@ -792,11 +792,11 @@ impl AgentRuntime {
         Ok(turn_id)
     }
 
-    /// Resolve the configured model to a concrete provider.
+    /// Resolve the configured model to a concrete provider, plus its fallback chain.
     async fn resolve_provider(
         &self,
         model_sel: &str,
-    ) -> Result<(Box<dyn provider::Provider>, String), HarnessError> {
+    ) -> Result<ProviderChain, HarnessError> {
         let cfg = self.config.read().await;
         let (p, m) = cfg
             .resolve_model(model_sel)
@@ -813,7 +813,18 @@ impl AgentRuntime {
                 p.name
             )));
         }
-        Ok((build_bound(p, &m.id, m.thinking), m.id.clone()))
+        let primary = (build_bound(p, &m.id, m.thinking), m.id.clone());
+        // 阶段四·fallback 链：同 provider 内按 fallbacks 列表解析备用模型；
+        // 未配置或备用模型被禁用/不存在则跳过，不启用降级。
+        let fallbacks = m
+            .fallbacks
+            .iter()
+            .filter_map(|fb| {
+                let fm = p.models.iter().find(|x| x.id == *fb && x.enabled)?;
+                Some((build_bound(p, &fm.id, fm.thinking), fm.id.clone()))
+            })
+            .collect();
+        Ok(ProviderChain { primary, fallbacks })
     }
 
     /// Fail fast when the selected/fallback model has no usable provider or key.
@@ -856,7 +867,8 @@ impl AgentRuntime {
             "BEGIN TRANSCRIPT\n{}\nEND TRANSCRIPT",
             render_for_summary(&history[..split])
         );
-        let (provider, _mid) = self.resolve_provider(model_sel).await?;
+        let chain = self.resolve_provider(model_sel).await?;
+        let provider = chain.primary.0;
         let summary = summarize(
             provider.as_ref(),
             COMPACTION_PROMPT,
@@ -999,10 +1011,11 @@ impl AgentRuntime {
         goal: &crate::session::GoalState,
         opts: &TurnOptions,
     ) -> (String, String) {
-        let (provider, _mid) = match self.resolve_provider(&opts.model_sel).await {
+        let chain = match self.resolve_provider(&opts.model_sel).await {
             Ok(p) => p,
             Err(e) => return ("paused".into(), format!("无法调用模型进行判定：{e}")),
         };
+        let provider = chain.primary.0;
         // Show the judge the tail of the conversation, not the whole thing.
         let msgs = self.store.messages(session_id).await;
         let mut tail = String::new();
@@ -1105,7 +1118,7 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
         // live outside `build_system_prompt`, so a `systemPromptRaw` override
         // still carries what the user asked us to remember.
         if let Some(mem) = crate::memory::MemoryStore::with_path(
-            crate::config::Config::home_dir().join("memory.json"),
+            crate::config::Config::memory_path(),
         )
         .prompt_block()
         .await
@@ -1332,7 +1345,7 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
         // 先落库再解析供应商：供应商没配好（缺 key / 模型被删）也是「这一轮
         // 失败」，用户的提问必须留在历史里——否则界面上那个气泡没有存储
         // 下标，点「重新生成」只会得到一句「这条消息不在存储里」。
-        let (provider, model_id) = match self.resolve_provider(&model_sel).await {
+        let chain = match self.resolve_provider(&model_sel).await {
             Ok(x) => x,
             Err(e) => {
                 // 提前失败也要统一记账 + 发布 turn.end（stopReason: error）。
@@ -1345,6 +1358,8 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
                 return Err(e);
             }
         };
+        let (mut provider, mut model_id) = chain.primary;
+        let mut fallbacks = chain.fallbacks;
 
         // 每轮一个 Registry（带 search 配置），specs() 与工具执行共用同一实例，
         // 修复搜索配置到不了执行现场的问题。
@@ -1553,14 +1568,61 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
                 .await;
 
             let model_t0 = std::time::Instant::now();
-            let stream_result = tokio::select! {
-                biased;
-                _ = cancel.cancelled() => break 'turn Ok("cancelled".to_string()),
-                r = provider.stream_chat(req) => r,
-            };
-            let mut stream = match stream_result {
-                Ok(s) => s,
-                Err(e) => {
+
+            // 阶段四·fallback 链：仅在「连接建立前」的瞬时故障（连接失败 / 5xx /
+            // 429 / 超时）切换备用模型；流一旦开始产出 chunk，后续错误不再降级，
+            // 避免两段半截内容混拼。主 provider 不被 move，避免与压缩协程的借用冲突。
+            let mut fallback_active: Option<(Box<dyn provider::Provider>, String)> = None;
+            let mut stream: Option<ChunkStream> = None;
+            let mut final_err: Option<HarnessError> = None;
+            loop {
+                let (prov, mid, is_fallback) = match &fallback_active {
+                    Some((p, m)) => (p.as_ref(), m.clone(), true),
+                    None => (provider.as_ref(), model_id.clone(), false),
+                };
+                let mut req_attempt = req.clone();
+                req_attempt.model = mid.clone();
+                let attempt_result = tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => break 'turn Ok("cancelled".to_string()),
+                    r = prov.stream_chat(req_attempt) => r,
+                };
+                match attempt_result {
+                    Ok(s) => {
+                        // 命中备用：把生效的 provider/model 写回，供后续压缩与审计使用。
+                        if is_fallback {
+                            if let Some((p, m)) = fallback_active.take() {
+                                provider = p;
+                                model_id = m;
+                            }
+                        }
+                        stream = Some(s);
+                        break;
+                    }
+                    Err(e) => {
+                        let has_next = !fallbacks.is_empty();
+                        if e.is_retryable() && has_next {
+                            let from = mid.clone();
+                            let next = fallbacks[0].1.clone();
+                            self.hub.publish(
+                                session_id,
+                                "model.fallback",
+                                json!({"turnId": turn_id, "from": from, "to": next, "reason": e.to_string()}),
+                            );
+                            fallback_active = Some(fallbacks.remove(0));
+                            continue;
+                        }
+                        final_err = Some(e);
+                        break;
+                    }
+                }
+            }
+            let mut stream = match stream {
+                Some(s) => s,
+                None => {
+                    let e = final_err.unwrap_or_else(|| {
+                        HarnessError::Other("model stream unavailable".into())
+                    });
                     self.hub.publish(
                         session_id,
                         "error",
@@ -2546,6 +2608,12 @@ fn spawn_goal_run(
             me.drain_queue(&sid).await;
         }
     });
+}
+
+/// 阶段四·模型 fallback 链：主模型 + 同 provider 备用模型列表。
+pub struct ProviderChain {
+    pub primary: (Box<dyn provider::Provider>, String),
+    pub fallbacks: Vec<(Box<dyn provider::Provider>, String)>,
 }
 
 /// Construct a provider bound to a concrete model id.

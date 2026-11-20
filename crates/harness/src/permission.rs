@@ -287,6 +287,248 @@ pub fn inside_workspace(workspace: &Path, path: &Path) -> bool {
     )
 }
 
+// ------------------------------------------------------------------ 阶段四·沙箱 v1
+
+/// 沙箱判定结果。`off` 模式下恒为 [`SandboxVerdict::Allow`]，既有行为不变。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SandboxVerdict {
+    /// 放行：off 模式，或检查通过。
+    Allow,
+    /// warn 模式：越界/可疑，只在结果里标注，不阻断执行。
+    Warn { notes: Vec<String> },
+    /// enforce 模式：越权，结构化拒绝（code + 说明 + 建议），不弹审批。
+    Deny {
+        code: String,
+        message: String,
+        suggestion: String,
+    },
+}
+
+impl SandboxVerdict {
+    pub fn notes(&self) -> Vec<String> {
+        match self {
+            SandboxVerdict::Warn { notes } => notes.clone(),
+            _ => Vec::new(),
+        }
+    }
+}
+
+/// 沙箱策略：从配置快照构造。默认 `off`，与改前行为完全一致。
+#[derive(Debug, Clone)]
+pub struct SandboxPolicy {
+    pub mode: String,
+    pub network_allow: Vec<String>,
+}
+
+impl SandboxPolicy {
+    pub fn off() -> Self {
+        Self {
+            mode: "off".to_string(),
+            network_allow: Vec::new(),
+        }
+    }
+
+    pub fn from_config(cfg: &crate::config::Config) -> Self {
+        Self {
+            mode: cfg.sandbox.mode.clone(),
+            network_allow: cfg.sandbox.network_allow.clone(),
+        }
+    }
+
+    pub fn is_off(&self) -> bool {
+        !matches!(self.mode.as_str(), "warn" | "enforce")
+    }
+
+    /// 写目标边界检查：命令前置声明的 cwd 必须落在 workspace 根内。
+    /// 用「解析绝对路径 + canonicalize 后组件前缀比较」，不靠正则拆命令。
+    pub fn check_cwd(&self, workspace: &Path, cwd: &Path) -> SandboxVerdict {
+        if self.is_off() {
+            return SandboxVerdict::Allow;
+        }
+        if inside_workspace(workspace, cwd) {
+            return SandboxVerdict::Allow;
+        }
+        let message = format!(
+            "工作目录 `{}` 越出当前会话工作区根 `{}`",
+            cwd.display(),
+            workspace.display()
+        );
+        self.deny_or_warn(
+            "sandbox:write-escape",
+            message,
+            "把命令的 cwd 放在当前会话工作区目录内；确需访问区外路径时，在配置中把 sandbox.mode 调为 off。".into(),
+        )
+    }
+
+    /// 命令内显式写出的绝对路径（保守抽取，仅做边界比对；拆不出的命令不臆测）。
+    pub fn check_command_paths(&self, workspace: &Path, command: &str) -> SandboxVerdict {
+        if self.is_off() {
+            return SandboxVerdict::Allow;
+        }
+        let mut notes = Vec::new();
+        for token in shell_tokens(command) {
+            let Some(p) = abs_path_token(&token) else { continue };
+            if !inside_workspace(workspace, &p) {
+                notes.push(format!(
+                    "命令引用的路径 `{}` 越出工作区根 `{}`",
+                    p.display(),
+                    workspace.display()
+                ));
+            }
+        }
+        if notes.is_empty() {
+            SandboxVerdict::Allow
+        } else {
+            self.deny_or_warn("sandbox:path-escape", notes.join("；"),
+                "命令内的区外绝对路径请改为工作区相对路径；或在配置中关闭沙箱。".into())
+        }
+    }
+
+    /// 主机是否在网络白名单（域名后缀 / IP 前缀，大小写不敏感，忽略端口）。
+    pub fn host_allowed(&self, host: &str) -> bool {
+        let host = host.split(':').next().unwrap_or(host).to_ascii_lowercase();
+        if host.is_empty() {
+            return false;
+        }
+        self.network_allow.iter().any(|entry| {
+            let a = entry.trim().to_ascii_lowercase();
+            if a.is_empty() {
+                return false;
+            }
+            if a.ends_with('.') {
+                // 网段前缀写法（如 `10.0.0.`）：主机以前缀开头即放行。
+                host.starts_with(&a)
+            } else {
+                host == a || host.ends_with(&format!(".{a}"))
+            }
+        })
+    }
+
+    /// 出站网络预检：识别常见联网动词并抽取目标主机。enforce 下主机不在
+    /// 白名单即拒绝；warn 下仅标注。注意这是命令行预检，真正的子进程 socket
+    /// 隔离需 OS 级 job object / 防火墙 / 代理，属后续路线图。
+    pub fn check_network_command(&self, command: &str) -> SandboxVerdict {
+        if self.is_off() {
+            return SandboxVerdict::Allow;
+        }
+        let tokens: Vec<String> = shell_tokens(command);
+        let Some(verb) = tokens.first().map(|t| t.to_ascii_lowercase()) else {
+            return SandboxVerdict::Allow;
+        };
+        const NETWORK_VERBS: [&str; 12] = [
+            "curl", "curl.exe", "wget", "wget.exe", "ssh", "scp", "sftp", "ftp",
+            "nc", "ncat", "telnet", "invoke-webrequest",
+        ];
+        if !NETWORK_VERBS.contains(&verb.as_str()) {
+            return SandboxVerdict::Allow;
+        }
+        let host = tokens
+            .iter()
+            .skip(1)
+            .find_map(|t| url_host(t))
+            .unwrap_or_default();
+        if host.is_empty() {
+            // 联网动词但抽不出主机：拿不准，按可疑处理（warn 标注 / enforce 拒绝）。
+            return self.deny_or_warn(
+                "sandbox:network-unknown-host",
+                format!("命令以联网工具 `{verb}` 开头，但未能解析目标主机"),
+                "在 sandbox.network_allow 中加入目标域名/IP，或关闭沙箱。".into(),
+            );
+        }
+        if self.host_allowed(&host) {
+            return SandboxVerdict::Allow;
+        }
+        self.deny_or_warn(
+            "sandbox:network-denied",
+            format!("联网目标 `{host}` 不在沙箱网络白名单内"),
+            format!("把 `{host}` 加入配置 sandbox.network_allow，或在配置中关闭沙箱。"),
+        )
+    }
+
+    fn deny_or_warn(&self, code: &str, message: String, suggestion: String) -> SandboxVerdict {
+        match self.mode.as_str() {
+            "enforce" => SandboxVerdict::Deny {
+                code: code.to_string(),
+                message,
+                suggestion,
+            },
+            // warn（以及任何非法 mode 值）：只标注，不阻断。
+            _ => SandboxVerdict::Warn {
+                notes: vec![format!("[{code}] {message}")],
+            },
+        }
+    }
+}
+
+/// 粗切 shell 词元：按空白与常见分隔符拆分，剥掉成对引号。仅用于路径/主机预检。
+fn shell_tokens(command: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    for c in command.chars() {
+        match c {
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            c if c.is_whitespace() && !in_single && !in_double => {
+                if !cur.is_empty() {
+                    out.push(std::mem::take(&mut cur));
+                }
+            }
+            _ => cur.push(c),
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// 词元是否是绝对路径：Windows 盘符 / UNC，或 Unix 首斜杠。
+fn abs_path_token(token: &str) -> Option<PathBuf> {
+    let t = token.trim_matches(|c| c == '\'' || c == '"' || c == ',' || c == ';');
+    let win = t
+        .strip_prefix("\\\\")
+        .map(|_| t.to_string())
+        .or_else(|| {
+            let mut chars = t.chars();
+            let drive = chars.next()?;
+            if drive.is_ascii_alphabetic() && chars.next() == Some(':') {
+                Some(t.to_string())
+            } else {
+                None
+            }
+        });
+    if let Some(w) = win {
+        return Some(PathBuf::from(w));
+    }
+    if t.starts_with('/') {
+        Some(PathBuf::from(t))
+    } else {
+        None
+    }
+}
+
+/// 从词元里取主机：剥 scheme、认证信息、路径与端口。
+/// 裸单词（无 scheme、无点号）视为命令名/本地词，返回 None。
+fn url_host(token: &str) -> Option<String> {
+    let t = token.trim_matches(|c| c == '\'' || c == '"' || c == ',');
+    let has_scheme = t.starts_with("https://") || t.starts_with("http://");
+    let t = t.strip_prefix("https://").or_else(|| t.strip_prefix("http://")).unwrap_or(t);
+    let t = t.split('/').next().unwrap_or(t);
+    let t = t.split('?').next().unwrap_or(t);
+    let t = t.split('#').next().unwrap_or(t);
+    let t = t.rsplit('@').next().unwrap_or(t);
+    let host = t.split(':').next().unwrap_or(t);
+    if host.is_empty() || host.chars().any(|c| c.is_whitespace()) {
+        return None;
+    }
+    if !has_scheme && !host.contains('.') {
+        return None;
+    }
+    Some(host.to_string())
+}
+
 pub struct PendingRequest {
     pub tx: oneshot::Sender<Decision>,
     pub tool: String,
@@ -722,6 +964,67 @@ mod tests {
             &base.join("work").join("ws").join("sub").join("f.txt")
         ));
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    fn scratch_pair(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let ws = std::env::temp_dir().join(format!("parable-sbx-{tag}-ws-{}", std::process::id()));
+        let outside = std::env::temp_dir().join(format!("parable-sbx-{tag}-out-{}", std::process::id()));
+        std::fs::create_dir_all(&ws).ok();
+        std::fs::create_dir_all(&outside).ok();
+        (ws, outside)
+    }
+
+    #[test]
+    fn sandbox_off_allows_escape_unchanged() {
+        let (ws, outside) = scratch_pair("off");
+        let policy = SandboxPolicy { mode: "off".into(), network_allow: Vec::new() };
+        // off：既有行为完全不变，越界也放行。
+        assert!(matches!(policy.check_cwd(&ws, &outside), SandboxVerdict::Allow));
+    }
+
+    #[test]
+    fn sandbox_enforce_denies_write_escape_with_structured_error() {
+        let (ws, outside) = scratch_pair("deny");
+        let policy = SandboxPolicy { mode: "enforce".into(), network_allow: Vec::new() };
+        match policy.check_cwd(&ws, &outside) {
+            SandboxVerdict::Deny { code, message, suggestion } => {
+                assert_eq!(code, "sandbox:write-escape");
+                assert!(!message.is_empty());
+                assert!(!suggestion.is_empty());
+            }
+            other => panic!("expected Deny, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sandbox_warn_marks_but_does_not_block() {
+        let (ws, outside) = scratch_pair("warn");
+        let policy = SandboxPolicy { mode: "warn".into(), network_allow: Vec::new() };
+        match policy.check_cwd(&ws, &outside) {
+            SandboxVerdict::Warn { notes } => assert!(!notes.is_empty()),
+            other => panic!("expected Warn, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sandbox_network_allowlist_allows_only_listed_hosts() {
+        let policy = SandboxPolicy {
+            mode: "enforce".into(),
+            network_allow: vec!["api.example.com".into(), "10.0.0.".into()],
+        };
+        assert!(policy.host_allowed("api.example.com"));
+        assert!(policy.host_allowed("sub.api.example.com"));
+        assert!(policy.host_allowed("10.0.0.5"));
+        assert!(!policy.host_allowed("evil.com"));
+
+        match policy.check_network_command("curl https://evil.com/x") {
+            SandboxVerdict::Deny { code, .. } => assert_eq!(code, "sandbox:network-denied"),
+            other => panic!("expected Deny, got {other:?}"),
+        }
+        assert!(matches!(
+            policy.check_network_command("curl https://api.example.com/v1"),
+            SandboxVerdict::Allow
+        ));
     }
 
 }

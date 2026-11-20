@@ -351,7 +351,7 @@ pub fn list_dir(path: &Path) -> Result<ToolOutcome, HarnessError> {
         let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
         entries.push((name, size, is_dir));
     }
-    entries.sort_by(|a, b| (a.2 != b.2, &a.0).cmp(&(b.2 != b.2, &b.0)));
+    entries.sort_by(|a, b| (!a.2, &a.0).cmp(&(!b.2, &b.0)));
 
     // 无上限目录(node_modules 之类)一次性倾倒会撑爆上下文,只展示前
     // MAX_ENTRIES 条,超出部分提示换工具。
