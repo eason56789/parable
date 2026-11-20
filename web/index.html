@@ -2777,20 +2777,50 @@ function confirmBox(message, opts) {
       // 否则强迫症式连按回车很容易误删。
       else if (e.key === 'Enter') {
         e.preventDefault(); e.stopPropagation();
-        finish(document.activeElement === okBtn ? true : document.activeElement === cancelBtn ? false : false);
+        if (document.activeElement === okBtn) finish(armed ? true : false);
+        else if (document.activeElement === cancelBtn) finish(false);
+      }
+      else if (e.key === 'Tab') {
+        // 焦点陷阱：在两个按钮之间循环，不允许 Tab 落到弹层背后的页面（D-08）。
+        e.preventDefault();
+        (document.activeElement === okBtn ? cancelBtn : okBtn).focus();
       }
     };
-    okBtn.onclick = () => finish(true);
+    okBtn.onclick = () => { if (armed) finish(true); };
     cancelBtn.onclick = () => finish(false);
     // 点背景 = 取消
     wrap.onclick = e => { if (e.target === wrap) finish(false); };
     document.addEventListener('keydown', onKey, true);
     document.body.classList.add('modal-open');
     wrap.classList.add('open');
-    // 焦点落在确认按钮上，回车直接确认
-    setTimeout(() => okBtn.focus(), 60);
+    if (danger) {
+      okBtn.disabled = true;
+      okBtn.classList.add('arming');
+      armTimer = setTimeout(() => {
+        armed = true;
+        okBtn.disabled = false;
+        okBtn.classList.remove('arming');
+      }, 300);
+    }
+    // 焦点落在取消按钮上（危险确认默认不预聚焦确定键），回车/空格由 onKey 分流。
+    setTimeout(() => (danger ? cancelBtn : okBtn).focus(), 60);
   });
 }
+
+/* 通用弹层焦点陷阱：#modal（设置）与 #medit（模型编辑）打开时，Tab 只在框内
+   循环；焦点落在背景上时拉回框内首个/末个控件（B-08）。 */
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Tab') return;
+  const overlay = document.querySelector('#medit.open, #modal.open');
+  if (!overlay) return;
+  const sel = 'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
+  const items = [...overlay.querySelectorAll(sel)].filter(n => !n.disabled && n.offsetParent !== null);
+  if (!items.length) { e.preventDefault(); return; }
+  const first = items[0], last = items[items.length - 1];
+  const inside = overlay.contains(document.activeElement);
+  if (e.shiftKey && (!inside || document.activeElement === first)) { e.preventDefault(); last.focus(); }
+  else if (!e.shiftKey && (!inside || document.activeElement === last)) { e.preventDefault(); first.focus(); }
+}, true);
 
 document.addEventListener('click', e => {
   const x = e.target.closest('[data-toast]');
@@ -3229,7 +3259,7 @@ async function renderTeamPage() {
         '<span class="tk-ver">' + (m.toolCalls || 0) + (z ? ' 次工具调用' : ' tool calls') + '</span>' +
       '</div>' +
       (m.result ? '<div class="tk-prompt">' + esc(String(m.result).slice(0, 400)) + '</div>' : '') +
-      (m.error ? '<div class="tk-meta" style="color:#e5534b">' + esc(m.error) + '</div>' : '') +
+      (m.error ? '<div class="tk-meta" style="color:var(--danger-text)">' + esc(m.error) + '</div>' : '') +
       (m.status === 'Running'
         ? '<div class="tk-acts" style="margin-top:10px"><button class="btn danger" data-act="stop">' + (z ? '中断' : 'Interrupt') + '</button></div>'
         : '') +
@@ -3588,9 +3618,15 @@ function bindTeamPage(root) {
 /* ---------------------------------------------------------------- streaming render */
 const chat = $('#chat'), feed = $('#feed');
 let stick = true;
+// 滚动回调里直接读 scrollHeight 会强制同步布局；合并到下一帧，一帧最多读一次几何值。
+let scrollRaf = 0;
 chat.addEventListener('scroll', () => {
-  stick = chat.scrollHeight - chat.scrollTop - chat.clientHeight < 90;
-  $('#jump').classList.toggle('on', !stick && document.body.classList.contains('chat'));
+  if (scrollRaf) return;
+  scrollRaf = requestAnimationFrame(() => {
+    scrollRaf = 0;
+    stick = chat.scrollHeight - chat.scrollTop - chat.clientHeight < 90;
+    $('#jump').classList.toggle('on', !stick && document.body.classList.contains('chat'));
+  });
 });
 /* 跟随滚动：每个 token 都读一次 scrollHeight 会强制同步布局，几千个 delta 下来
    就是卡死的直接原因。这里合并到下一帧，一帧最多一次。 */
@@ -5417,7 +5453,7 @@ function fillToolCard(e, display, ok, title) {
   stTx.classList.remove('run');
   if (ok === false) {
     stTx.textContent = runLabel('err', toolName);
-    stTx.style.color = '#f87171';
+    stTx.style.color = 'var(--danger-text)';
   } else {
     stTx.textContent = runLabel('done', toolName);
     stTx.style.color = '';
@@ -5519,15 +5555,27 @@ function fillToolCard(e, display, ok, title) {
     }
     body.append(d);
   } else if (display.kind === 'image') {
-    diff.textContent = display.media_type === 'image/jpeg' ? 'jpeg' : 'png';
+    // 媒体类型白名单 + 纯 base64 载荷校验：事件里带什么 media_type / data 都不能
+    // 直接拼进 src，避免 data:/http 前缀、换行或非图片类型被当成图片加载（A-06）。
+    const MT_WHITELIST = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
+    const mt = String(display.media_type || 'image/png').toLowerCase();
+    const raw = String(display.data || '');
+    const safeMt = MT_WHITELIST.includes(mt) ? mt : 'image/png';
+    const b64 = /^[A-Za-z0-9+/=\s]+$/.test(raw) ? raw.replace(/\s+/g, '') : '';
+    diff.textContent = safeMt === 'image/jpeg' ? 'jpeg' : 'png';
     const d = document.createElement('div');
     d.className = 'df';
     d.style.cssText = 'padding:0;background:#000';
-    const img = document.createElement('img');
-    img.src = 'data:' + (display.media_type || 'image/png') + ';base64,' + display.data;
-    img.style.cssText = 'display:block;width:100%;height:auto;max-height:420px;object-fit:contain;margin:0 auto';
-    img.alt = 'screenshot';
-    d.append(img);
+    if (b64) {
+      const img = document.createElement('img');
+      img.src = 'data:' + safeMt + ';base64,' + b64;
+      img.style.cssText = 'display:block;width:100%;height:auto;max-height:420px;object-fit:contain;margin:0 auto';
+      img.alt = 'screenshot';
+      d.append(img);
+    } else {
+      d.style.padding = '10px 12px';
+      d.textContent = (S.lang === 'zh' ? '媒体类型不受支持' : 'Unsupported media');
+    }
     body.append(d);
   } else if (display.kind === 'todo') {
     const items = display.todos || [];
@@ -5730,6 +5778,18 @@ function riskChip(risk) {
  * `info` comes from a permission.request event ({callId, tool, path, risk,
  * reason, diffPreview}) or a GET /api/pending entry ({id, tool, ...}).
  */
+/**
+ * 回收挂起权限卡片上的 300s 倒计时定时器。
+ * 切会话 / 清场时 feed 被整体清空，detached 节点上的 setInterval 不会自灭，
+ * 会每秒空转到 300s 超时；这里在 resetTurn 路径统一注销。
+ */
+function clearPermTimers() {
+  if (!feed) return;
+  feed.querySelectorAll('[data-st="wait"]').forEach(e => {
+    if (e._ptimer) { clearInterval(e._ptimer); e._ptimer = null; }
+  });
+}
+
 function showPermPanel(e, callId, info) {
   if (!e) return;
   info = info || {};
@@ -5955,6 +6015,8 @@ qBind();
 function resetTurn() {
   // 先丢掉还没写进 DOM 的正文增量，否则上一个会话的尾巴会拼进下一个会话。
   dropText();
+  // 回收上一会话挂起权限卡片的倒计时定时器（B-01）。
+  clearPermTimers();
   curA = null;
   curStream = null;
   curThinkEl = null;
