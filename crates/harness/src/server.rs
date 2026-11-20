@@ -278,6 +278,9 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/pending", get(pending_permissions))
         .route("/attachments", post(upload_attachment))
         .route("/files/reveal", post(reveal_file))
+        // 设置 → 关于：用系统浏览器打开本机页面 / 停止服务进程
+        .route("/service/open", post(service_open))
+        .route("/shutdown", post(shutdown_service))
         // 侧边栏(side pane):文件浏览 / git 审查 / 浏览器 / 终端
         .route("/fs/tree", get(fs_tree))
         .route("/fs/file", get(fs_file))
@@ -832,6 +835,64 @@ struct RevealReq {
 /// POST /api/files/reveal:在系统文件管理器里打开文件所在位置
 /// （Windows 资源管理器定位到文件、macOS Finder、Linux 目录管理器）。
 /// 附件芯片点击用——文件在 `~/.parable/uploads/` 或工作区内。
+#[derive(Debug, Deserialize)]
+struct OpenUrlReq {
+    /// 要交给系统浏览器的完整地址（已带 token）。
+    url: String,
+}
+
+/// POST /api/service/open —— 用系统默认浏览器打开本服务的页面。
+///
+/// 设置 → 关于 →「在浏览器中打开」用它：桌面壳里的内嵌 WebView 与浏览器标签
+/// 是两个独立前端，用户想在浏览器里用同一份会话时不需要自己去翻端口号。
+async fn service_open(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(r): Json<OpenUrlReq>,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    let url = r.url.trim();
+    // 只允许打开本机地址：这个接口是「打开发布页」，不是通用 URL 启动器。
+    let ok = url.starts_with("http://127.0.0.1:")
+        || url.starts_with("http://localhost:")
+        || url.starts_with("http://[::1]:");
+    if !ok {
+        return bad_request("only loopback URLs may be opened from here");
+    }
+    #[cfg(windows)]
+    let spawned = std::process::Command::new("cmd")
+        .args(["/C", "start", "", url])
+        .spawn();
+    #[cfg(target_os = "macos")]
+    let spawned = std::process::Command::new("open").arg(url).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let spawned = std::process::Command::new("xdg-open").arg(url).spawn();
+    match spawned {
+        Ok(_) => Json(json!({"ok": true})).into_response(),
+        Err(e) => server_error(e),
+    }
+}
+
+/// POST /api/shutdown —— 停掉本地服务进程。
+///
+/// 先回响应再退出：直接 `exit` 会让客户端拿到连接被重置而不是「已停止」。
+async fn shutdown_service(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    tracing::info!("shutdown requested from the UI");
+    tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        std::process::exit(0);
+    });
+    Json(json!({"ok": true})).into_response()
+}
+
 async fn reveal_file(
     State(state): State<SharedState>,
     headers: HeaderMap,
@@ -2159,7 +2220,14 @@ async fn list_tasks(State(state): State<SharedState>, headers: HeaderMap) -> Res
 #[derive(Debug, Deserialize)]
 struct CreateTaskReq {
     name: String,
+    #[serde(default)]
     prompt: String,
+    /// `{"kind":"agent"}`（默认）或 `{"kind":"shell","command":"…"}`。
+    #[serde(default)]
+    action: Option<Value>,
+    /// 触发时用哪个模型（`provider/model`）；空 = 跟随全局。
+    #[serde(default)]
+    model: String,
     timing: crate::schedule::Timing,
     /// Either the plain string `existing` / `reuse` / `new`, or the tagged form
     /// `{"kind":"existing","session_id":"..."}`.
@@ -2167,6 +2235,24 @@ struct CreateTaskReq {
     target: Option<Value>,
     #[serde(default)]
     session_id: String,
+}
+
+/// 把请求里的 action 解析成 `TaskAction`；缺省 = 投递提示词（老客户端不变）。
+fn parse_action(v: Option<&Value>) -> crate::schedule::TaskAction {
+    use crate::schedule::TaskAction;
+    let Some(obj) = v.and_then(|x| x.as_object()) else {
+        return TaskAction::Agent;
+    };
+    match obj.get("kind").and_then(|k| k.as_str()) {
+        Some("shell") => TaskAction::Shell {
+            command: obj
+                .get("command")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
+        },
+        _ => TaskAction::Agent,
+    }
 }
 
 fn parse_target(v: Option<&Value>, fallback_session: &str) -> crate::schedule::Target {
@@ -2215,7 +2301,12 @@ async fn create_task(
         return unauthorized();
     }
     let target = parse_target(r.target.as_ref(), &r.session_id);
-    match state.schedule.create(r.name, r.prompt, r.timing, target).await {
+    let action = parse_action(r.action.as_ref());
+    match state
+        .schedule
+        .create(r.name, r.prompt, action, r.model, r.timing, target)
+        .await
+    {
         Ok(t) => Json(json!(t)).into_response(),
         Err(e) => bad_request(&e.to_string()),
     }
@@ -2322,6 +2413,31 @@ async fn run_task_now(
     let Some(mut task) = state.schedule.store().get(&id).await else {
         return bad_request("unknown task");
     };
+    // shell 任务「立即运行」：直接执行，不建会话、不动模型。
+    if let crate::schedule::TaskAction::Shell { command } = task.action.clone() {
+        let cfg = state.config.read().await;
+        let ws = if cfg.workspace.is_empty() {
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+        } else {
+            std::path::PathBuf::from(&cfg.workspace)
+        };
+        drop(cfg);
+        let job = state.terms.start(state.hub.clone(), ws, command).await;
+        let label = format!("{} · {}", task.name, job.id);
+        let now_iso = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        if let Err(e) = state
+            .schedule
+            .store()
+            .update(&id, |t| {
+                t.last_run_at = Some(now_iso.clone());
+                t.run_count += 1;
+            })
+            .await
+        {
+            tracing::warn!("recording manual run failed for {id}: {e}");
+        }
+        return Json(json!({"ok": true, "jobId": job.id, "label": label})).into_response();
+    }
     match state.schedule.resolve_session(&mut task).await {
         Ok(sid) => {
             // 用用户自己的全局权限模式;选了 full 那是用户自己的选择,
@@ -3747,10 +3863,14 @@ pub async fn serve_in(
     );
     subagents.set_runtime(child_runtime).await;
 
+    // 后台终端注册表：UI 的「后台终端」面板与工具的 background 模式共用一份，
+    // 所以先建出来，再注入 agent。
+    let terms = crate::term::TerminalRegistry::new();
+
     let agent = agent_base
+        .with_terms(terms.clone())
         .with_services(Some(schedule.clone()), Some(subagents.clone()))
         .await;
-
     // Background scheduler: every 20s, fire tasks whose occurrence has passed.
     // Delivery is an ordinary follow-up turn into the target session.
     {
@@ -3763,13 +3883,54 @@ pub async fn serve_in(
                 let now = chrono::Utc::now();
                 let due = schedule.due(now).await;
                 for (mut task, _fired) in due {
+                    // shell 动作不经过模型、不需要会话：直接执行命令并记录结果。
+                    if let crate::schedule::TaskAction::Shell { command } = task.action.clone() {
+                        let cfg = config.read().await;
+                        let ws = if cfg.workspace.is_empty() {
+                            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+                        } else {
+                            std::path::PathBuf::from(&cfg.workspace)
+                        };
+                        let perm = cfg.permission_mode.clone();
+                        drop(cfg);
+                        tracing::info!(
+                            "scheduled shell task {} firing ({} mode): {}",
+                            task.id, perm, command
+                        );
+                        tokio::spawn(async move {
+                            // 到期的 shell 任务用 10 分钟上限，避免一个卡死命令
+                            // 把后台调度线程拖住（每次 fire 都是独立 task）。
+                            let res = crate::tools::shell::bash(
+                                &command,
+                                &ws,
+                                600_000,
+                                &crate::event::EventHub::new(),
+                                "",
+                                "",
+                                "",
+                            )
+                            .await;
+                            match res {
+                                Ok(out) => tracing::info!(
+                                    "scheduled shell task {} finished: {}",
+                                    task.id, out.title
+                                ),
+                                Err(e) => tracing::warn!(
+                                    "scheduled shell task {} failed: {e}",
+                                    task.id
+                                ),
+                            }
+                        });
+                        continue;
+                    }
                     match schedule.resolve_session(&mut task).await {
                         Ok(sid) => {
                             // 与手动"立即运行"一致:用全局配置的权限模式,
                             // 调度投递不偷偷提权到 full。
                             let mode = config.read().await.permission_mode.clone();
+                            // 任务自带模型优先；没指定才跟随全局。
                             let opts = crate::agent::TurnOptions {
-                                model_sel: String::new(),
+                                model_sel: task.model_sel.clone(),
                                 permission_mode: mode,
                                 thinking_level: 0,
                                 plan_mode: false,
@@ -3811,7 +3972,7 @@ pub async fn serve_in(
         subagents,
         usage,
         memory,
-        terms: crate::term::TerminalRegistry::new(),
+        terms,
         started_at: crate::event::now_ms(),
         port: std::sync::atomic::AtomicU16::new(0),
     });

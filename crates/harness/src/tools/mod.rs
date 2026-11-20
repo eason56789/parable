@@ -189,6 +189,12 @@ pub struct ToolCtx {
     pub turn_id: String,
     /// MCP 管理器（mcp_* 工具的执行后端）。
     pub mcp: Option<Arc<crate::mcp::McpManager>>,
+    /// 实时配置句柄：`settings_get` / `settings_set` 用它读写应用设置，
+    /// 改完立即对后续 turn 生效（同一个 Arc 被 agent 与 server 共享）。
+    pub config: Option<Arc<tokio::sync::RwLock<crate::config::Config>>>,
+    /// 后台终端注册表：`bash(background:true)` 把命令交给它托管，
+    /// 立即返回一个 job id，输出仍在「后台终端」面板里实时可见。
+    pub terms: Option<crate::term::TerminalRegistry>,
 }
 
 impl ToolCtx {
@@ -337,6 +343,174 @@ fn str_prop(desc: &str) -> Value {
 
 fn int_prop(desc: &str) -> Value {
     json!({"type":"integer","description": desc})
+}
+
+/// 上下文窗口的短写法：128000 → 128k。
+fn fmt_ctx(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.0}m", n as f64 / 1_000_000.0)
+    } else if n >= 1000 {
+        format!("{:.0}k", n as f64 / 1000.0)
+    } else {
+        n.to_string()
+    }
+}
+
+// ---------------------------------------------------------------- live settings
+
+/// 模型可以读写的设置键：(键, 当前值, 说明)。
+///
+/// 刻意不含 providers / model / key / proxy / mcp_servers / hooks：这些改错
+/// 一次就能让应用不可用，只能由用户自己在设置里动。
+fn settings_snapshot(cfg: &crate::config::Config) -> Vec<(String, String, String)> {
+    let b = |x: bool| if x { "true" } else { "false" }.to_string();
+    vec![
+        ("theme".into(), cfg.theme.clone(), "light | dark | auto".into()),
+        ("font".into(), cfg.font.clone(), "serif | sans | mono".into()),
+        ("size".into(), cfg.size.to_string(), "chat font size 14-20".into()),
+        ("ui_size".into(), cfg.ui_size.to_string(), "interface font size 11-18".into()),
+        ("line_height".into(), format!("{}", cfg.line_height), "line height 1.2-2.4".into()),
+        ("density".into(), cfg.density.clone(), "airy | cozy | compact".into()),
+        ("width".into(), cfg.width.to_string(), "content width 600-960".into()),
+        ("accent".into(), cfg.accent.clone(), "accent color, hex".into()),
+        ("lang".into(), cfg.lang.clone(), "zh | en".into()),
+        ("name".into(), cfg.name.clone(), "how the assistant addresses the user".into()),
+        ("think".into(), b(cfg.think), "show reasoning blocks".into()),
+        ("stream".into(), b(cfg.stream), "stream the answer as it is generated".into()),
+        ("side".into(), b(cfg.side), "show the session sidebar".into()),
+        ("thinking_level".into(), cfg.thinking_level.to_string(), "0-3, 0 = thinking off".into()),
+        ("permission_mode".into(), cfg.permission_mode.clone(), "ask | ws | full".into()),
+        ("followup_mode".into(), cfg.followup_mode.clone(), "queue | steer".into()),
+        ("compaction_enabled".into(), b(cfg.compaction_enabled), "auto-compact long contexts".into()),
+        ("compaction_pct".into(), cfg.compaction_pct.to_string(), "compact at this % of context (50-95)".into()),
+        ("max_steps".into(), cfg.max_steps.to_string(), "tool steps per turn (20-500)".into()),
+        ("ctx_warn_pct".into(), cfg.ctx_warn_pct.to_string(), "context warning threshold (50-95)".into()),
+        ("notify".into(), b(cfg.notify), "system notification when a turn ends".into()),
+        ("notify_sound".into(), b(cfg.notify_sound), "play a sound with the notification".into()),
+        ("ask_auto_resolve".into(), b(cfg.ask_auto_resolve), "auto-pick the first answer after 120s".into()),
+        ("keep_awake".into(), b(cfg.keep_awake), "keep the machine awake during a turn".into()),
+        ("auto_archive_days".into(), cfg.auto_archive_days.to_string(), "archive idle sessions after N days (0=off)".into()),
+        ("code_line_numbers".into(), b(cfg.code_line_numbers), "line numbers in code blocks".into()),
+        ("code_wrap".into(), b(cfg.code_wrap), "wrap long code lines".into()),
+        ("prefs".into(), cfg.prefs.clone(), "free-form user preferences, injected into the prompt".into()),
+    ]
+}
+
+fn settings_value(cfg: &crate::config::Config, key: &str) -> String {
+    settings_snapshot(cfg)
+        .into_iter()
+        .find(|(k, _, _)| k == key)
+        .map(|(_, v, _)| v)
+        .unwrap_or_default()
+}
+
+/// 把一个外部值写进配置，校验规则与设置面板一致：越界即拒绝，不做静默截断。
+fn apply_setting(
+    cfg: &mut crate::config::Config,
+    key: &str,
+    v: &serde_json::Value,
+) -> Result<(), String> {
+    let as_str = || {
+        v.as_str()
+            .map(|s| s.to_string())
+            .ok_or_else(|| "expected a string".to_string())
+    };
+    // 模型读到的当前值是字符串（settings_get 的文本形式），照着改回来时
+    // 也常给字符串。数字/布尔键同时接受原生类型与字符串形式，省掉
+    // 「类型不对」这种对模型毫无意义的报错。
+    let as_bool = || match v {
+        serde_json::Value::Bool(b) => Ok(*b),
+        serde_json::Value::String(s) => match s.trim() {
+            "true" => Ok(true),
+            "false" => Ok(false),
+            other => Err(format!("expected true/false, got `{other}`")),
+        },
+        _ => Err("expected true/false".to_string()),
+    };
+    let as_u32 = |lo: u32, hi: u32| -> Result<u32, String> {
+        let n = match v {
+            serde_json::Value::Number(n) => n
+                .as_u64()
+                .ok_or_else(|| "expected a whole number".to_string())? as u32,
+            serde_json::Value::String(s) => s
+                .trim()
+                .parse::<u32>()
+                .map_err(|_| format!("expected a whole number, got `{s}`"))?,
+            _ => return Err("expected a number".to_string()),
+        };
+        if n < lo || n > hi {
+            return Err(format!("must be between {lo} and {hi}"));
+        }
+        Ok(n)
+    };
+    let one_of = |opts: &[&str]| -> Result<String, String> {
+        let s = as_str()?;
+        if opts.contains(&s.as_str()) {
+            Ok(s)
+        } else {
+            Err(format!("must be one of {}", opts.join(" | ")))
+        }
+    };
+    match key {
+        "theme" => cfg.theme = one_of(&["light", "dark", "auto"])?,
+        "font" => cfg.font = one_of(&["serif", "sans", "mono"])?,
+        "size" => cfg.size = as_u32(10, 32)?,
+        "ui_size" => cfg.ui_size = as_u32(11, 18)?,
+        "line_height" => {
+            let n = match v {
+                serde_json::Value::Number(n) => n.as_f64(),
+                serde_json::Value::String(s) => s.trim().parse::<f64>().ok(),
+                _ => None,
+            }
+            .ok_or_else(|| "expected a number".to_string())?;
+            if !(1.2..=2.4).contains(&n) {
+                return Err("must be between 1.2 and 2.4".into());
+            }
+            cfg.line_height = n as f32;
+        }
+        "density" => cfg.density = one_of(&["airy", "cozy", "compact"])?,
+        "width" => cfg.width = as_u32(600, 960)?,
+        "accent" => {
+            let s = as_str()?;
+            if !s.starts_with('#') || s.len() != 7 {
+                return Err("must be a hex color like #d97757".into());
+            }
+            cfg.accent = s;
+        }
+        "lang" => cfg.lang = one_of(&["zh", "en"])?,
+        "name" => cfg.name = as_str()?,
+        "think" => cfg.think = as_bool()?,
+        "stream" => cfg.stream = as_bool()?,
+        "side" => cfg.side = as_bool()?,
+        "thinking_level" => cfg.thinking_level = as_u32(0, 3)?,
+        "permission_mode" => cfg.permission_mode = one_of(&["ask", "ws", "full"])?,
+        "followup_mode" => cfg.followup_mode = one_of(&["queue", "steer"])?,
+        "compaction_enabled" => cfg.compaction_enabled = as_bool()?,
+        "compaction_pct" => cfg.compaction_pct = as_u32(50, 95)?,
+        "max_steps" => cfg.max_steps = as_u32(20, 500)?,
+        "ctx_warn_pct" => cfg.ctx_warn_pct = as_u32(50, 95)?,
+        "notify" => cfg.notify = as_bool()?,
+        "notify_sound" => cfg.notify_sound = as_bool()?,
+        "ask_auto_resolve" => cfg.ask_auto_resolve = as_bool()?,
+        "keep_awake" => cfg.keep_awake = as_bool()?,
+        "auto_archive_days" => {
+            let n = match v {
+                serde_json::Value::Number(n) => n.as_u64(),
+                serde_json::Value::String(s) => s.trim().parse::<u64>().ok(),
+                _ => None,
+            }
+            .ok_or_else(|| "expected a number".to_string())? as u32;
+            if n != 0 && !(1..=365).contains(&n) {
+                return Err("must be 0 (off) or 1-365 days".into());
+            }
+            cfg.auto_archive_days = n;
+        }
+        "code_line_numbers" => cfg.code_line_numbers = as_bool()?,
+        "code_wrap" => cfg.code_wrap = as_bool()?,
+        "prefs" => cfg.prefs = as_str()?,
+        other => return Err(format!("unknown setting key `{other}`")),
+    }
+    Ok(())
 }
 
 fn bool_prop(desc: &str) -> Value {
@@ -600,13 +774,28 @@ impl Registry {
             },
             ToolSpec {
                 name: "bash".into(),
-                description: "Run a shell command in the workspace and return stdout/stderr/exit code. Output is streamed and truncated if very long.".into(),
+                description: "Run a shell command in the workspace and return stdout/stderr/exit code. Output is streamed and truncated if very long. Set `background: true` for long-running work (dev servers, watchers, multi-minute builds): the command keeps running after the turn and you get a job id back immediately.".into(),
                 input_schema: obj(json!({
                     "command": str_prop("Command line to run"),
                     "cwd": str_prop("Working directory (defaults to workspace base)"),
                     "timeout_ms": int_prop("Timeout in milliseconds (default 120000)"),
+                    "background": bool_prop("Run in the background and return a job id immediately (default false) — use for long-running processes"),
                     "description": str_prop(DESC_PROMPT_BASH),
                 }), &["command"]),
+            },
+            ToolSpec {
+                name: "background_list".into(),
+                description: "List background jobs started with `bash(background:true)`: status (running/exited/killed), exit code, and the tail of their output. Pass `id` to inspect one job.".into(),
+                input_schema: obj(json!({
+                    "id": str_prop("Optional job id; omit to list every job"),
+                }), &[]),
+            },
+            ToolSpec {
+                name: "background_kill".into(),
+                description: "Stop a background job and its whole process tree.".into(),
+                input_schema: obj(json!({
+                    "id": str_prop("Job id returned by bash(background:true)"),
+                }), &["id"]),
             },
             ToolSpec {
                 name: "todo_write".into(),
@@ -629,6 +818,25 @@ impl Registry {
                     "question": str_prop("One clear question"),
                     "options": json!({"type":"array","items": str_prop("Suggested answer"),"description":"Optional suggested answers (2-8 short choices)"}),
                 }), &["question"]),
+            },
+            ToolSpec {
+                name: "settings_get".into(),
+                description: "Read the app's live settings (theme, font size, permission mode, thinking level, notification prefs, compaction thresholds, work hours…). Returns the current values plus the list of keys you can change. Read-only.".into(),
+                input_schema: obj(json!({
+                    "keys": json!({"type":"array","items": str_prop("Setting key"), "description":"Optional subset of keys to read; omit for the common set"}),
+                }), &[]),
+            },
+            ToolSpec {
+                name: "settings_set".into(),
+                description: "Change one or more app settings and apply them immediately (no restart, no confirmation dialog — the UI refreshes itself). Only the keys returned by settings_get are accepted; values are validated the same way the settings panel validates them, and an invalid value is rejected instead of silently clamped. Use when the user asks you to change how the app looks or behaves.".into(),
+                input_schema: obj(json!({
+                    "values": json!({"type":"object","description":"Map of setting key → new value","additionalProperties": true}),
+                }), &["values"]),
+            },
+            ToolSpec {
+                name: "list_models".into(),
+                description: "List every model the user has configured (provider, model id, display name, context window, vision/thinking support, and which one is currently selected). Read-only. Use it when the user asks what models are available, wants to switch, or needs to know which model you are — then point them at Settings → Model to change it (you cannot switch models yourself).".into(),
+                input_schema: obj(json!({}), &[]),
             },
             ToolSpec {
                 name: "web_search".into(),
@@ -702,18 +910,20 @@ skill matches the current request, then follow the steps it contains. Read-only.
             // ---- scheduled tasks (reference: DeepSeek Harness `schedule`) ----
             ToolSpec {
                 name: "schedule_create".into(),
-                description: "Create a persistent scheduled task that runs a prompt on a recurrence. Survives restarts. Timing kinds: after | at | every | daily | weekly | cron.".into(),
+                description: "Create a persistent scheduled task that survives restarts. Two action kinds: deliver a prompt to an agent turn (default), or run a shell command directly without any model call (`command`). Timing kinds: after | at | every | daily | weekly | cron.".into(),
                 input_schema: obj(json!({
                     "name": str_prop("Short human label, e.g. \"daily build check\""),
-                    "prompt": str_prop("The prompt to deliver when the task fires"),
+                    "prompt": str_prop("The prompt to deliver when the task fires (not used for shell tasks)"),
+                    "command": str_prop("Optional shell command to run instead of an agent turn — no model, no tokens"),
+                    "model": str_prop("Optional provider/model to run this task with; omit to follow the current global model"),
                     "timing": {
                         "type":"object",
                         "description":"One of {kind:'after',after_seconds}, {kind:'at',at:RFC3339}, {kind:'every',every_seconds>=60}, {kind:'daily',time:'HH:MM',timeZone}, {kind:'weekly',time,timeZone,weekdays:[1-7]}, {kind:'cron',expression:'5-field',timeZone}",
                         "additionalProperties": true
                     },
-                    "target": str_prop("existing | reuse | new  — where the prompt is delivered"),
+                    "target": str_prop("existing | reuse | new  — where the prompt is delivered (agent tasks only)"),
                     "session_id": str_prop("Session id, only when target is `existing`"),
-                }), &["name","prompt","timing","target"]),
+                }), &["name","timing"]),
             },
             ToolSpec {
                 name: "schedule_list".into(),
@@ -1111,8 +1321,7 @@ skill matches the current request, then follow the steps it contains. Read-only.
             });
         }
         // 用户在设置里挑选的搜索来源决定工具暴露：
-        // - auto：web_search 始终可用；deepseek_search / anysearch_search 仅在
-        //   配了对应 key 时暴露
+        // - auto：web_search + anysearch_search（AnySearch 匿名可调，不需要 key）
         // - deepseek：web_search + deepseek_search（key 缺失时调用报配置提示）
         // - anysearch：web_search + anysearch_search（匿名可调，缺 key 不收走）
         // - multi：只要 web_search（纯引擎抓取），且 multi_search 按偏好裁剪查询源
@@ -1122,9 +1331,9 @@ skill matches the current request, then follow the steps it contains. Read-only.
         if self.search_pref == "deepseek" && self.search_key.trim().is_empty() {
             specs.retain(|s| s.name != "web_search");
         }
-        if self.search_pref == "multi"
-            || (self.search_pref != "anysearch" && self.anysearch_key.trim().is_empty())
-        {
+        // AnySearch 不再要求 key：匿名调用本来就能用（按 IP 限流）。
+        // 只有用户明确选了「纯多平台」时才把它收走。
+        if self.search_pref == "multi" {
             specs.retain(|s| s.name != "anysearch_search");
         }
         specs
@@ -1172,8 +1381,13 @@ skill matches the current request, then follow the steps it contains. Read-only.
             "glob" => self.glob(args, ctx).await,
             "grep" => self.grep(args, ctx).await,
             "bash" => self.bash(args, ctx).await,
+            "background_list" => self.background_list(args, ctx).await,
+            "background_kill" => self.background_kill(args, ctx).await,
             "todo_write" => self.todo_write(args, ctx).await,
             "ask_user" => self.ask_user(args, ctx).await,
+            "list_models" => self.list_models_tool(args, ctx).await,
+            "settings_get" => self.settings_get(args, ctx).await,
+            "settings_set" => self.settings_set(args, ctx).await,
             "web_fetch" => web::fetch(args, ctx).await,
             "read_skill" => self.read_skill(args).await,
             "web_search" => web::multi_search(args, ctx).await,
@@ -1403,6 +1617,36 @@ impl Registry {
         // 命令原文进权限链:面板上能看到真正要执行的命令,Always 规则按命令精确匹配
         ctx.authorize_shell("bash", &cwd.to_string_lossy(), Risk::Shell, command)
             .await?;
+        // background: 交给后台终端托管，立即返回 job id，输出继续在
+        // 「后台终端」面板里流。适合 dev server、watch 任务、长构建——
+        // 它们本来就要跑几分钟，挡在前台只会让整轮卡住。
+        if a["background"].as_bool().unwrap_or(false) {
+            let Some(terms) = ctx.terms.as_ref() else {
+                return Err(HarnessError::Tool(
+                    "background execution is not available in this context; run the command in the foreground instead"
+                        .into(),
+                ));
+            };
+            let job = terms
+                .start(ctx.hub.clone(), cwd.clone(), command.to_string())
+                .await;
+            let body = format!(
+                "Started in the background as job `{id}`.\n\
+Command: {command}\n\
+Working directory: {cwd}\n\n\
+It keeps running after this turn. The user can watch and stop it in the 后台终端 panel. \
+Poll `background_list` to check status/output, or `background_kill` to stop it.",
+                id = job.id,
+                command = command,
+                cwd = cwd.display(),
+            );
+            return Ok(ToolOutcome {
+                ok: true,
+                title: format!("Started in background · {}", truncate(if description.trim().is_empty() { command } else { description }, 60)),
+                display: DisplayKind::Plain(body.clone()),
+                for_model: body,
+            });
+        }
         shell::bash(
             command,
             &cwd,
@@ -1413,6 +1657,82 @@ impl Registry {
             description,
         )
         .await
+    }
+
+    /// `background_list` —— 看后台 job 的状态与输出尾巴。
+    async fn background_list(
+        &self,
+        a: &Value,
+        ctx: &ToolCtx,
+    ) -> Result<ToolOutcome, HarnessError> {
+        let Some(terms) = ctx.terms.as_ref() else {
+            return Err(HarnessError::Tool("background jobs are not mounted".into()));
+        };
+        let only = a["id"].as_str().unwrap_or("").trim();
+        let jobs = terms.list().await;
+        let picked: Vec<_> = jobs
+            .iter()
+            .filter(|j| only.is_empty() || j.id == only)
+            .collect();
+        if picked.is_empty() {
+            let body = if only.is_empty() {
+                "No background jobs.".to_string()
+            } else {
+                format!("No background job with id `{only}`.")
+            };
+            return Ok(ToolOutcome {
+                ok: true,
+                title: "Background jobs".into(),
+                display: DisplayKind::Plain(body.clone()),
+                for_model: body,
+            });
+        }
+        let mut body = String::new();
+        for j in &picked {
+            body.push_str(&format!(
+                "`{}` [{}] exit={} · {}\n  cwd: {}\n  output (tail):\n{}\n\n",
+                j.id,
+                j.status,
+                j.exit.map(|e| e.to_string()).unwrap_or_else(|| "-".into()),
+                truncate(&j.command, 120),
+                j.cwd,
+                if j.output.trim().is_empty() { "  (no output yet)" } else { j.output.trim_end() }
+            ));
+        }
+        Ok(ToolOutcome {
+            ok: true,
+            title: format!("{} background job(s)", picked.len()),
+            display: DisplayKind::Plain(body.clone()),
+            for_model: body,
+        })
+    }
+
+    /// `background_kill` —— 停掉一个后台 job（整棵进程树）。
+    async fn background_kill(
+        &self,
+        a: &Value,
+        ctx: &ToolCtx,
+    ) -> Result<ToolOutcome, HarnessError> {
+        let Some(terms) = ctx.terms.as_ref() else {
+            return Err(HarnessError::Tool("background jobs are not mounted".into()));
+        };
+        let id = a["id"].as_str().unwrap_or("").trim();
+        if id.is_empty() {
+            return Err(HarnessError::Tool("`id` is required".into()));
+        }
+        ctx.authorize("background_kill", id, Risk::Shell).await?;
+        let ok = terms.kill(&ctx.hub, id).await;
+        let body = if ok {
+            format!("Killed background job `{id}` (whole process tree).")
+        } else {
+            format!("No running background job with id `{id}`.")
+        };
+        Ok(ToolOutcome {
+            ok,
+            title: if ok { format!("Killed {id}") } else { format!("No job {id}") },
+            display: DisplayKind::Plain(body.clone()),
+            for_model: body,
+        })
     }
 
     /// Load a skill's SKILL.md body by id.
@@ -1466,6 +1786,187 @@ impl Registry {
                 available.join("\n")
             )
         }))
+    }
+
+    /// `settings_get` —— 把可改的设置键与当前值摊给模型。
+    ///
+    /// 只暴露「改了不会让用户丢掉工作」的键：外观、思考档位、压缩阈值、
+    /// 通知、跟随模式等。模型/供应商/API key/代理/MCP 不在这里——那些改错
+    /// 一次就能让整个应用不可用，必须由用户自己在设置里改。
+    async fn settings_get(
+        &self,
+        a: &Value,
+        _ctx: &ToolCtx,
+    ) -> Result<ToolOutcome, HarnessError> {
+        let cfg = crate::config::Config::load();
+        let want: Vec<String> = a["keys"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let all = settings_snapshot(&cfg);
+        let picked: Vec<(String, String, String)> = if want.is_empty() {
+            all
+        } else {
+            let missing: Vec<String> = want
+                .iter()
+                .filter(|k| !all.iter().any(|(n, _, _)| n == *k))
+                .cloned()
+                .collect();
+            if !missing.is_empty() {
+                return Err(HarnessError::Tool(format!(
+                    "unknown setting key(s): {}. Call settings_get with no arguments to list them.",
+                    missing.join(", ")
+                )));
+            }
+            all.into_iter().filter(|(n, _, _)| want.contains(n)).collect()
+        };
+        let mut body = String::from("Current settings (key = value — description):\n");
+        for (k, v, d) in &picked {
+            body.push_str(&format!("  {k} = {v}   ({d})\n"));
+        }
+        body.push_str("\nChange them with settings_set; changes apply to the next turn immediately.");
+        Ok(ToolOutcome {
+            ok: true,
+            title: format!("Read {} setting(s)", picked.len()),
+            display: DisplayKind::Plain(body.clone()),
+            for_model: body,
+        })
+    }
+
+    /// `settings_set` —— 改设置并立即生效。
+    ///
+    /// 直接改共享的 `Arc<RwLock<Config>>`，再落盘：agent 与 server 读的是
+    /// 同一份内存，所以下一轮模型调用、下一次 UI 读取都会看到新值，不需要
+    /// 重启，也不需要用户再点一次保存。
+    async fn settings_set(
+        &self,
+        a: &Value,
+        ctx: &ToolCtx,
+    ) -> Result<ToolOutcome, HarnessError> {
+        let Some(config) = ctx.config.as_ref() else {
+            return Err(HarnessError::Tool("settings are not mounted in this context".into()));
+        };
+        let Some(vals) = a["values"].as_object() else {
+            return Err(HarnessError::Tool("`values` must be an object of key → value".into()));
+        };
+        if vals.is_empty() {
+            return Err(HarnessError::Tool("`values` is empty — nothing to change".into()));
+        }
+        ctx.authorize("settings_set", &format!("{} key(s)", vals.len()), Risk::Write)
+            .await?;
+        let known = settings_snapshot(&crate::config::Config::load());
+        // 未知键直接拒绝：默默忽略会让模型以为改成功了。
+        let unknown: Vec<&String> = vals
+            .keys()
+            .filter(|k| !known.iter().any(|(n, _, _)| n == *k))
+            .collect();
+        if !unknown.is_empty() {
+            return Err(HarnessError::Tool(format!(
+                "unknown setting key(s): {}",
+                unknown.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+            )));
+        }
+        let mut applied: Vec<String> = Vec::new();
+        {
+            let mut cfg = config.write().await;
+            // 别的进程（开发网关 / CLI）可能刚改过配置：先取盘上最新，别把
+            // 用户的供应商用旧快照盖掉（与 PATCH /config 同一条规则）。
+            cfg.refresh_from_disk();
+            for (k, v) in vals {
+                let before = settings_value(&cfg, k);
+                if let Err(e) = apply_setting(&mut cfg, k, v) {
+                    return Err(HarnessError::Tool(format!("`{k}`: {e}")));
+                }
+                let after = settings_value(&cfg, k);
+                if before != after {
+                    applied.push(format!("{k}: {before} → {after}"));
+                }
+            }
+            // 归一 + 落盘；代理这类运行时全局项立刻推下去。
+            cfg.normalize();
+            crate::config::set_proxy(cfg.http_proxy.clone(), cfg.http_no_proxy.clone());
+            if let Err(e) = cfg.save() {
+                return Err(HarnessError::Tool(format!("saving settings failed: {e}")));
+            }
+        }
+        let body = if applied.is_empty() {
+            "No values changed (they already had these values).".to_string()
+        } else {
+            format!(
+                "Applied {} change(s), effective from the next model call:\n  {}\n\n\
+The settings panel picks these up on its next read; no restart needed.",
+                applied.len(),
+                applied.join("\n  ")
+            )
+        };
+        Ok(ToolOutcome {
+            ok: true,
+            title: format!("Changed {} setting(s)", applied.len()),
+            display: DisplayKind::Plain(body.clone()),
+            for_model: body,
+        })
+    }
+
+    /// `list_models` —— 把用户配置里的模型清单摊开给模型看。
+    ///
+    /// 从配置读而不是从注册表读：模型清单属于用户数据（设置页里编辑的那份），
+    /// 每个 turn 都可能变；读一次成本可忽略。
+    async fn list_models_tool(
+        &self,
+        _a: &Value,
+        _ctx: &ToolCtx,
+    ) -> Result<ToolOutcome, HarnessError> {
+        let cfg = crate::config::Config::load();
+        let current = cfg.model.clone();
+        let mut lines = Vec::new();
+        let mut n = 0usize;
+        for p in cfg.providers.iter().filter(|p| p.enabled) {
+            let usable = !p.key.is_empty() || p.api == "opencode-free";
+            for m in p.models.iter().filter(|m| m.enabled) {
+                n += 1;
+                let sel = format!("{}/{}", p.id, m.id);
+                let mut caps: Vec<String> = Vec::new();
+                if m.thinking {
+                    caps.push("thinking".to_string());
+                }
+                if m.vision {
+                    caps.push("vision".to_string());
+                }
+                if m.context > 0 {
+                    caps.push(format!("ctx {}", fmt_ctx(m.context)));
+                }
+                lines.push(format!(
+                    "{mark} {name} [{sel}] · provider {prov}{key}\n    {caps}",
+                    mark = if sel == current { "*" } else { "-" },
+                    name = if m.name.is_empty() { m.id.as_str() } else { m.name.as_str() },
+                    prov = p.name,
+                    key = if usable { "" } else { " (no API key — unusable)" },
+                    caps = if caps.is_empty() { "no extra capabilities".to_string() } else { caps.join(", ") },
+                ));
+            }
+        }
+        let body = if n == 0 {
+            "No models are configured. Ask the user to add one in Settings → Model.".to_string()
+        } else {
+            format!(
+                "{} model(s) across {} provider(s). `*` marks the current one.\n\n{}\n\n\
+To switch, the user changes it in Settings → Model (or the model chip under the composer) — \
+you cannot switch models yourself.",
+                n,
+                cfg.providers.iter().filter(|p| p.enabled && p.models.iter().any(|m| m.enabled)).count(),
+                lines.join("\n")
+            )
+        };
+        Ok(ToolOutcome {
+            ok: true,
+            title: format!("Listed {n} model(s)"),
+            display: DisplayKind::Plain(body.clone()),
+            for_model: body,
+        })
     }
 
     async fn todo_write(&self, a: &Value, _ctx: &ToolCtx) -> Result<ToolOutcome, HarnessError> {
@@ -1615,10 +2116,19 @@ impl Registry {
                 let label = a["name"].as_str().unwrap_or("task");
                 // 定时任务会长期反复向会话投递 prompt:写入级权限,plan 模式下被拒
                 ctx.authorize("schedule_create", label, Risk::Write).await?;
+                // 动作：默认投递提示词；给了 command 就按 shell 任务处理。
+                let action = match a["command"].as_str() {
+                    Some(c) if !c.trim().is_empty() => crate::schedule::TaskAction::Shell {
+                        command: c.to_string(),
+                    },
+                    _ => crate::schedule::TaskAction::Agent,
+                };
                 let t = svc
                     .create(
                         a["name"].as_str().unwrap_or("task").to_string(),
                         a["prompt"].as_str().unwrap_or("").to_string(),
+                        action,
+                        a["model"].as_str().unwrap_or("").to_string(),
                         timing,
                         target,
                     )
@@ -2522,7 +3032,6 @@ pub async fn plugin_admin(
 #[cfg(test)]
 mod tests {
     use super::*;
-
     /// 工具卡摘要的「调用意图」字段必须在 schema 里：模型靠它写这一步要干什么，
     /// 界面摘要行优先展示它（ZCode 同款语义），关键词概括只做兜底。
     #[test]
@@ -2552,6 +3061,80 @@ mod tests {
         assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
         assert_eq!(base64_encode(b"fooba"), "Zm9vYmE=");
         assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+    }
+
+    /// 模型可读写的设置键必须真实存在于 `apply_setting`：列表里多一个键
+    /// 就会让 `settings_set` 报 unknown，少一个则模型永远改不到。
+    #[test]
+    fn every_advertised_setting_key_is_writable() {
+        let cfg = crate::config::Config::default();
+        let allowed = [
+            "theme", "font", "size", "ui_size", "line_height", "density", "width", "accent",
+            "lang", "name", "think", "stream", "side", "thinking_level", "permission_mode",
+            "followup_mode", "compaction_enabled", "compaction_pct", "max_steps", "ctx_warn_pct",
+            "notify", "notify_sound", "ask_auto_resolve", "keep_awake", "auto_archive_days",
+            "code_line_numbers", "code_wrap", "prefs",
+        ];
+        for (k, v, _) in settings_snapshot(&cfg) {
+            assert!(allowed.contains(&k.as_str()), "snapshot advertises `{k}`");
+            // 值原样回写必须被接受：settings_get 给模型看的当前值是字符串，
+            // 模型照着写回来时也常是字符串，两种形式都得认。
+            let probe = serde_json::json!(v);
+            let mut c = crate::config::Config::default();
+            assert!(
+                apply_setting(&mut c, &k, &probe).is_ok(),
+                "`{k}` must accept its own current value (probe {probe})"
+            );
+        }
+    }
+
+    /// 危险键永远不进可写列表：模型不该能改供应商、模型选择与网络代理。
+    #[test]
+    fn settings_tools_never_expose_dangerous_keys() {
+        let cfg = crate::config::Config::default();
+        let keys: Vec<String> = settings_snapshot(&cfg).into_iter().map(|(k, _, _)| k).collect();
+        for banned in ["providers", "model", "key", "http_proxy", "search_key", "hooks"] {
+            assert!(!keys.iter().any(|k| k == banned), "`{banned}` must stay user-only");
+        }
+        // 反过来：apply_setting 对未知键必须拒绝，而不是静默忽略。
+        let mut c = crate::config::Config::default();
+        assert!(apply_setting(&mut c, "model", &serde_json::json!("x/y")).is_err());
+    }
+
+    #[test]
+    fn settings_values_are_validated_not_clamped() {
+        let mut c = crate::config::Config::default();
+        // 越界直接拒绝；静默 clamp 会让模型以为它设成了想要的值。
+        assert!(apply_setting(&mut c, "ui_size", &serde_json::json!(99)).is_err());
+        assert!(apply_setting(&mut c, "theme", &serde_json::json!("neon")).is_err());
+        assert!(apply_setting(&mut c, "accent", &serde_json::json!("red")).is_err());
+        assert!(apply_setting(&mut c, "thinking_level", &serde_json::json!(7)).is_err());
+        assert!(apply_setting(&mut c, "notify", &serde_json::json!("yes")).is_err());
+        // 合法值正常写入
+        assert!(apply_setting(&mut c, "ui_size", &serde_json::json!(14)).is_ok());
+        assert_eq!(c.ui_size, 14);
+        assert!(apply_setting(&mut c, "theme", &serde_json::json!("light")).is_ok());
+        assert_eq!(c.theme, "light");
+    }
+
+    /// 新工具必须出现在 specs 里（否则模型根本看不到它们）。
+    #[test]
+    fn new_agent_facing_tools_are_declared() {
+        let reg = Registry::new(std::path::PathBuf::from("."));
+        let specs = reg.build_specs();
+        let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
+        for want in [
+            "list_models",
+            "settings_get",
+            "settings_set",
+            "background_list",
+            "background_kill",
+        ] {
+            assert!(names.contains(&want), "{want} must be declared");
+        }
+        // bash 必须带 background 参数，否则模型无法主动转后台。
+        let bash = specs.iter().find(|s| s.name == "bash").unwrap();
+        assert!(bash.input_schema.pointer("/properties/background").is_some());
     }
 
     #[test]

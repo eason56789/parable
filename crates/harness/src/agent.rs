@@ -163,6 +163,9 @@ pub struct AgentRuntime {
     pub checkpoints: Arc<crate::checkpoint::CheckpointStore>,
     /// MCP 服务器管理器（stdio 客户端舰队）。
     pub mcp: Arc<crate::mcp::McpManager>,
+    /// 后台终端注册表：`bash(background:true)` 交给它跑，UI 的「后台终端」
+    /// 分区与模型看到的是同一批 job。未挂载时后台执行退化为普通前台调用。
+    pub terms: Option<crate::term::TerminalRegistry>,
 }
 
 impl AgentRuntime {
@@ -236,6 +239,8 @@ impl AgentRuntime {
             checkpoint: Some(self.checkpoints.clone()),
             turn_id: turn_id.to_string(),
             mcp: Some(self.mcp.clone()),
+            config: Some(self.config.clone()),
+            terms: self.terms.clone(),
         }
     }
 }
@@ -295,6 +300,9 @@ pub struct TurnOptions {
     /// 子轮工具白名单（空 = 全部工具）。白名单外既不出现在工具清单里，
     /// 调用也会被拒绝执行。
     pub tool_filter: Vec<String>,
+    /// 本轮实际使用的模型名（`provider/model` 或显示名）。只用于系统提示词里
+    /// 的「Current model」一行——模型需要知道自己是谁才能给出一致的自述。
+    pub model_label: String,
 }
 
 impl Default for TurnOptions {
@@ -306,6 +314,7 @@ impl Default for TurnOptions {
             plan_mode: false,
             system_extra: String::new(),
             tool_filter: Vec::new(),
+            model_label: String::new(),
         }
     }
 }
@@ -344,7 +353,14 @@ impl AgentRuntime {
                 Config::home_dir().join("checkpoints"),
             )),
             mcp: Arc::new(crate::mcp::McpManager::new()),
+            terms: None,
         }
+    }
+
+    /// 挂上后台终端注册表（server 装配时调用，与 UI 的「后台终端」共用一份）。
+    pub fn with_terms(mut self, terms: crate::term::TerminalRegistry) -> Self {
+        self.terms = Some(terms);
+        self
     }
 
     pub async fn interrupt(&self, session_id: &str) -> bool {
@@ -1296,7 +1312,15 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
                 );
             }
         }
-        let system = self.compose_system(session_id, &workspace, &opts).await;
+        // 系统提示词里的「当前模型」：用解析出来的真实模型，而不是用户填的
+        // 选择串（空串时也不至于留一行空白）。
+        let mut opts_with_model = opts.clone();
+        if opts_with_model.model_label.is_empty() {
+            opts_with_model.model_label = model_id.clone();
+        }
+        let system = self
+            .compose_system(session_id, &workspace, &opts_with_model)
+            .await;
 
         let mut steps = 0usize;
         let mut turn_usage = Usage::default();
@@ -2492,6 +2516,33 @@ answer; do not answer from a guess about what a teammate would have found.\n",
 /// 操作谨慎 + 自主性边界）、ZCode（stable 段缓存友好 + act-don't-rederive）、
 /// dsh（一句身份 + 有序分段）。工具参数细节留在 tool schema，这里只放
 /// 行为契约与协议规则。
+/// 系统提示词里的平台标签：写到「Windows 11 / macOS 15 / Ubuntu 24.04」这一级，
+/// 模型才能正确选路径分隔符、shell 语法和包管理器。
+fn os_label() -> String {
+    let os = std::env::consts::OS;
+    let arch = std::env::consts::ARCH;
+    let detail = match os {
+        "windows" => {
+            // 版本号来自注册表式的 cmd 调用成本太高；环境里能拿到的就是
+            // 编译期与运行期的 OS 名，够模型判断「\ 分隔符 / cmd vs bash」。
+            "Windows".to_string()
+        }
+        "macos" => "macOS".to_string(),
+        "linux" => {
+            std::fs::read_to_string("/etc/os-release")
+                .ok()
+                .and_then(|s| {
+                    s.lines()
+                        .find(|l| l.starts_with("PRETTY_NAME="))
+                        .map(|l| l.trim_start_matches("PRETTY_NAME=").trim_matches('"').to_string())
+                })
+                .unwrap_or_else(|| "Linux".to_string())
+        }
+        other => other.to_string(),
+    };
+    format!("{detail} ({os}, {arch})")
+}
+
 fn build_system_prompt(cfg: &Config, workspace: &PathBuf, opts: &TurnOptions) -> String {
     // Raw override (`systemPromptRaw`): the value here IS the exact `system`
     // string sent to the provider — it replaces the entire built-in prompt
@@ -2524,19 +2575,34 @@ fn build_system_prompt(cfg: &Config, workspace: &PathBuf, opts: &TurnOptions) ->
     s.push_str("\n# Environment\n");
     s.push_str("You have been invoked in the following environment:\n");
     s.push_str(&format!(" - Primary working directory: {ws}\n"));
+    // 具体到「工作区 / 系统 / 模型 / 时间」四项：模型经常凭猜测写路径分隔符、
+    // 选错 shell 语法、或把日期当成训练截止日。给出准确值，它就不用猜。
+    s.push_str(&format!(" - Operating system: {}\n", os_label()));
     s.push_str(&format!(
-        " - Platform: {}\n",
-        if cfg!(windows) { "windows" } else { "unix" }
+        " - Today's date and time: {}\n",
+        chrono::Local::now().format("%Y-%m-%d %H:%M (%a), local time")
     ));
-    s.push_str(&format!(
-        " - Today's date: {}\n",
-        chrono::Utc::now().format("%a %b %d %Y")
-    ));
+    s.push_str(&format!(" - Current model: {}\n", opts.model_label));
     s.push_str(&format!(" - Permission mode: {}\n", opts.permission_mode));
     if opts.plan_mode {
         s.push_str("PLAN MODE IS ON. You may only read and plan. Do not write files or run commands. Produce a plan and use todo_write to track it.\n");
     }
     s.push_str("Environment facts are a snapshot from turn start; re-check anything that may have changed since.\n");
+    // ---- Tool budget：轻问答不调工具，重工具要克制。
+    // 用户的原话：「如果只是问好，或问简单知识性问题，不要让模型调用除联网
+    // 搜索以外的工具」；「除非只能走这一条路，不要随意使用 computer use 和
+    // 截图」。这两条写进系统提示词比在工具层拦截更可靠——模型会先看规则。
+    s.push_str("\n# When to use tools\n");
+    s.push_str("- Greetings, small talk, and questions you can answer from general knowledge need NO tools at all. Answer directly. Do not run a command, read a file, or spin up a browser just to show activity.\n");
+    s.push_str("- Time-sensitive or factual questions about the outside world: use a search tool (web_search / anysearch_search) — that is the one exception where a light question still gets a tool.\n");
+    s.push_str("- Don't chain extra verification steps onto a question that was already answered. If the user asked a one-line question, a one-line answer is the deliverable; open the file only when the answer actually depends on its contents.\n");
+    s.push_str("- Reach for a tool when it materially improves the answer (real file contents, real command output, real search results) — not as ritual.\n");
+    // ---- Expensive tools：computer use / desktop / 截图最后才用。
+    s.push_str("\n# Expensive tools — last resort\n");
+    s.push_str("`computer_*` (browser), `desktop_*` (real screen), and screenshot tools are slow, visible, and can disrupt the user's machine. Use them only when the task genuinely cannot be done another way:\n");
+    s.push_str("- Prefer `web_fetch` for reading a page's content, `web_search` for finding facts, and the file tools for anything on disk. Screenshots are for when the user must SEE something, or when the target is drawn on a canvas and has no accessible tree.\n");
+    s.push_str("- Before any `computer_*` / `desktop_*` call, say in one sentence why the cheaper tools cannot do it. The user watches their own screen move; unexplained clicking is unacceptable.\n");
+    s.push_str("- Screenshot tools are for the user's benefit (showing them what you see), not for your own verification loop — use `computer_snapshot` once to get the tree + refs, and act by ref.\n");
     // ---- Doing tasks：工程纪律（Claude Code doing tasks + following conventions）。
     s.push_str("\n# Doing tasks\n");
     s.push_str("- Understand before you change: read the relevant files and search the codebase first (read_file, grep, glob — batch independent lookups in parallel).\n");

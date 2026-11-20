@@ -421,7 +421,7 @@ pub async fn multi_search(a: &Value, ctx: &ToolCtx) -> Result<ToolOutcome, Harne
     };
 
     let client = crate::config::apply_proxy(reqwest::Client::builder())
-        .connect_timeout(std::time::Duration::from_secs(12))
+        .connect_timeout(std::time::Duration::from_secs(6))
         .timeout(std::time::Duration::from_secs(30))
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36")
         .redirect(reqwest::redirect::Policy::limited(5))
@@ -435,61 +435,110 @@ pub async fn multi_search(a: &Value, ctx: &ToolCtx) -> Result<ToolOutcome, Harne
     );
     let mut ok_count = 0usize;
 
-    // AnySearch 聚合源先行：POST JSON API，匿名按 IP 限流，配 key 走 bearer。
-    // 失败不影响后面的平台抓取，按原样如实报告。
-    if anysearch_on {
+    // 每个平台独立超时：弱网下单个源拖到 30s，串行执行就会卡死在第一个慢
+    // 平台上。12s 是「弱网还能回」与「别让人干等」的折中；超时的源如实
+    // 标注，其它平台的结果照常返回。
+    const PER_PLATFORM_SECS: u64 = 12;
+
+    // AnySearch 与各引擎**并发**抓取：旧实现串行（AnySearch → 必应 → 百度
+    // → …），6 个源各 1-3 秒就是十几秒的空等。现在同时发出，谁先回谁先落，
+    // 总耗时 ≈ 最慢的那个（且被 12s 上限兜住）。
+    let key = anysearch_key(ctx);
+    let aq = query.clone();
+    let ac = client.clone();
+    let anysearch_fut = async move {
+        if !anysearch_on {
+            return None;
+        }
+        let call = anysearch_call(&ac, &key, &aq, 8, "", "", "", None, false);
+        match tokio::time::timeout(std::time::Duration::from_secs(PER_PLATFORM_SECS), call).await {
+            Ok(Ok((n, text))) => Some((n, text, None)),
+            Ok(Err(e)) => Some((0, String::new(), Some(e.to_string()))),
+            Err(_) => Some((0, String::new(), Some(format!("超时（>{PER_PLATFORM_SECS}s）")))),
+        }
+    };
+
+    let engine_futs = engines.into_iter().map(|(label, url)| {
+        let client = client.clone();
+        async move {
+            let per = per_engine;
+            let work = async {
+                match client.get(&url).send().await {
+                    Ok(resp) => {
+                        let status = resp.status();
+                        if !status.is_success() {
+                            return Err(format!("HTTP {status}"));
+                        }
+                        let ctype = resp
+                            .headers()
+                            .get("content-type")
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or("")
+                            .to_string();
+                        match resp.text().await {
+                            Ok(body) => {
+                                let text = if ctype.contains("html")
+                                    || body.trim_start().starts_with('<')
+                                {
+                                    html_to_text(&body)
+                                } else {
+                                    body
+                                };
+                                if is_blocked(&text) {
+                                    return Err(
+                                        "该平台返回了反爬验证页，未取得结果".to_string()
+                                    );
+                                }
+                                let clipped = clip(&text, per);
+                                if clipped.trim().is_empty() {
+                                    return Err("无结果".to_string());
+                                }
+                                Ok(clipped)
+                            }
+                            Err(e) => Err(format!("读取失败: {e}")),
+                        }
+                    }
+                    Err(e) => Err(format!("请求失败: {e}")),
+                }
+            };
+            let res = match tokio::time::timeout(
+                std::time::Duration::from_secs(PER_PLATFORM_SECS),
+                work,
+            )
+            .await
+            {
+                Ok(v) => v,
+                Err(_) => Err(format!("超时（>{PER_PLATFORM_SECS}s）")),
+            };
+            (label, url, res)
+        }
+    });
+
+    let (anysearch_res, engine_res) =
+        tokio::join!(anysearch_fut, futures::future::join_all(engine_futs));
+
+    if let Some((n, text, err)) = anysearch_res {
         out.push_str("\n【AnySearch】\n");
-        let key = anysearch_key(ctx);
-        match anysearch_call(&client, &key, &query, 8, "", "", "", None, false).await {
-            Ok((n, text)) if n > 0 => {
+        match err {
+            None if n > 0 => {
                 ok_count += 1;
                 out.push_str(&text);
                 out.push('\n');
             }
-            Ok(_) => out.push_str("(无结果)\n"),
-            Err(e) => out.push_str(&format!("(请求失败: {e})\n")),
+            None => out.push_str("(无结果)\n"),
+            Some(e) => out.push_str(&format!("(请求失败: {e})\n")),
         }
     }
 
-    for (label, url) in &engines {
+    for (label, url, res) in engine_res {
         out.push_str(&format!("\n【{label}】\nURL: {url}\n"));
-        match client.get(url).send().await {
-            Ok(resp) => {
-                let status = resp.status();
-                if !status.is_success() {
-                    // 非 2xx 直接标注状态码,不再当正文往里解析
-                    out.push_str(&format!("(HTTP {status})\n"));
-                    continue;
-                }
-                let ctype = resp
-                    .headers()
-                    .get("content-type")
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("")
-                    .to_string();
-                match resp.text().await {
-                    Ok(body) => {
-                        let text = if ctype.contains("html") || body.trim_start().starts_with('<') {
-                            html_to_text(&body)
-                        } else {
-                            body
-                        };
-                        let blocked = is_blocked(&text);
-                        let clipped = clip(&text, per_engine);
-                        if blocked {
-                            out.push_str("(该平台返回了反爬验证页，未取得结果)\n");
-                        } else if clipped.trim().is_empty() {
-                            out.push_str("(无结果)\n");
-                        } else {
-                            ok_count += 1;
-                            out.push_str(&clipped);
-                            out.push('\n');
-                        }
-                    }
-                    Err(e) => out.push_str(&format!("(读取失败: {e})\n")),
-                }
+        match res {
+            Ok(text) => {
+                ok_count += 1;
+                out.push_str(&text);
+                out.push('\n');
             }
-            Err(e) => out.push_str(&format!("(请求失败: {e})\n")),
+            Err(e) => out.push_str(&format!("({e})\n")),
         }
     }
 

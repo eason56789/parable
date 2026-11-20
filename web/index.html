@@ -527,6 +527,9 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 .tk-top{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .tk-name{font-size:14px;font-weight:600}
 .tk-st{font-size:11px;padding:2px 8px;border-radius:99px;background:var(--hov);color:var(--fg2);flex:none}
+/* 任务类型 / 模型：小号等宽标签，弱于状态徽标 */
+.tk-kind,.tk-model{font:10.5px var(--mono);padding:2px 7px;border-radius:6px;flex:none;
+  background:color-mix(in srgb,var(--fg2) 12%,transparent);color:var(--fg2)}
 .tk-st.active{background:color-mix(in srgb,#3fa34d 22%,transparent);color:#3fa34d}
 .tk-st.paused{background:color-mix(in srgb,#c9a227 22%,transparent);color:#c9a227}
 .tk-st.ended{opacity:.6}
@@ -604,6 +607,12 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 /* —— 文档轻量行 —— */
 .ec{display:flex;flex-direction:column;margin:2px 0;font:14px/1.5 var(--sans);width:100%}
 .eh{display:flex;align-items:center;gap:6px;padding:6px;margin-left:-6px;border-radius:8px;cursor:pointer;user-select:none;transition:background-color calc(.2s * var(--animd));background:transparent}
+/* 「放入后台」只在悬停时露出：平时不抢注意，运行中才有意义 */
+.ec .bgbtn{display:none;align-items:center;justify-content:center;flex:none;width:22px;height:22px;
+  border:0;background:none;color:var(--fg2);border-radius:6px;cursor:pointer;padding:0}
+.ec:hover .bgbtn{display:flex}
+.ec .bgbtn:hover{background:var(--hov);color:var(--fg)}
+.ec .bgbtn svg{width:14px;height:14px}
 .eh:hover{background:var(--hov)}
 .st-ic{display:grid;place-items:center;color:var(--fg2);flex:none}
 .st-ic svg{width:16px;height:16px}
@@ -1291,6 +1300,27 @@ body.dragging #main{outline:2px dashed var(--accent);outline-offset:-8px}
 .dbody{display:none;padding:0 14px 12px 36px;color:var(--fg2);font:12px/1.8 var(--mono);word-break:break-all}
 .diag.open .dbody{display:block}
 .sksh{display:flex;align-items:center;gap:8px;margin:26px 0 14px;position:relative}
+/* ---- 关于页：版本行 + 三个方形按钮（GitHub / Bilibili / 检查更新） ---- */
+.abt{padding:2px 0 4px}
+.abt-row{display:flex;align-items:baseline;gap:10px}
+.abt-row b{font:600 20px var(--sans);letter-spacing:.01em}
+.abt-ver{font:12.5px var(--mono);color:var(--fg2)}
+.abt-desc{margin:7px 0 0;color:var(--fg2);font:13.5px/1.6 var(--sans)}
+.abt-btns{display:flex;flex-wrap:wrap;gap:10px;margin:16px 0 0}
+.abt-btn{display:inline-flex;align-items:center;gap:8px;padding:9px 16px;border-radius:10px;
+  border:.5px solid var(--line);background:var(--input);color:var(--fg);
+  font:13.5px var(--sans);cursor:pointer;text-decoration:none;
+  transition:background-color calc(.2s * var(--animd)),border-color calc(.2s * var(--animd)),transform calc(.25s * var(--animd))}
+.abt-btn:hover{background:var(--hov);border-color:color-mix(in srgb,var(--fg2) 40%,transparent);transform:translateY(-1px)}
+.abt-btn:active{transform:scale(.98)}
+.abt-btn svg{width:17px;height:17px;flex:none}
+.abt-btn.bili{color:var(--fg)}
+.abt-btn.bili svg{color:#fb7299}
+.abt-note{margin:14px 0 0;color:var(--fg2);font:12.5px/1.7 var(--sans)}
+.abt-upd{margin:14px 0 0;padding:11px 14px;border-radius:10px;background:var(--hov);
+  border:.5px solid var(--line);font:13px/1.6 var(--sans)}
+.abt-upd b{color:var(--accent)}
+.abt-upd a{color:var(--accent)}
 .sksh:first-child{margin-top:6px}
 .sksh b{font-weight:600}
 .sksh em{font-style:normal;color:var(--fg2);font-size:12px}
@@ -1726,9 +1756,76 @@ const IC = {
   chevr:'<path d="M8 5l5 5-5 5"/>',
   refresh:'<path d="M16 10a6 6 0 11-2-4.5M16 3v3h-3"/>',
   dots:'<circle cx="4.5" cy="10" r=".8"/><circle cx="10" cy="10" r=".8"/><circle cx="15.5" cy="10" r=".8"/>',
-  lock:'<rect x="5" y="9" width="10" height="7" rx="1.5"/><path d="M7.5 9V7a2.5 2.5 0 015 0v2"/>'
+  lock:'<rect x="5" y="9" width="10" height="7" rx="1.5"/><path d="M7.5 9V7a2.5 2.5 0 015 0v2"/>',
+  // 品牌图标：GitHub 官方 mark（实心）与 Bilibili 电视机标（描边 + 两根天线），
+  // 都是矢量路径，不依赖外部字体或图片资源。
+  gh:'<path fill="currentColor" stroke="none" d="M10 .9a9.1 9.1 0 00-2.88 17.73c.46.08.62-.2.62-.44v-1.55c-2.54.55-3.08-1.22-3.08-1.22-.42-1.06-1.02-1.34-1.02-1.34-.83-.57.06-.56.06-.56.92.07 1.4.95 1.4.95.82 1.4 2.15 1 2.67.76.08-.6.32-1 .58-1.23-2.03-.23-4.16-1.02-4.16-4.52 0-1 .36-1.82.94-2.46-.1-.23-.41-1.16.09-2.42 0 0 .77-.25 2.52.94a8.7 8.7 0 014.6 0c1.75-1.19 2.52-.94 2.52-.94.5 1.26.19 2.19.09 2.42.59.64.94 1.46.94 2.46 0 3.51-2.13 4.29-4.17 4.52.33.28.62.84.62 1.69v2.5c0 .25.16.53.63.44A9.1 9.1 0 0010 .9z"/>',
+  bili:'<rect x="2.6" y="6.2" width="14.8" height="10.2" rx="2.6"/><path d="M6.6 2.9L9 5.6M13.4 2.9L11 5.6"/><path d="M7.6 10v2.4M12.4 10v2.4"/>'
 };
 const ic = n => '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">' + (IC[n] || IC.file) + '</svg>';
+
+/** 版本号：与 Cargo.toml / tauri.conf.json 同步（发布时三处一起改）。 */
+const APP_VER = '0.2.0';
+/** GitHub 仓库（检查更新读 releases/latest）。 */
+const GH_REPO = 'eason56789/parable';
+
+/**
+ * 检查更新：读 GitHub 最新 release，与 APP_VER 做数值比较。
+ *  - 启动时静默调用（只在前台标签页、且距上次检查超过 6 小时）；
+ *  - 关于页/更新页点按钮时调用，无论有没有新版本都给反馈。
+ * 网络不通不打扰用户（静默模式直接返回）。
+ */
+async function checkUpdate(manual, into) {
+  const box = into || document.getElementById('abt-upd');
+  const show = m => {
+    if (box) { box.hidden = false; box.innerHTML = m; }
+    if (manual) toast(m.replace(/<[^>]+>/g, ''));
+  };
+  try {
+    const r = await fetch('https://api.github.com/repos/' + GH_REPO + '/releases/latest', {
+      headers: { accept: 'application/vnd.github+json' },
+      cache: 'no-store',
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const j = await r.json();
+    const tag = String(j.tag_name || '').replace(/^v/, '');
+    if (!tag) throw new Error('no tag');
+    if (cmpVer(tag, APP_VER) > 0) {
+      show(t('upd_new')
+        .replace('{v}', esc(tag))
+        .replace('{cur}', esc(APP_VER)) +
+        ' <a href="' + esc(j.html_url) + '" target="_blank" rel="noopener">' + t('upd_get') + '</a>');
+      try { localStorage.setItem('cd-upd', tag); } catch (e) {}
+    } else {
+      show(t('upd_latest').replace('{v}', esc(APP_VER)));
+      try { localStorage.removeItem('cd-upd'); } catch (e) {}
+    }
+    try { localStorage.setItem('cd-upd-at', String(Date.now())); } catch (e) {}
+  } catch (e) {
+    if (manual) show(t('upd_fail'));
+  }
+}
+
+/** 版本比较：1.2.10 > 1.2.9（逐段数值，缺位补 0）。 */
+function cmpVer(a, b) {
+  const pa = String(a).split('.').map(x => parseInt(x, 10) || 0);
+  const pb = String(b).split('.').map(x => parseInt(x, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] || 0) - (pb[i] || 0);
+    if (d) return d;
+  }
+  return 0;
+}
+
+/** 启动时的静默检查：6 小时一次，只有前台标签页才发请求。 */
+function bootUpdateCheck() {
+  try {
+    const at = +localStorage.getItem('cd-upd-at') || 0;
+    if (Date.now() - at < 6 * 3600_000) return;
+  } catch (e) {}
+  if (document.visibilityState !== 'visible') return;
+  setTimeout(() => checkUpdate(false), 2500);
+}
 const esc = s => String(s == null ? '' : s)
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
   .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
@@ -1799,8 +1896,9 @@ const L = {
     lvlT:'思考强度', modelT:'模型', pk_manage:'管理模型', pk_api:'API', pk_vision:'视觉', pk_think:'思考',
     l0:'关闭', l1:'低', l2:'中', l3:'高',
     s_g:'通用', s_s:'网络搜索', s_a:'外观', s_m:'模型设置', s_p:'权限与思考', s_n:'动画', s_base:'基础设置',
-    s_u:'使用统计', s_data:'数据与统计', s_agent:'Agent 能力',
+    s_u:'使用统计', s_data:'数据与统计', s_agent:'Agent 能力', s_about:'关于',
     s_mem:'记忆', s_sk:'技能', s_bh:'Agent 行为', s_net:'网络与隐私', s_d:'数据',
+    s_mcp:'MCP 服务器', s_hk:'钩子', s_ab:'关于',
     cmpEn:'上下文自动压缩', cmpEnH:'上下文将满时自动把较早历史交给模型做结构化摘要（关闭后超限的轮次直接报错）',
     cmpPct:'压缩触发阈值', cmpPctH:'上下文占用达到该百分比时触发压缩（改动下一轮生效）',
     maxSteps:'单轮步数上限', maxStepsH:'一轮对话最多执行的工具步数，达到后收尾并说明',
@@ -1889,8 +1987,24 @@ const L = {
     ug_loading:'正在统计中', ug_loading_h:'正在读取本地会话日志，可能需要一点时间。',
     ug_updated:'最近刷新：{t}', ug_less:'较少', ug_more:'较多', ug_other:'其他模型',
     ug_cache_hit:'缓存命中率',
-    sprefT:'优先搜索引擎', sprefH:'auto：两种搜索都交给模型，配了 DeepSeek key 时优先它；deepseek：只推荐 DeepSeek 搜索；multi：web_search 多引擎抓取（必应/百度/360/DuckDuckGo/搜狗）',
+    sprefT:'优先搜索引擎', sprefH:'auto：AnySearch 与多引擎并发，谁先回谁先用；anysearch：只走 AnySearch 聚合（免密钥，按 IP 限流）；multi：只用多引擎抓取（必应/百度/360/DuckDuckGo/搜狗）；deepseek：优先 DeepSeek 搜索',
     sp_auto:'自动', sp_deepseek:'DeepSeek', sp_anysearch:'AnySearch', sp_multi:'多平台',
+    ask:'AnySearch API Key（可选）', askh:'留空即匿名调用（免密钥，按 IP 限流）；填入后走你的配额，结果更稳定',
+    anysearchT:'AnySearch', anysearchD:'免密钥可用 · 每次请求 12 秒超时，多平台并发',
+    ab_app:'关于 Parable', ab_apph:'版本信息与项目主页',
+    ab_srv:'本地服务', ab_srvh:'在浏览器中打开当前界面，或停止这个本地服务',
+    ab_upd:'更新', ab_updh:'检查 GitHub 上是否有更新版本',
+    ab_tagline:'本机运行的 AI agent · Rust 内核 + 单文件 Web UI · MIT License',
+    ab_check:'检查更新',
+    ab_lic:'本应用全部推理都在你自己的机器上完成，会话、附件与配置只保存在本地。',
+    upd_new:'发现新版本 <b>v{v}</b>（当前 v{cur}）。', upd_get:'前往下载',
+    upd_latest:'已是最新版本（v{v}）。', upd_fail:'检查更新失败：网络不可用或 GitHub 无法访问。',
+    srv_open:'在浏览器中打开', srv_stop:'停止服务', srv_stopq:'停止本地服务后，当前页面与所有正在运行的会话都会断开。确定停止？',
+    srv_opened:'已在浏览器中打开', srv_stopped:'服务已停止，可以关闭这个页面了',
+    srv_meta:'当前地址 {url} · 已运行 {up}',
+    bg_put:'放入后台运行', bg_started:'已转入后台（job {id}），输出见右上角后台终端',
+    bg_notrunning:'这条命令已经结束了', bg_nocmd:'拿不到这条命令的原文，无法转后台',
+    bg_moved:'已转入后台',
     name:'你的名字', nameh:'Parable 会用它来称呼你', prefs:'个人偏好', prefsh:'你希望 Parable 在回复时考虑哪些偏好？',
     sysprompt:'附加系统提示词', sysprompth:'追加在内置提示词之后的额外指令（不替换原文）',
     sysraw:'系统提示词（原文级覆盖）', sysrawh:'非空时整条替换发给模型服务器的 system 原文，内置提示词不再附加。支持 {{workspace}}、{{permission_mode}} 占位符',
@@ -2032,8 +2146,9 @@ const L = {
     lvlT:'Thinking effort', modelT:'Model', pk_manage:'Manage models', pk_api:'API', pk_vision:'Vision', pk_think:'Think',
     l0:'Off', l1:'Low', l2:'Medium', l3:'High',
     s_g:'General', s_s:'Web search', s_a:'Appearance', s_m:'Model settings', s_p:'Permissions', s_n:'Animation', s_base:'Basics',
-    s_u:'Usage', s_data:'Data & stats', s_agent:'Agent capabilities',
+    s_u:'Usage', s_data:'Data & stats', s_agent:'Agent capabilities', s_about:'About',
     s_mem:'Memory', s_sk:'Skills', s_bh:'Agent behavior', s_net:'Network & privacy', s_d:'Data',
+    s_mcp:'MCP servers', s_hk:'Hooks', s_ab:'About',
     cmpEn:'Auto compaction', cmpEnH:'Summarise older history into the model when the context nears its limit (off = over-limit turns fail loudly)',
     cmpPct:'Compaction threshold', cmpPctH:'Fire compaction when context usage reaches this percent (applies to the next turn)',
     maxSteps:'Max steps per turn', maxStepsH:'Tool steps a single turn may take before wrapping up',
@@ -2122,8 +2237,24 @@ const L = {
     ug_loading:'Crunching numbers', ug_loading_h:'Reading the local usage journal — this can take a moment.',
     ug_updated:'Last refreshed: {t}', ug_less:'Less', ug_more:'More', ug_other:'Other models',
     ug_cache_hit:'Cache hit rate',
-    sprefT:'Preferred search engine', sprefH:'auto: both tools stay available, DeepSeek first once a key is set; deepseek: DeepSeek search only; multi: web_search scrapes several engines (Bing/Baidu/360/DuckDuckGo/Sogou)',
+    sprefT:'Preferred search engine', sprefH:'auto: AnySearch and the engines run concurrently, first reply wins; anysearch: AnySearch only (no key needed, IP-rate-limited); multi: multi-engine scraping only (Bing/Baidu/360/DuckDuckGo/Sogou); deepseek: prefer DeepSeek search',
     sp_auto:'Auto', sp_deepseek:'DeepSeek', sp_anysearch:'AnySearch', sp_multi:'Multi-engine',
+    ask:'AnySearch API key (optional)', askh:'Leave empty to call anonymously (no key, IP-rate-limited); a key uses your own quota and is more stable',
+    anysearchT:'AnySearch', anysearchD:'Works without a key · 12s timeout per platform, all platforms in parallel',
+    ab_app:'About Parable', ab_apph:'Version information and project links',
+    ab_srv:'Local service', ab_srvh:'Open this UI in your browser, or stop the local service',
+    ab_upd:'Updates', ab_updh:'Check GitHub for a newer release',
+    ab_tagline:'A local AI agent · Rust core + single-file web UI · MIT License',
+    ab_check:'Check for updates',
+    ab_lic:'All inference happens on your own machine; sessions, attachments and settings stay local.',
+    upd_new:'Version <b>v{v}</b> is available (you have v{cur}).', upd_get:'Download',
+    upd_latest:'You are up to date (v{v}).', upd_fail:'Update check failed: network unavailable or GitHub unreachable.',
+    srv_open:'Open in browser', srv_stop:'Stop service', srv_stopq:'Stopping the local service disconnects this page and ends any running turns. Stop anyway?',
+    srv_opened:'Opened in your browser', srv_stopped:'Service stopped — you can close this page',
+    srv_meta:'Address {url} · up {up}',
+    bg_put:'Run in the background', bg_started:'Moved to the background (job {id}) — see the background terminals panel',
+    bg_notrunning:'This command has already finished', bg_nocmd:'Cannot read the command text for this card',
+    bg_moved:'Moved to background',
     name:'Your name', nameh:'Parable will use it to address you', prefs:'Personal preferences',
     sysprompt:'Extra system prompt', sysprompth:'Appended after the built-in prompt (does not replace it)',
     sysraw:'System prompt (raw override)', sysrawh:'When non-empty, fully replaces the system text sent to the model server — the built-in prompt is not appended. Supports {{workspace}} and {{permission_mode}} placeholders',
@@ -2253,7 +2384,7 @@ const DEF = {
   uiSize:13, lineHeight:1.5, codeSize:13, density:'cozy', inkOn:true,
   speed:22, cd:650, blur:8, sf:1.5, anim:1, stream:true, think:true, toolThink:false, side:true,
   prefs:'', systemPrompt:'', systemPromptRaw:'', model:'', perm:'ask', lvl:2,
-  searchKey:'', spref:'auto', plan:false, mem:true, memAuto:true, followupMode:'queue',
+  searchKey:'', anysearchKey:'', spref:'auto', plan:false, mem:true, memAuto:true, followupMode:'queue',
   // 精装修新增：Agent 行为 / 通知 / 会话管理 / 代码块 / 网络与隐私 / 输入
   compactionEnabled:true, compactionPct:85, maxSteps:100, askAutoResolve:false, keepAwake:false, ctxWarnPct:80,
   notify:true, notifySound:false, autoArchiveDays:0,
@@ -2374,7 +2505,7 @@ function apply(pushToServer) {
         width: S.w, accent: S.accent, speed: S.speed, cd: S.cd, blur: S.blur,
         sf: S.sf, anim: S.anim, stream: S.stream, think: S.think, side: S.side,
         uiSize: S.uiSize, lineHeight: S.lineHeight, codeSize: S.codeSize, density: S.density,
-        prefs: S.prefs, systemPrompt: S.systemPrompt, systemPromptRaw: S.systemPromptRaw, model: S.model, permissionMode: S.perm, thinkingLevel: S.lvl, searchKey: S.searchKey, searchPref: S.spref, followupMode: S.followupMode,
+        prefs: S.prefs, systemPrompt: S.systemPrompt, systemPromptRaw: S.systemPromptRaw, model: S.model, permissionMode: S.perm, thinkingLevel: S.lvl, searchKey: S.searchKey, anysearchKey: S.anysearchKey, searchPref: S.spref, followupMode: S.followupMode,
         compactionEnabled: S.compactionEnabled, compactionPct: S.compactionPct, maxSteps: S.maxSteps,
         askAutoResolve: S.askAutoResolve, keepAwake: S.keepAwake, ctxWarnPct: S.ctxWarnPct,
         notify: S.notify, notifySound: S.notifySound, autoArchiveDays: S.autoArchiveDays,
@@ -2553,8 +2684,15 @@ async function renderAutoPage() {
   const rows = tasks.map(t => {
     const st = (t.status || 'active').toLowerCase();
     const stl = st === 'active' ? (z ? '运行中' : 'Active') : st === 'paused' ? (z ? '已暂停' : 'Paused') : (z ? '已结束' : 'Ended');
+    const isShell = t.action && t.action.kind === 'shell';
+    const what = isShell
+      ? (z ? '命令 ' : 'cmd ') + (t.action.command || '')
+      : (z ? '消息 ' : 'msg ') + (t.prompt || '');
+    const mdl = isShell ? '' : (t.modelSel || t.model_sel || '');
     return '<div class="taskrow col" data-id="' + esc(t.id) + '">' +
       '<div class="tk-top"><b class="tk-name">' + esc(t.name || t.id) + '</b>' +
+        '<span class="tk-kind">' + (isShell ? (z ? 'shell' : 'shell') : (z ? '对话' : 'agent')) + '</span>' +
+        (mdl ? '<span class="tk-model">' + esc(mdl.split('/').pop()) + '</span>' : '') +
         '<span class="tk-st ' + st + '">' + stl + '</span>' +
         '<div class="tk-acts">' +
           (st === 'active' ? '<button class="btn" data-act="pause">' + (z ? '暂停' : 'Pause') + '</button>' : '') +
@@ -2566,26 +2704,36 @@ async function renderAutoPage() {
       '<div class="tk-meta">' + esc(taskTimingLabel(t.timing)) + ' <span class="tk-dot">·</span> ' +
         (z ? '下次 ' : 'next ') + esc(fmtDT(t.scheduledAt)) + ' <span class="tk-dot">·</span> ' +
         (z ? '已跑 ' : 'ran ') + (t.runCount || 0) + (z ? ' 次' : '×') + '</div>' +
-      '<div class="tk-prompt" title="' + (z ? '点击展开或收起' : 'Click to expand or collapse') + '">' + esc(t.prompt || '') + '</div>' +
+      '<div class="tk-prompt" title="' + (z ? '点击展开或收起' : 'Click to expand or collapse') + '">' + esc(what) + '</div>' +
     '</div>';
   }).join('');
   return '<div class="pg-head"><h2>' + (z ? '自动化' : 'Automation') + '</h2>' +
-    '<p>' + (z ? '定时把提示词投递为一次对话——比如每分钟巡检、每天晨报。' : 'Deliver a prompt on a schedule — periodic checks, daily digests.') + '</p></div>' +
+    '<p>' + (z ? '定时执行命令或投递对话——比如每小时巡检、每天晨报、定时跑构建。' : 'Run a command or deliver a prompt on a schedule — hourly checks, daily digests, timed builds.') + '</p></div>' +
     '<div class="sksh"><b>' + (z ? '定时任务' : 'Scheduled tasks') + '</b><em>' + tasks.length + '</em></div>' +
     '<div class="skl">' + (rows || '<div class="pempty">' + (z ? '还没有定时任务。' : 'No scheduled tasks yet.') + '</div>') + '</div>' +
     '<div class="sksh"><b>' + (z ? '新建任务' : 'New task') + '</b></div>' +
     '<div class="tk-form">' +
       '<input id="nt-name" placeholder="' + (z ? '任务名称' : 'Task name') + '">' +
-      '<textarea id="nt-prompt" rows="2" placeholder="' + (z ? '触发时投递的提示词' : 'Prompt delivered when it fires') + '"></textarea>' +
+      '<div class="tk-row">' +
+        '<select id="nt-action">' +
+          '<option value="agent">' + (z ? '向会话投递消息' : 'Deliver a message') + '</option>' +
+          '<option value="shell">' + (z ? '执行 shell 命令' : 'Run a shell command') + '</option>' +
+        '</select>' +
+        '<span class="fl"></span>' +
+      '</div>' +
+      '<textarea id="nt-prompt" rows="2" placeholder="' + (z ? '触发时投递的消息（交给模型处理）' : 'Message delivered to the agent when it fires') + '"></textarea>' +
+      '<textarea id="nt-command" rows="2" style="display:none;font-family:var(--mono);font-size:12.5px" placeholder="' + (z ? '要执行的命令，例如 npm run build' : 'Command to run, e.g. npm run build') + '"></textarea>' +
       '<div class="tk-row">' +
         '<select id="nt-kind">' +
           '<option value="every">' + (z ? '每隔' : 'Every') + '</option>' +
           '<option value="daily">' + (z ? '每天' : 'Daily at') + '</option>' +
           '<option value="after">' + (z ? '一次性（延迟）' : 'Once after') + '</option>' +
+          '<option value="cron">' + (z ? 'cron 表达式' : 'Cron expression') + '</option>' +
         '</select>' +
         '<input id="nt-num" type="number" min="1" value="5" style="width:64px">' +
         '<select id="nt-unit"><option value="min">' + (z ? '分钟' : 'min') + '</option><option value="hour">' + (z ? '小时' : 'hour') + '</option></select>' +
         '<input id="nt-time" type="time" value="09:00" style="display:none">' +
+        '<input id="nt-cron" placeholder="*/15 * * * *" style="display:none;width:150px;font-family:var(--mono)">' +
       '</div>' +
       '<div class="tk-row">' +
         '<select id="nt-target">' +
@@ -2593,6 +2741,7 @@ async function renderAutoPage() {
           '<option value="new">' + (z ? '每次新建会话' : 'New session each time') + '</option>' +
           '<option value="existing">' + (z ? '投递到当前会话' : 'Current chat') + '</option>' +
         '</select>' +
+        '<select id="nt-model" style="max-width:220px"><option value="">' + (z ? '模型：跟随当前' : 'Model: follow current') + '</option></select>' +
         '<span class="fl"></span>' +
         '<button class="btn" id="nt-add">' + (z ? '创建' : 'Create') + '</button>' +
       '</div>' +
@@ -2629,16 +2778,43 @@ function bindAutoPage(root) {
   });
   const kindSel = root.querySelector('#nt-kind');
   const timeInp = root.querySelector('#nt-time');
+  const cronInp = root.querySelector('#nt-cron');
   const numInp = root.querySelector('#nt-num');
   const unitSel = root.querySelector('#nt-unit');
+  const actSel = root.querySelector('#nt-action');
+  const promptInp = root.querySelector('#nt-prompt');
+  const cmdInp = root.querySelector('#nt-command');
+  const modelSel = root.querySelector('#nt-model');
   const syncKind = () => {
-    const isDaily = kindSel.value === 'daily';
-    timeInp.style.display = isDaily ? '' : 'none';
-    numInp.style.display = isDaily ? 'none' : '';
-    unitSel.style.display = isDaily ? 'none' : '';
+    const k = kindSel.value;
+    timeInp.style.display = k === 'daily' ? '' : 'none';
+    cronInp.style.display = k === 'cron' ? '' : 'none';
+    const simple = k === 'every' || k === 'after';
+    numInp.style.display = simple ? '' : 'none';
+    unitSel.style.display = simple ? '' : 'none';
   };
   kindSel.onchange = syncKind;
   syncKind();
+  // 动作切换：shell 任务不需要会话/模型，agent 任务不需要命令行
+  const syncAction = () => {
+    const shell = actSel.value === 'shell';
+    cmdInp.style.display = shell ? '' : 'none';
+    promptInp.style.display = shell ? 'none' : '';
+    const tgt = root.querySelector('#nt-target');
+    if (tgt) tgt.style.display = shell ? 'none' : '';
+    if (modelSel) modelSel.style.display = shell ? 'none' : '';
+  };
+  actSel.onchange = syncAction;
+  syncAction();
+  // 模型下拉：跟随全局 + 全部已配置模型
+  if (modelSel) {
+    MODELS.forEach(m => {
+      const o = document.createElement('option');
+      o.value = m.value;
+      o.textContent = (m.provider ? m.provider + ' · ' : '') + (m.label || m.value);
+      modelSel.append(o);
+    });
+  }
   // 没有活动会话时「投递到当前会话」没有意义：禁用该选项并标注原因
   const tgtSel = root.querySelector('#nt-target');
   const exOpt = tgtSel ? tgtSel.querySelector('option[value="existing"]') : null;
@@ -2648,16 +2824,25 @@ function bindAutoPage(root) {
   }
   root.querySelector('#nt-add').onclick = async () => {
     const name = root.querySelector('#nt-name').value.trim();
-    const prompt = root.querySelector('#nt-prompt').value.trim();
-    if (!name || !prompt) { toast(z ? '名称和提示词都要填' : 'Name and prompt are required'); return; }
+    const isShell = actSel.value === 'shell';
+    const prompt = isShell ? '' : promptInp.value.trim();
+    const command = isShell ? cmdInp.value.trim() : '';
+    if (!name) { toast(z ? '请填写任务名称' : 'Task name is required'); return; }
+    if (isShell && !command) { toast(z ? '请填写要执行的命令' : 'Command is required'); return; }
+    if (!isShell && !prompt) { toast(z ? '请填写要投递的消息' : 'Message is required'); return; }
     const n = Math.max(1, +numInp.value || 1);
     const secs = unitSel.value === 'hour' ? n * 3600 : n * 60;
+    const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
     let timing;
     if (kindSel.value === 'every') timing = { kind: 'every', every_seconds: Math.max(60, secs) };
     else if (kindSel.value === 'after') timing = { kind: 'after', after_seconds: secs };
-    else timing = { kind: 'daily', time: timeInp.value || '09:00', timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone };
+    else if (kindSel.value === 'cron') {
+      const expr = cronInp.value.trim();
+      if (!expr) { toast(z ? '请填写 cron 表达式' : 'Cron expression is required'); return; }
+      timing = { kind: 'cron', expression: expr, timeZone: zone };
+    } else timing = { kind: 'daily', time: timeInp.value || '09:00', timeZone: zone };
     const tgt = root.querySelector('#nt-target').value;
-    if (tgt === 'existing' && !(conv && conv.id)) {
+    if (!isShell && tgt === 'existing' && !(conv && conv.id)) {
       toast(z ? '当前没有会话，不能投递到当前对话' : 'No active chat to deliver to');
       return;
     }
@@ -2665,7 +2850,11 @@ function bindAutoPage(root) {
       await api('/schedule', {
         method: 'POST',
         body: {
-          name, prompt, timing,
+          name,
+          prompt,
+          action: isShell ? { kind: 'shell', command } : { kind: 'agent' },
+          model: isShell ? '' : (modelSel ? modelSel.value : ''),
+          timing,
           target: tgt === 'existing' ? { kind: 'existing', session_id: (conv && conv.id) || '' } : tgt,
           session_id: (conv && conv.id) || ''
         }
@@ -3701,16 +3890,19 @@ function commitBlock(st, text) {
 }
 
 function rebuildBlock(st) {
-  if (st.el) { st.el.remove(); st.el = null; st.inline = null; }
   st.pre = null;
   st.codeLines = -1;
-  if (!st.buf.trim()) return;
+  if (!st.buf.trim()) { if (st.el) { st.el.remove(); st.el = null; } return; }
+  // 先在离屏容器里把新块完整建好，再一次性换上去。
+  // 旧实现先 remove 再 append：每次重渲都有一帧「什么都没有」，表格/列表
+  // 就随每个 delta 闪一下。换块是原子操作，屏幕上永远只有完整的表。
   const wrapper = document.createElement('div');
   wrapper.className = 'mblk';
   // 流式期间的整块重渲不播动画：列表每个 delta 都会走到这里，
   // 带动画会反复重播；提交时（commitBlock）再一次性错峰入场。
   renderBlock(wrapper, st.buf, null, true);
-  st.host.append(wrapper);
+  if (st.el && st.el.parentNode === st.host) st.el.replaceWith(wrapper);
+  else st.host.append(wrapper);
   st.el = wrapper;
   st.kind = classifyBlock(st.buf);
   st.rendered = st.buf;
@@ -3766,31 +3958,62 @@ function mdInline(el, text, ink, noanim) {
   iflush(st);
 }
 
-/** True when every non-empty line looks like a markdown table row. */
+/**
+ * True when the text looks like a markdown table — including tables that are
+ * still streaming (header + separator arrived, body rows not yet).
+ *
+ * 旧的判定要求「每一行都以 | 开头且以 | 结尾」并且「存在分隔行」。流式期间
+ * 这个条件几乎永远不成立：
+ *  - 第一个 delta 只有 `| a`（还没有收尾的 |）；
+ *  - 表头还没写完时没有分隔行；
+ *  - 有的模型省略行尾的 |，或表头前有一行说明文字。
+ * 于是一路走成普通段落，等分隔行终于到齐才「啪」地换成表格 —— 这就是
+ * 用户看到的「一闪一闪 / 有时没有表格」。现在放宽为：只要有 ≥3 行且
+ * 绝大多数行以 | 开头就算表格，流式期间也能稳定渲染成表格骨架。
+ */
 function isTable(text) {
-  const ls = text.split('\n').map(l => l.trim()).filter(Boolean);
-  return ls.length >= 2 && ls.every(l => l.startsWith('|') && l.endsWith('|')) &&
-    ls.some(l => /^\|[\s:|-]+\|$/.test(l));
+  const ls = String(text || '').split('\n').map(l => l.trim()).filter(Boolean);
+  if (ls.length < 2) return false;
+  const pipey = ls.filter(l => l.startsWith('|')).length;
+  // 要有分隔行（|---|）或者是明显以 | 开头的多行结构
+  const hasSep = ls.some(l => /^\|?[\s:|-]+\|[\s:|-]*$/.test(l) && l.includes('-'));
+  if (hasSep) return pipey >= 2;
+  return pipey >= 3 && pipey / ls.length >= 0.75;
 }
 
+/** `| a | b |` / `a | b` → ['a','b']：容错收尾的 | 缺失。 */
+function tableCells(r) {
+  let s = r.trim();
+  if (s.startsWith('|')) s = s.slice(1);
+  if (s.endsWith('|')) s = s.slice(0, -1);
+  return s.split('|').map(c => c.trim());
+}
+
+const TABLE_SEP = /^\|?[\s:|-]*-[\s:|-]*\|[\s:|-]*$/;
+
 function renderTable(host, text) {
-  const rows = text.split('\n').map(l => l.trim()).filter(Boolean);
-  const parseRow = r => r.slice(1, -1).split('|').map(c => c.trim());
+  const rows = String(text || '').split('\n').map(l => l.trim()).filter(Boolean);
   const tbl = document.createElement('table');
   const thead = document.createElement('thead');
   const tbody = document.createElement('tbody');
+  let seenData = false;
   rows.forEach((r, i) => {
-    if (/^\|[\s:|-]+\|$/.test(r)) return; // separator
+    if (TABLE_SEP.test(r) && r.includes('-')) return; // separator
     const tr = document.createElement('tr');
-    const isHead = i === 0;
-    parseRow(r).forEach(c => {
+    // 表头 = 分隔行之前的那一行；没有分隔行时第一行当表头（流式骨架）。
+    const isHead = !seenData && (i === 0 || rows[i + 1] === undefined || TABLE_SEP.test(rows[i + 1] || ''));
+    tableCells(r).forEach(c => {
       const cell = document.createElement(isHead ? 'th' : 'td');
       mdInline(cell, c);
       tr.append(cell);
     });
     (isHead ? thead : tbody).append(tr);
+    if (!isHead) seenData = true;
   });
-  tbl.append(thead, tbody);
+  // 只落 thead 会让流式表格高度在 0 与 n 行之间反复跳动：两个都挂上，
+  // 空的 tbody 不占位，看起来就是稳定的骨架。
+  tbl.append(thead);
+  tbl.append(tbody);
   host.append(tbl);
 }
 
@@ -3910,6 +4133,23 @@ function renderBlock(host, text, ink, noanim = true) {
         if (FENCE_RE.test(l)) break;
       }
       renderCode(host, grp.join('\n'));
+      continue;
+    }
+    // 表格出现在块中间（前面跟了一行说明文字时最典型）：isTable(t0) 在
+    // 函数开头只对整个块判过一次，这里必须按行再判一次，否则整张表会被
+    // 当成普通段落渲染成「一条一条的竖线」——用户看到的就是「没有表格」。
+    if (lines[i].trim().startsWith('|')) {
+      const grp = [];
+      while (i < lines.length && (lines[i].trim().startsWith('|') || lines[i].trim() === '')) {
+        grp.push(lines[i]);
+        i++;
+      }
+      const tblText = grp.join('\n').trim();
+      if (isTable(tblText)) { renderTable(host, tblText); continue; }
+      // 只是零散的 | 开头行，回退成普通段落
+      const p = document.createElement('p');
+      mdInline(p, tblText, ink, noanim);
+      host.append(p);
       continue;
     }
     // Prose run (stops at list / quote / hr / fence openers).
@@ -4346,6 +4586,17 @@ function tgStats(cards) {
   let cmd = 0;
   for (const c of cards) if (tgIsCmd(c)) cmd++;
   const tool = cards.length - cmd;
+  // 单卡：不写「已运行1条命令」，直接用那张卡自己的意图/标题当组头
+  //（与 ZCode 的单条工具行一致：「已运行命令  Run first shell command」）。
+  if (cards.length === 1) {
+    const c = cards[0];
+    const fi = c.querySelector('.fi b');
+    const desc = ((fi && fi.textContent) || c.dataset.desc || c.dataset.tool || '').trim();
+    const lead = cmd
+      ? (zh ? '已运行命令' : 'Ran command')
+      : (zh ? '已调用工具' : 'Called tool');
+    return desc ? lead + '  ' + desc : lead;
+  }
   const parts = [];
   if (cmd) parts.push(zh
     ? '已运行' + cmd + '条命令'
@@ -4416,7 +4667,9 @@ function tgPaint(g) {
  * 把一个气泡的连续工具卡折叠成组。四阶段：
  * A 组内出现了边界卡（授权请求复用旧卡把 st 置成 wait 等）→ 整组按原顺序拆回；
  * B 子节点读成逻辑序列（组壳展开成成员卡，与裸卡、边界混排成段）；
- * C ≥2 卡的段落聚合进组壳（复用旧壳保持展开态），单卡段落还原为裸卡；
+ * C ≥1 卡的段落聚合进组壳（复用旧壳保持展开态）——单卡也进组，
+ *   这样「一个工具调用」和「一串工具调用」长得完全一样（ZCode 的
+ *   总菜单样式：一行组头 + 缩进的一条条成员），不再出现两种排版；
  * D 刷新组头文案。返回是否有 DOM 变化（false = 本轮零写入）。
  */
 function compactToolRuns(ab) {
@@ -4447,12 +4700,10 @@ function compactToolRuns(ab) {
     if (el.classList.contains('tgrp')) {
       const bin = el.querySelector('.tgrp-bin');
       const cards = [...bin.children];
-      if (cards.length < 2) {
-        // 组退化成单卡/空组：拆壳还原，随后按新邻居重新聚合
-        for (const card of cards) ab.insertBefore(card, el);
+      if (cards.length < 1) {
+        // 空组：拆壳（组壳下面没有任何成员，留着是个空行）
         el.remove();
         changed = true;
-        for (const card of cards) pushCard(card, null);
         continue;
       }
       for (const card of cards) pushCard(card, el);
@@ -4467,7 +4718,7 @@ function compactToolRuns(ab) {
     const g0 = run.gs[0];
     const anchor = g0 && g0.querySelector('.tgrp-bin').contains(run.cards[0])
       ? g0 : run.cards[0];
-    if (run.cards.length >= 2) {
+    if (run.cards.length >= 1) {
       let g = g0;
       if (!g) {
         g = document.createElement('div');
@@ -4656,17 +4907,57 @@ function toolCard(host, callId, tool, title) {
       '<span class="st-tx"></span>' +
       '<span class="fi"><b></b></span>' +
       '<span class="diff"></span>' +
+      // 运行中的命令可以手动交给后台：点了就把它转成后台 job，
+      // 前台这一轮不再等它，输出仍在「后台终端」面板里看。
+      (tgIsCmd({ dataset: { tool: tool || '' } })
+        ? '<button class="bgbtn" title="' + t('bg_put') + '">' + ic('terminal') + '</button>'
+        : '') +
       '<span class="ech">' + ic('chev') + '</span>' +
     '</div>' +
     '<div class="dc"><div class="dc-in"></div></div>' +
     '<div class="pm"></div>';
-  e.querySelector('.eh').onclick = () => e.classList.toggle('collapsed');
+  e.querySelector('.eh').onclick = ev => {
+    if (ev.target.closest('.bgbtn')) return;
+    e.classList.toggle('collapsed');
+  };
+  const bg = e.querySelector('.bgbtn');
+  if (bg) bg.onclick = ev => { ev.stopPropagation(); putInBackground(e); };
   e.dataset.desc = title || tool || '';
   e.querySelector('.fi b').textContent = e.dataset.desc;
   e.querySelector('.st-tx').textContent = runLabel('run', tool);
   e.querySelector('.st-tx').classList.add('run');
   host.append(e);
   return e;
+}
+
+/**
+ * 把一个正在跑的 bash 卡转成后台 job：用原命令重新起一个后台终端。
+ * 前台那条命令本体会被本轮结束/中断收掉，但用户想要的效果（继续跑下去、
+ * 输出还在）由后台 job 接续。只对 bash/shell 卡出现按钮。
+ */
+async function putInBackground(card) {
+  if (!card || card.dataset.st === 'done' || card.dataset.st === 'err') {
+    toast(t('bg_notrunning'));
+    return;
+  }
+  let cmd = '';
+  try {
+    const args = JSON.parse(card.dataset.args || '{}');
+    cmd = (args.command || '').toString();
+  } catch (e) {}
+  if (!cmd.trim()) { toast(t('bg_nocmd')); return; }
+  try {
+    const r = await api('/term/start', {
+      method: 'POST',
+      body: { command: cmd, cwd: (conv && conv.workspace) || '' },
+    });
+    toast(t('bg_started').replace('{id}', (r && r.id) || ''));
+    if (card.querySelector('.st-tx')) {
+      const st = card.querySelector('.st-tx');
+      st.classList.remove('run');
+      st.textContent = t('bg_moved');
+    }
+  } catch (e) { toast(e.message); }
 }
 
 /**
@@ -9150,12 +9441,13 @@ addEventListener('resize', () => { if ($('#mm') && $('#mm').classList.contains('
 /* ==================================================================
    settings modal
    ================================================================== */
-const TAB = ['g', 's', 'a', 'n', 'm', 'p', 'mem', 'sk', 'u'];
+const TAB = ['g', 's', 'a', 'n', 'm', 'p', 'mem', 'sk', 'u', 'ab'];
 /** 导航分组：基础设置 / Agent 能力 / 数据与统计 */
 const TGRP = [
   { k: 's_base', tabs: ['g', 'a', 'n', 's', 'net'] },
   { k: 's_agent', tabs: ['m', 'p', 'mem', 'sk', 'mcp', 'hk', 'bh'] },
-  { k: 's_data', tabs: ['u', 'd'] }
+  { k: 's_data', tabs: ['u', 'd'] },
+  { k: 's_about', tabs: ['ab'] }
 ];
 const SW = ['#d97757', '#6a9bcc', '#788c5d', '#9b87f5', '#d4637a', '#c9a227'];
 const SC = {
@@ -9176,7 +9468,8 @@ const SC = {
     { t:'rs' }
   ],
   s:[
-    { k:'spref', t:'seg', l:'sprefT', h:'sprefH', o:['auto','deepseek','multi'], i:1, p:'sp_' },
+    { k:'spref', t:'seg', l:'sprefT', h:'sprefH', o:['auto','anysearch','multi','deepseek'], i:1, p:'sp_' },
+    { k:'anysearchKey', t:'tx', l:'ask', h:'askh' },
     { k:'searchKey', t:'tx', l:'dsk', h:'dskh' }
   ],
   a:[
@@ -9232,6 +9525,12 @@ const SC = {
     { k:'sessionRetentionDays', t:'seg', l:'retention', h:'retentionH', o:[0,7,30,90,365], i:1, p:'sr_', num:1 },
     { l:'expAll', h:'expAllH', t:'exp' },
     { l:'dangerT', h:'dangerH', t:'danger' }
+  ],
+  // 关于：项目链接 + 本地服务开关 + 检查更新（一个页面三块，不做成三个 tab）
+  ab:[
+    { l:'ab_app', h:'ab_apph', t:'about' },
+    { l:'ab_srv', h:'ab_srvh', t:'server' },
+    { l:'ab_upd', h:'ab_updh', t:'update' }
   ]
 };
 let tab = 'g', pvs = null;
@@ -9738,6 +10037,64 @@ function panel() {
             if (conv && conv.id) newChat();
           } catch (e) { toast(e.message); }
         };
+      } else if (c.t === 'about') {
+        // 关于：版本 + 两个项目入口 + 检查更新。图标用内联 SVG（矢量，
+        // 不依赖字体/外链），与 ZCode 自己画的图标同一套 stroke 风格。
+        ct.className = '';
+        ct.innerHTML =
+          '<div class="abt">' +
+            '<div class="abt-row"><b>Parable</b><span class="abt-ver">v' + esc(APP_VER) + '</span></div>' +
+            '<p class="abt-desc">' + esc(t('ab_tagline')) + '</p>' +
+            '<div class="abt-btns">' +
+              '<a class="abt-btn" href="https://github.com/eason56789/parable" target="_blank" rel="noopener">' +
+                ic('gh') + '<span>GitHub</span></a>' +
+              '<a class="abt-btn bili" href="https://space.bilibili.com/88981336" target="_blank" rel="noopener">' +
+                ic('bili') + '<span>Bilibili</span></a>' +
+              '<button class="abt-btn" data-chkupd>' + ic('refresh') + '<span>' + t('ab_check') + '</span></button>' +
+            '</div>' +
+            '<p class="abt-note">' + esc(t('ab_lic')) + '</p>' +
+            '<div class="abt-upd" id="abt-upd" hidden></div>' +
+          '</div>';
+        ct.querySelector('[data-chkupd]').onclick = () => checkUpdate(true);
+      } else if (c.t === 'server') {
+        // 本地服务：在默认浏览器里打开发布页，以及停止/重启服务本身。
+        // 桌面壳与 CLI 都监听 127.0.0.1，所以「用浏览器打开」永远是同一个
+        // 页面；「停止服务」走 /api/shutdown —— 停掉后这个页面自然断开。
+        ct.className = '';
+        ct.innerHTML =
+          '<div class="abt-btns">' +
+            '<button class="abt-btn" data-opweb>' + ic('globe') + '<span>' + t('srv_open') + '</span></button>' +
+            '<button class="abt-btn" data-srvstop>' + ic('stop') + '<span>' + t('srv_stop') + '</span></button>' +
+          '</div>' +
+          '<div class="abt-note" id="srv-meta"></div>';
+        const meta = ct.querySelector('#srv-meta');
+        api('/status').then(st => {
+          if (!meta) return;
+          meta.textContent = t('srv_meta')
+            .replace('{url}', location.origin)
+            .replace('{up}', fmtDur(Date.now() - (st.started_at || Date.now())));
+        }).catch(() => {});
+        ct.querySelector('[data-opweb]').onclick = () => {
+          // 桌面壳里 location.origin 就是 127.0.0.1:<port>；复制一份带 token
+          // 的地址交给系统浏览器，否则新标签页会被鉴权拦下。
+          const url = location.origin + '/?token=' + encodeURIComponent(TOKEN);
+          api('/service/open', { method: 'POST', body: { url } })
+            .then(() => toast(t('srv_opened')))
+            .catch(() => { try { window.open(url, '_blank', 'noopener'); } catch (e) { copyText(url); } });
+        };
+        ct.querySelector('[data-srvstop]').onclick = async () => {
+          if (!(await confirmBox(t('srv_stopq'), { danger: true }))) return;
+          try {
+            await api('/shutdown', { method: 'POST', body: {} });
+          } catch (e) {}
+          toast(t('srv_stopped'));
+        };
+      } else if (c.t === 'update') {
+        ct.className = '';
+        ct.innerHTML = '<div class="abt-btns"><button class="abt-btn" data-chk2>' +
+          ic('refresh') + '<span>' + t('ab_check') + '</span></button></div>' +
+          '<div class="abt-upd" id="abt-upd2" hidden></div>';
+        ct.querySelector('[data-chk2]').onclick = () => checkUpdate(true, ct.querySelector('#abt-upd2'));
       } else if (c.t === 'sp') {
         // Show the exact system text the harness will send to the model server
         // on the next turn of the current session (raw override included).
@@ -13937,6 +14294,7 @@ async function boot() {
       systemPrompt: c.system_prompt ?? S.systemPrompt,
       systemPromptRaw: c.system_prompt_raw ?? S.systemPromptRaw,
       searchKey: c.search_key ?? S.searchKey,
+      anysearchKey: c.anysearch_key ?? S.anysearchKey,
       spref: c.search_pref ?? S.spref,
       followupMode: c.followup_mode ?? S.followupMode,
       model: c.model ?? local.model ?? S.model,
@@ -13997,6 +14355,8 @@ async function boot() {
 }
 
 boot();
+// 启动时静默检查更新（6 小时一次，只有前台标签页才发请求）。
+bootUpdateCheck();
 
 </script>
 </body>

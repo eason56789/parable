@@ -257,12 +257,37 @@ pub enum Target {
     NewEachTime,
 }
 
+/// 任务触发时到底做什么。
+///
+/// 旧数据只有「把一段提示词投给 agent」这一种动作，所以 `Agent` 是
+/// `#[serde(other)]` 之外的默认值——老 JSON 反序列化后仍然是原行为。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TaskAction {
+    /// 把 prompt 作为新一轮投给 agent（原有行为）。
+    Agent,
+    /// 直接执行一条 shell 命令（不经过模型，零 token）。
+    Shell { command: String },
+}
+
+impl Default for TaskAction {
+    fn default() -> Self {
+        TaskAction::Agent
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
     pub id: String,
     pub name: String,
+    /// 触发时做什么。缺省 = 投递提示词（兼容旧任务文件）。
+    #[serde(default)]
+    pub action: TaskAction,
     /// The prompt delivered when the task fires.
     pub prompt: String,
+    /// 触发时用哪个模型（`provider/model`）。空 = 跟随当前全局模型。
+    #[serde(default, rename = "modelSel")]
+    pub model_sel: String,
     pub timing: Timing,
     pub target: Target,
     pub status: TaskStatus,
@@ -482,6 +507,8 @@ impl ScheduleService {
         &self,
         name: String,
         prompt: String,
+        action: TaskAction,
+        model_sel: String,
         timing: Timing,
         target: Target,
     ) -> Result<Task, HarnessError> {
@@ -489,14 +516,23 @@ impl ScheduleService {
         if name.trim().is_empty() {
             return Err(HarnessError::Other("name must not be empty".into()));
         }
-        if prompt.trim().is_empty() {
+        // 只有 agent 动作才需要提示词；shell 动作只要命令行非空。
+        let needs_prompt = matches!(action, TaskAction::Agent) && prompt.trim().is_empty();
+        if needs_prompt {
             return Err(HarnessError::Other("prompt must not be empty".into()));
+        }
+        if let TaskAction::Shell { command } = &action {
+            if command.trim().is_empty() {
+                return Err(HarnessError::Other("shell command must not be empty".into()));
+            }
         }
         let now = Utc::now();
         let mut t = Task {
             id: format!("sc_{}", &uuid::Uuid::new_v4().simple().to_string()[..10]),
             name,
+            action,
             prompt,
+            model_sel,
             timing: timing.clone(),
             target,
             status: TaskStatus::Active,
@@ -715,7 +751,9 @@ mod tests {
         let mut task = Task {
             id: "t1".into(),
             name: "n".into(),
+            action: TaskAction::Agent,
             prompt: "p".into(),
+            model_sel: String::new(),
             timing: Timing::Every { every_seconds: 60 },
             target: Target::Reuse,
             status: TaskStatus::Active,
@@ -741,7 +779,9 @@ mod tests {
         let mut task = Task {
             id: "t2".into(),
             name: "n".into(),
+            action: TaskAction::Agent,
             prompt: "p".into(),
+            model_sel: String::new(),
             timing: Timing::At { at: "2026-01-01T00:10:00.000Z".into() },
             target: Target::Reuse,
             status: TaskStatus::Active,
