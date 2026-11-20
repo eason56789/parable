@@ -115,6 +115,11 @@ pub struct ComputerBridge {
     port: u16,
     child: Mutex<Option<tokio::process::Child>>,
     cdp: Mutex<Option<Cdp>>,
+    /// 串行化 `ensure()` 的建连/拉起流程。多个 computer_* 工具并行调用时，
+    /// 若没有这把锁，每个调用都会看到 cdp=None 并各自拉起一个浏览器进程：
+    /// 第二个进程抢同一个 profile 的 SingletonLock 起不来，两边一起等满
+    /// 超时，前端就停在「正在运行」不动。
+    ensure_lock: tokio::sync::Mutex<()>,
     /// 当前绑定的页面 target（切标签页后重连要回到同一个）。
     target_id: Mutex<Option<String>>,
     /// 最近一次快照的 ref → 节点映射。ref 只对最近一次快照负责。
@@ -190,6 +195,7 @@ impl ComputerBridge {
             boot_url: std::sync::RwLock::new(String::new()),
             pending: Mutex::new(None),
             jar_injected: std::sync::atomic::AtomicBool::new(false),
+            ensure_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -392,7 +398,19 @@ impl ComputerBridge {
             let Some(c) = g.as_mut() else {
                 return;
             };
+            // 整批注入有总时限：每条 cookie 单独 10s 超时，cookie 多且 CDP
+            // 慢的时候会长时间占着 cdp 锁，把所有排队的 computer_* 工具一起
+            // 堵死（表现就是「一直正在运行」）。超时后放弃剩余 cookie——
+            // 登录态是便利功能，不该拖垮会话。
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
             for ck in &jar.cookies {
+                if tokio::time::Instant::now() >= deadline {
+                    tracing::warn!(
+                        "cookie jar 注入超时，已注入 {ok}/{}，其余跳过",
+                        jar.cookies.len()
+                    );
+                    break;
+                }
                 if let Ok(v) = c.cmd("Network.setCookie", ck.to_set_cookie_params()).await {
                     if v.get("success").and_then(|s| s.as_bool()).unwrap_or(false) {
                         ok += 1;
@@ -441,6 +459,16 @@ impl ComputerBridge {
     /// Ensure a CDP session to a page target. Launches a browser if none is
     /// listening on the debug port.
     async fn ensure(&self) -> Result<(), HarnessError> {
+        {
+            let cdp = self.cdp.lock().await;
+            if cdp.is_some() {
+                return Ok(());
+            }
+        }
+        // 只让一个调用者执行下面的建连/拉起；其余的等它完成后再看一眼
+        // cdp 就返回。没有这一步时两个 computer_* 工具并行会把浏览器拉起
+        // 两次，互相抢 profile 锁，最后一起超时。
+        let _guard = self.ensure_lock.lock().await;
         {
             let cdp = self.cdp.lock().await;
             if cdp.is_some() {
@@ -586,6 +614,10 @@ impl ComputerBridge {
         // SingletonLock——共用目录时第二个实例会静默失联（端口永远起不来）。
         let dir = std::env::temp_dir().join(format!("parable-cua-{}", self.port));
         let _ = std::fs::create_dir_all(&dir);
+        // 上次异常退出留下的进程会一直锁着这个 profile，新实例于是起不来、
+        // 等满超时、再留下一个僵死进程——一轮一轮堆积（实测见过 9 个）。
+        // 拉起之前先把同 profile 的残留进程清掉。
+        reap_stale_profile_users(&dir).await;
         let mut cmd = tokio::process::Command::new(exe);
         cmd.arg(format!("--remote-debugging-port={}", self.port))
             .arg(format!("--user-data-dir={}", dir.display()));
@@ -638,6 +670,21 @@ impl ComputerBridge {
     }
 
     async fn cmd(&self, method: &str, params: Value) -> Result<Value, HarnessError> {
+        // 整个调用（建连 + 首次尝试 + 重连重试）有总时限。单步超时不够：
+        // ensure 在浏览器起不来时会等满两轮 12s，重连再来一遍，工具就挂在
+        // 「正在运行」上几十秒。这里给一个明确上界，超时报可诊断的错误。
+        tokio::time::timeout(std::time::Duration::from_secs(45), async {
+            self.cmd_inner(method, params).await
+        })
+        .await
+        .map_err(|_| {
+            HarnessError::Tool(format!(
+                "CDP {method} 超时（45s）：内置浏览器无响应，可能已崩溃或端口被占用"
+            ))
+        })?
+    }
+
+    async fn cmd_inner(&self, method: &str, params: Value) -> Result<Value, HarnessError> {
         self.ensure().await?;
         let first = {
             let mut cdp = self.cdp.lock().await;
@@ -1169,6 +1216,42 @@ fn pick_free_port() -> u16 {
         .and_then(|l| l.local_addr())
         .map(|a| a.port())
         .unwrap_or(0)
+}
+
+/// 清掉仍在使用这个 profile 目录的残留浏览器进程。
+///
+/// 浏览器异常退出（崩溃、上次进程没被 kill 掉、Parable 被强杀）时，它会
+/// 继续锁着 `--user-data-dir`，下一个实例因此起不来调试端口。以前这会
+/// 越滚越多：每次失败都留一个僵死进程，直到彻底打不开（实测见过 9 个）。
+///
+/// 只杀命令行里明确带这个 profile 路径的进程，不会碰用户自己开的浏览器。
+async fn reap_stale_profile_users(dir: &std::path::Path) {
+    #[cfg(windows)]
+    {
+        let dir_s = dir.to_string_lossy().to_string();
+        // profile 路径含反斜杠，WQL 里要转义；这里改用子串匹配避免拼 WQL。
+        let script = format!(
+            "Get-CimInstance Win32_Process -Filter \"Name='msedge.exe' OR Name='chrome.exe'\" | \
+             Where-Object {{ $_.CommandLine -and $_.CommandLine.Contains('{}') }} | \
+             ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}",
+            dir_s.replace('\'', "''")
+        );
+        let _ = tokio::process::Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await;
+        // Stop-Process 是同步等待的，返回时进程已终止；锁文件句柄随之释放。
+        // 残留的锁文件本身也要删：Chromium 看到它会认为已有实例在跑。
+        for name in ["SingletonLock", "SingletonCookie", "lockfile"] {
+            let _ = std::fs::remove_file(dir.join(name));
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = dir;
+    }
 }
 
 /// 请求桌面壳按需创建内置浏览器窗口（壳轮询这个文件）。
@@ -2010,5 +2093,28 @@ mod tests {
         // file:// 在任何 target 下都被 URL 白名单挡下
         let err = navigate(&json!({"url": "file:///C:/Windows", "target": "system"}), &ctx).await;
         assert!(err.is_err(), "file:// must stay blocked");
+    }
+
+    /// ensure_lock 的语义：并发的 ensure() 只有一个能进入建连区，其余
+    /// 等它退出后才继续。这里不去跑真实的 ensure（那会拉起浏览器、等满
+    /// 超时），而是直接对同一把锁做并发占用，验证它确实是互斥的。
+    #[tokio::test]
+    async fn ensure_lock_is_exclusive() {
+        let bridge = Arc::new(ComputerBridge::new());
+        let g = bridge.ensure_lock.lock().await;
+        let b2 = bridge.clone();
+        let waiter = tokio::spawn(async move {
+            let _g2 = b2.ensure_lock.lock().await;
+            true
+        });
+        // 持锁期间另一个获取者必须仍在等待
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        assert!(!waiter.is_finished(), "第二个 ensure 不应在持锁期间完成");
+        drop(g);
+        let got = tokio::time::timeout(std::time::Duration::from_secs(2), waiter)
+            .await
+            .expect("释放后应立即授予")
+            .unwrap();
+        assert!(got);
     }
 }
