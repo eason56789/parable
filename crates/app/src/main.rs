@@ -88,11 +88,18 @@ fn main() {
                         //   老生代上限，更早 GC 而不是一路涨到 4GB
                         // - disable-gpu-shader-disk-cache：省掉着色器磁盘索引的
                         //   常驻映射（界面只有简单 2D 合成，用不上）
-                        let ui_args = "--renderer-process-limit=1 \
+                        let mut ui_args = "--renderer-process-limit=1 \
                             --disable-features=CalculateNativeWinOcclusion,BackForwardCache,MediaRouter,OptimizationHints,HardwareMediaKeyHandling \
                             --js-flags=--max-old-space-size=192 \
                             --disable-gpu-shader-disk-cache \
-                            --disable-background-timer-throttling=false";
+                            --disable-background-timer-throttling=false"
+                            .to_string();
+                        // 调试钩子：带上 PARABLE_MAIN_CDP=<port> 启动时，主窗口开
+                        // 远程调试端口，可以用 CDP 直接检查页面（验证 ACL 是否放行
+                        // 窗口控制这类问题）。不设该变量时行为与发布版一致。
+                        if let Ok(p) = std::env::var("PARABLE_MAIN_CDP") {
+                            ui_args.push_str(&format!(" --remote-debugging-port={p}"));
+                        }
                         if let Err(e) = WebviewWindowBuilder::new(
                             &handle,
                             "main",
@@ -101,7 +108,15 @@ fn main() {
                         .title("Parable")
                         .inner_size(1280.0, 800.0)
                         .min_inner_size(480.0, 400.0)
-                        .additional_browser_args(ui_args)
+                        .additional_browser_args(&ui_args)
+                        // 去掉系统标题栏长条：窗口内容直接顶到最上沿，
+                        // 拖拽/双击最大化由 #tb 的 drag region 承担，
+                        // 最小化/最大化/关闭用 web 里的自绘按钮（#winctl）。
+                        .decorations(false)
+                        // 告诉页面「你在桌面壳里」：前端据此显示窗口控制
+                        // 按钮与拖拽区；浏览器里访问同一个页面时没有这个
+                        // 标记，不显示（浏览器自带窗口边框）。
+                        .initialization_script("window.__PARABLE_DESKTOP = true;")
                         .build()
                         {
                             tracing::error!("failed to create window: {e}");

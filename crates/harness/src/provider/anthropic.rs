@@ -97,7 +97,7 @@ pub fn build_messages(messages: &[Msg]) -> Value {
                                 content.push(json!({"type":"text","text": t}));
                             }
                         }
-                        AsstPart::Thinking { text, signature } => {
+                        AsstPart::Thinking { text, signature, .. } => {
                             // Thinking blocks must be replayed with their signature.
                             // If the relay never issued one we drop the block instead
                             // of sending an invalid payload.

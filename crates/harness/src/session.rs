@@ -657,6 +657,31 @@ impl SessionStore {
         changed
     }
 
+    /// 整份写入一个会话（导入路径用）。
+    ///
+    /// 与 `create()` 的区别：ID、标题、消息、用量全部由调用方给全——导入要
+    /// 保留原始消息与统计，而不是造一个空壳。调用方负责先解决 ID 冲突；
+    /// 这里再做最后一道防线（空 ID、已存在的 ID 一律拒绝），绝不覆盖本地会话。
+    pub async fn insert_full(&self, s: Session) -> Result<(), HarnessError> {
+        let id = s.meta.id.trim().to_string();
+        if id.is_empty() {
+            return Err(HarnessError::Other("session id is empty".into()));
+        }
+        if self.path_for(&id).exists() {
+            return Err(HarnessError::Other(format!(
+                "session {id} already exists; refusing to overwrite"
+            )));
+        }
+        let mut s = s;
+        if s.meta.created_at == 0 {
+            s.meta.created_at = crate::event::now_ms();
+        }
+        s.meta.updated_at = crate::event::now_ms();
+        self.persist(&s).await?;
+        self.cache.lock().await.insert(id, s);
+        Ok(())
+    }
+
     pub async fn update_meta(&self, id: &str, f: impl FnOnce(&mut SessionSummary)) -> Result<(), HarnessError> {
         // The cache is populated lazily (load on demand); a session that has
         // never been opened since process start must still be patchable, so
@@ -1318,6 +1343,76 @@ pub type SharedStore = Arc<SessionStore>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 导入必须保留消息与统计，且拒绝覆盖同 ID 的本地会话。
+    #[tokio::test]
+    async fn insert_full_keeps_messages_and_refuses_overwrite() {
+        let dir = std::env::temp_dir().join("parable-test-insert-full");
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = SessionStore::with_root(dir.clone());
+
+        let msg = |t: &str| StoredMessage {
+            role: "user".into(),
+            parts: serde_json::json!({"User": [{"Text": t}]}),
+            displays: Vec::new(),
+            turn: String::new(),
+            hidden: false,
+            created_at: 1,
+        };
+        let s = Session {
+            meta: SessionSummary { id: "s_import1".into(), title: "old chat".into(), ..Default::default() },
+            messages: vec![msg("hello"), msg("world")],
+            pending: Vec::new(),
+            usage: UsageTotals::default(),
+            goal: None,
+            team: None,
+        };
+        store.insert_full(s.clone()).await.expect("first insert ok");
+        let back = store.load("s_import1").await.expect("reload");
+        assert_eq!(back.messages.len(), 2, "messages must survive the import");
+        assert_eq!(back.meta.title, "old chat");
+
+        // 第二次同 ID：必须拒绝，不能把用户已有会话盖掉。
+        let err = store.insert_full(s).await;
+        assert!(err.is_err(), "same id must be refused");
+        // 空 ID 也拒绝。
+        let mut bad = Session {
+            meta: SessionSummary::default(),
+            messages: Vec::new(),
+            pending: Vec::new(),
+            usage: UsageTotals::default(),
+            goal: None,
+            team: None,
+        };
+        bad.meta.id = String::new();
+        assert!(store.insert_full(bad).await.is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 思考时长必须随消息落盘：重启/重放后界面靠它显示「思考了 N 秒」。
+    /// 旧数据没有这个字段，反序列化必须当 0（界面据此隐藏时长），不能报错。
+    #[test]
+    fn thinking_duration_survives_a_store_roundtrip() {
+        let parts = serde_json::json!({"Assistant": [
+            {"Thinking": {"text": "hmm", "signature": "sig", "ms": 4200}},
+            {"Text": "answer"}
+        ]});
+        let json = serde_json::to_string(&parts).unwrap();
+        let back: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(back["Assistant"][0]["Thinking"]["ms"], 4200);
+
+        // 旧格式（无 ms 字段）按 0 处理。
+        let legacy: crate::provider::Msg =
+            serde_json::from_str(r#"{"Assistant":[{"Thinking":{"text":"old","signature":""}}]}"#)
+                .expect("legacy thinking must deserialize");
+        match legacy {
+            crate::provider::Msg::Assistant(ps) => match &ps[0] {
+                crate::provider::AsstPart::Thinking { ms, .. } => assert_eq!(*ms, 0),
+                _ => panic!("expected a thinking part"),
+            },
+            _ => panic!("expected an assistant message"),
+        }
+    }
 
     #[test]
     fn keep_non_text_preserves_tool_parts() {

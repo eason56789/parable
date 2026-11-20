@@ -16,6 +16,26 @@ button{font:inherit;color:inherit}
 svg{display:block}
 #win{height:100%;display:flex;flex-direction:column}
 #tb{height:46px;flex:none;display:flex;align-items:center;gap:4px;padding:0 14px;position:relative;user-select:none}
+/* 无边框窗口：#tb 兼作拖拽区（drag region）+ 自绘窗口控制键。
+   按钮贴右缘（无 padding 遮挡），宽 46px、通高，对齐系统按键的落点。
+   字形不手画：直接用 Windows 自带的图标字体（Segoe Fluent Icons / Segoe MDL2
+   Assets）里的标题栏码位，和系统原生标题栏一模一样：
+     E921 最小化  E922 最大化  E923 还原  E8BB 关闭
+   字体缺失时回落到 Segoe UI Symbol，再不行才是无字形（不会出现方框乱码）。 */
+/* 窗口控制键常驻在窗口右上角，不属于 #tb：设置/插件/定时任务这些页面是
+   盖住整个 #win 的覆盖层（#pg z-index:3），如果按钮留在 #tb 里就会被一起
+   盖掉。这里用 fixed 锚到视口右上角，z-index 高于所有页面层和弹层，任何
+   页面下都能点到。 */
+#winctl{display:none;position:fixed;right:0;top:0;height:46px;z-index:60}
+body.desktop #winctl{display:flex}
+/* 悬停高亮铺满整格（和原生标题栏一致）：不要 padding 内缩，也不留圆角，
+   色块必须顶到相邻按钮的边界和工具栏上下沿，否则看起来像一块浮在中间的
+   小方块。字形仍由 place-items 居中。 */
+#winctl button{width:46px;height:100%;border:0;background:none;color:var(--fg);cursor:default;display:grid;place-items:center;padding:0;border-radius:0;
+  font:400 10px/1 "Segoe Fluent Icons","Segoe MDL2 Assets","Segoe UI Symbol",sans-serif;
+  -webkit-font-smoothing:antialiased}
+#winctl button:hover{background-color:var(--hov)}
+#winctl #wc-x:hover{background-color:#c42b1c;color:#fff}
 .ib{width:30px;height:30px;border:0;background:none;color:var(--fg2);border-radius:8px;display:grid;place-items:center;cursor:pointer;flex:none;transition:background-color calc(.2s * var(--animd)),color calc(.2s * var(--animd)),transform calc(.25s * var(--animd))}
 .ib:hover{background:var(--hov);color:var(--fg)}.ib:active{transform:scale(.92)}.ib svg{width:18px;height:18px}
 .ib.off{opacity:.4;pointer-events:none}
@@ -141,16 +161,49 @@ body.chat #chat{opacity:1;pointer-events:auto}
 .c{display:inline-block;white-space:pre;transform-origin:50% 60%;animation:pop var(--cd) cubic-bezier(.16,.84,.3,1) both}
 .w{white-space:nowrap}
 @keyframes pop{from{opacity:0;filter:blur(var(--blur));transform:scale(var(--sf))}to{opacity:1;filter:blur(0);transform:scale(1)}}
-.th{margin:0 0 10px;font:14px var(--sans);color:var(--fg2)}
+.th{margin:0 0 6px;font:14px var(--sans);color:var(--fg2)}
 .thh{display:flex;align-items:center;gap:4px;background:none;border:0;cursor:pointer;padding:4px 0;color:inherit}
 .thh svg{width:14px;height:14px;transition:transform calc(.45s * var(--animd)) cubic-bezier(.32,.72,0,1)}.th.open .thh svg{transform:rotate(180deg)}
-/* 走光（shimmer）：2.5 倍宽的渐变条整体左移一个身位。
-   位置必须用百分比 0%→100%——百分比对齐的是「图右边缘贴容器右边缘」，
-   位移正好是一个图宽；写成 0→-250% 会把图整块推出容器，背景不再覆盖
-   文字，而 color:transparent 下没背景＝隐形：光扫一半、字直接消失、
-   一个周期后再从头开始。 */
-.shim{background:linear-gradient(90deg,var(--fg2) 35%,var(--fg) 50%,var(--fg2) 65%) 0 0/250% 100%;-webkit-background-clip:text;background-clip:text;color:transparent;animation:shim calc(1.8s * var(--animd)) linear infinite;animation-delay:var(--shimd,0s)}
-@keyframes shim{from{background-position:0% 0}to{background-position:100% 0}}
+/* 走光（shimmer）—— 对齐 ZCode 的 TextShimmer。
+ *
+ * ZCode 的实现（packages/ui/src/components/ai-elements/shimmer.tsx，源自
+ * vercel/ai-elements，Apache-2.0）本质是：
+ *   文字 text-transparent，**完全靠背景着色**，背景分两层：
+ *     ① 一条「透明 → 亮色 → 透明」的高光带，宽度 = 字数 × spread（默认 2px），
+ *        所以光带宽度跟着文字长度走，短句和长句看起来一样「粗」；
+ *     ② 纯色兜底层，铺满整块，保证高光带之外的字也始终可见。
+ *   然后用 JS 把 backgroundPosition 从 100% center 线性推到 0% center，无限循环。
+ *
+ * 关键点（也是我之前几次失败的根源）：
+ *  - 必须用 **JS 驱动 backgroundPosition**，CSS @keyframes 在
+ *    background-clip:text 上不推进（Chromium 实测每帧同值）；
+ *  - 兜底层不可省：只留高光带时，带子扫到哪哪才有字，其余时间文字消失；
+ *  - 高光带用「固定像素宽」而不是百分比，才能让光带视觉宽度与文字长度无关。
+ */
+.shim{
+  display:inline-block;
+  position:relative;
+  /* 两层背景：高光带（尺寸 250%×100%，可循环）+ 纯色兜底（auto = 铺满） */
+  background-image:
+    linear-gradient(90deg,
+      transparent calc(50% - var(--spread, 40px)),
+      var(--fg) calc(50% - var(--spread, 40px) / 3),
+      var(--fg) calc(50% + var(--spread, 40px) / 3),
+      transparent calc(50% + var(--spread, 40px))),
+    linear-gradient(var(--fg2), var(--fg2));
+  background-size:250% 100%, auto;
+  background-repeat:no-repeat, padding-box;
+  background-position:100% center, 0 0;
+  -webkit-background-clip:text;background-clip:text;
+  -webkit-text-fill-color:transparent;
+  color:transparent;
+}
+@media(prefers-reduced-motion:reduce){
+  .shim{
+    background-image:linear-gradient(var(--fg2),var(--fg2));
+    background-size:auto;
+  }
+}
 .thb{display:grid;grid-template-rows:0fr;opacity:0;transition:grid-template-rows calc(.55s * var(--animd)) cubic-bezier(.32,.72,0,1),opacity calc(.45s * var(--animd))}
 .th.open .thb{grid-template-rows:1fr;opacity:1}
 .thb>div{position:relative;overflow:hidden;border-left:2px solid var(--line);padding-left:12px;margin-left:4px;line-height:1.6}
@@ -261,11 +314,16 @@ body.chat #chat{opacity:1;pointer-events:auto}
 .wk.done .wd{animation:none;opacity:.55;transform:none}
 /* ---- 顶部状态行（ZCode 式）：运行中「工作中 x 秒」钉在消息最上方不收起；
    完成后变「已工作 x 秒」开合头，点击折叠过程、只留最后一条消息 ---- */
-.wktop{display:flex;align-items:center;gap:7px;font:13.5px/1.35 var(--sans);color:var(--fg2);margin:0 0 3px;min-height:20px}
-.wktop .wkd{width:6px;height:6px;border-radius:50%;background:var(--accent);opacity:.55;flex:none}
-.wktop.on .wkd{width:11px;height:11px;background:none;border:2px solid color-mix(in srgb,var(--accent) 30%,transparent);border-top-color:var(--accent);opacity:1;animation:wkspin calc(.9s * var(--animd)) linear infinite}
-@keyframes wkspin{to{transform:rotate(360deg)}}
+/* 下边距 10px 与 .th / .tgrp 的节奏一致：思考块自带 4px 上下内边距，
+   状态行 10px + 思考块顶 4px = 14px，思考块底 4px + 10px = 14px，
+   上下两段视觉间距才相等（旧值 3px，和下方 14px 一比明显挤）。 */
+.wktop{display:flex;align-items:center;gap:7px;font:13.5px/1.35 var(--sans);color:var(--fg2);margin:0 0 6px;min-height:20px}
+/* 运行中不再用小圆点/转圈：整行文字自己走光（.shim 的 ZCode 式扫光）。
+   .wkd 保留为空占位（历史 DOM 里可能存在），不占视觉。 */
+.wktop .wkd{display:none}
 .wktop .wkx{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* 运行中：给文字行挂上走光，轻一点的字重让扫光更明显 */
+.wktop.on .wkx{display:inline-block}
 .wktop:not(.on):not(.done){display:none}
 .wktop .wkchev{display:none;flex:none;color:var(--fg2)}
 .wktop .wkchev svg{width:13px;height:13px;transition:transform calc(.3s * var(--animd))}
@@ -286,6 +344,7 @@ body.chat #chat{opacity:1;pointer-events:auto}
 .sdot.wait{background:#f0d264}
 .sdot.fail{background:#f26d6d}
 .sdot.run{background:none;border:2px solid #80BEFF55;border-top-color:#80BEFF;animation:wkspin calc(.9s * var(--animd)) linear infinite}
+@keyframes wkspin{to{transform:rotate(360deg)}}
 .acts{display:flex;gap:2px;opacity:0;transform:translateY(4px);pointer-events:none;transition:opacity calc(.5s * var(--animd)),transform calc(.5s * var(--animd))}
 .acts.show{opacity:1;transform:none;pointer-events:auto}.acts .ib{width:28px;height:28px}.acts .ib svg{width:16px;height:16px}
 .dn svg{transform:rotate(180deg)}
@@ -606,6 +665,11 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 
 /* —— 文档轻量行 —— */
 .ec{display:flex;flex-direction:column;margin:2px 0;font:14px/1.5 var(--sans);width:100%}
+/* 单卡组：组头已经写了「已运行命令 / 正在运行命令 + 意图」，卡片自己那行
+   完全重复（用户原话：「删掉中间那一层，只要最外层和调用详情」）。
+   这里把卡片头收掉，展开态直接露出调用详情。 */
+.tgrp-bin>.ec.lone>.eh{display:none}
+.tgrp-bin>.ec.lone>.dc{margin-top:4px}
 .eh{display:flex;align-items:center;gap:6px;padding:6px;margin-left:-6px;border-radius:8px;cursor:pointer;user-select:none;transition:background-color calc(.2s * var(--animd));background:transparent}
 /* 「放入后台」只在悬停时露出：平时不抢注意，运行中才有意义 */
 .ec .bgbtn{display:none;align-items:center;justify-content:center;flex:none;width:22px;height:22px;
@@ -1563,10 +1627,19 @@ body.dragging #main{outline:2px dashed var(--accent);outline-offset:-8px}
 </head>
 <body>
 <div id="win">
-  <div id="tb">
+  <div id="tb" data-tauri-drag-region="deep">
     <button class="ib" id="tgl" data-ic="side"></button><button class="ib off" data-ic="back"></button><button class="ib off" data-ic="fwd"></button>
     <button class="ib" id="cmdbtn" data-ic="search" title="命令面板 Ctrl K"></button>
     <button class="ib" id="spbtn" data-ic="panel" title="侧边栏"></button>
+  </div>
+  <!-- 无边框窗口的自绘控制键：只在桌面壳里显示（__PARABLE_DESKTOP 由
+       initialization_script 注入），浏览器里没有系统按钮可替代，故隐藏。
+       放在 #win 直属而不是 #tb 里 —— 设置等页面是盖住 #win 的覆盖层，
+       放在 #tb 里会被一起盖掉。 -->
+  <div id="winctl">
+    <button id="wc-min" title="最小化">&#xE921;</button>
+    <button id="wc-max" title="最大化 / 还原">&#xE922;</button>
+    <button id="wc-x" title="关闭">&#xE8BB;</button>
   </div>
   <div id="body">
     <div id="scr"></div>
@@ -1749,6 +1822,8 @@ const IC = {
   ask:'<circle cx="10" cy="10" r="7"/><path d="M8.2 8a1.9 1.9 0 113.6.8c-.3.7-1 1-1.4 1.6-.2.3-.3.6-.3.9"/><circle cx="10" cy="14" r=".7" fill="currentColor" stroke="none"/>',
   panel:'<rect x="3" y="4" width="14" height="12" rx="2.5"/><path d="M13 4v12"/>',
   x:'<path d="M5.5 5.5l9 9M14.5 5.5l-9 9"/>',
+  min:'<path d="M4.5 13.5h11"/>',
+  /* 窗口控制字形用系统图标字体的码位（E921/E922/E923/E8BB），不需要路径。 */
   git:'<circle cx="6" cy="5" r="2"/><circle cx="6" cy="15" r="2"/><circle cx="14.5" cy="10" r="2"/><path d="M6 7v6M8 5h3.5a3 3 0 013 3v.5"/>',
   wand:'<path d="M4 16L12 8"/><path d="M11 4l1 2 2 1-2 1-1 2-1-2-2-1 2-1z"/><path d="M15 11l.6 1.2 1.4.8-1.4.6-.6 1.4-.6-1.4-1.4-.6 1.4-.8z"/>',
   monitor:'<rect x="3" y="4" width="14" height="9" rx="1.5"/><path d="M7 16h6M10 13v3"/>',
@@ -1862,7 +1937,7 @@ const L = {
     fold_early:'展开更早的 {n} 轮对话',
     ago_now:'刚刚', ago_m:'{n}分', ago_h:'{n}小时', ago_d:'{n}天',
     ph:'今天我能帮你什么？', ph2:'回复 Parable…',
-    thinking:'思考中…', thought:'思考了 {n} 秒', worked:'已工作 {t}',
+    thinking:'思考中…', thought:'思考了 {n} 秒', thought_noms:'思考', worked:'已工作 {t}',
     chg_files:'{n} 个文件已更改', chg_file1:'1 个文件已更改',
     chg_review:'审查', chg_open:'打开', chg_undo:'撤销', chg_undone:'已撤销',
     retry_q:'重新回答这个问题（不影响其他消息）', editmsg_q:'只修改这条消息',
@@ -1883,7 +1958,7 @@ const L = {
     task_list:'任务列表', view_projects:'项目', view_grouped:'分组', view_timeline:'时间线',
     ungrouped:'未分组', show_more:'显示更多', sb_all:'全部会话', sb_more_srv:'加载更多',
     working:'工作中', worked_done:'已工作 {t}', sec_unit:'秒',
-    dur_s:'{n} 秒', dur_m:'{n} 分',
+    dur_s:'{n} 秒', dur_m:'{n} 分', dur_h:'{n} 小时',
     copy:'复制', copied:'已复制', save:'保存', saved:'已保存', rd:'已读取', rdn:'{n} 行', ed:'已编辑',
     tnav_jump:'跳到第 {n} 轮', tnav_run:'正在工作中…', tnav_empty:'（本轮还没有正文）', tnav_noq:'（只有附件）',
     fetched:'已获取', searched:'已搜索',
@@ -1918,6 +1993,10 @@ const L = {
     noProxy:'代理例外', noProxyH:'不走代理的主机后缀，逗号分隔（如 localhost,127.0.0.1,.internal）',
     mioLog:'记录模型请求', mioLogH:'把每次发往模型的请求体（system+tools+history）追加到 ~/.parable/logs/model-io.jsonl（调试用，只记请求侧）',
     expAll:'导出全部会话', expAllH:'打包为单个 JSON 文件下载（备份/迁移用）',
+    impAll:'导入会话', imp_reading:'正在读取文件…',
+    imp_badjson:'这个文件不是有效的 JSON',
+    imp_done:'已导入 {n} 个会话（其中 {r} 个因 ID 冲突换成了新 ID）。',
+    imp_skipped:'跳过 {n} 条：', imp_toast:'已导入 {n} 个会话', imp_none:'没有导入任何会话',
     dangerT:'危险区', dangerH:'以下操作不可恢复，执行前请想清楚',
     dangerBtn:'清空全部会话…', dangerDone:'已删除 {n} 个会话',
     cfClearAll:'确定删除全部会话？所有对话历史将永久丢失！',
@@ -2112,7 +2191,7 @@ const L = {
     fold_early:'Show {n} earlier turns',
     ago_now:'now', ago_m:'{n}m', ago_h:'{n}h', ago_d:'{n}d',
     ph:'How can I help you today?', ph2:'Reply to Parable…',
-    thinking:'Thinking…', thought:'Thought for {n}s', worked:'Worked for {t}',
+    thinking:'Thinking…', thought:'Thought for {n}s', thought_noms:'Thought', worked:'Worked for {t}',
     chg_files:'{n} files changed', chg_file1:'1 file changed',
     chg_review:'Review', chg_open:'Open', chg_undo:'Revert', chg_undone:'Reverted',
     retry_q:'Re-answer this question (other messages are untouched)', editmsg_q:'Edit only this message',
@@ -2133,7 +2212,7 @@ const L = {
     task_list:'Task list', view_projects:'Projects', view_grouped:'Groups', view_timeline:'Recent',
     ungrouped:'Ungrouped', show_more:'Show more', sb_all:'All chats', sb_more_srv:'Load more',
     working:'Working', worked_done:'Worked for {t}', sec_unit:'s',
-    dur_s:'{n}s', dur_m:'{n}m',
+    dur_s:'{n}s', dur_m:'{n}m', dur_h:'{n}h',
     copy:'Copy', copied:'Copied', save:'Save', saved:'Saved', rd:'Read', rdn:'{n} lines', ed:'Edited',
     tnav_jump:'Jump to turn {n}', tnav_run:'Working…', tnav_empty:'(no reply text yet)', tnav_noq:'(attachments only)',
     fetched:'Fetched', searched:'Searched',
@@ -2168,6 +2247,10 @@ const L = {
     noProxy:'Proxy exceptions', noProxyH:'Hosts that bypass the proxy, comma-separated (e.g. localhost,127.0.0.1,.internal)',
     mioLog:'Log model requests', mioLogH:'Append every outbound request body (system+tools+history) to ~/.parable/logs/model-io.jsonl (debug; request side only)',
     expAll:'Export all sessions', expAllH:'Download every session as a single JSON file (backup/migration)',
+    impAll:'Import sessions', imp_reading:'Reading the file…',
+    imp_badjson:'That file is not valid JSON',
+    imp_done:'Imported {n} session(s), {r} of them got a fresh id because the original already existed.',
+    imp_skipped:'Skipped {n}:', imp_toast:'Imported {n} session(s)', imp_none:'Nothing was imported',
     dangerT:'Danger zone', dangerH:'These actions are irreversible. Think twice',
     dangerBtn:'Delete all sessions…', dangerDone:'Deleted {n} sessions',
     cfClearAll:'Delete ALL sessions? Every conversation will be lost permanently!',
@@ -2610,7 +2693,14 @@ document.addEventListener('click', e => {
     if (innerWidth < 760) document.body.classList.add('sc');
   }
   const p = e.target.closest('[data-p]');
-  if (p) { ta.value = t('cp')[p.dataset.p]; fit(); ta.focus(); }
+  if (p) {
+    ta.value = t('cp')[p.dataset.p];
+    fit();
+    ta.focus();
+    // 推荐词是「代用户输入」：必须同步一次发送键状态。只写 value 不会触发
+    // input 事件，sd 停在 disabled，用户得再敲一个空格才能发出去。
+    sync();
+  }
   document.querySelectorAll('.pop.open').forEach(p => p.classList.remove('open'));
 });
 
@@ -4345,7 +4435,26 @@ function wkPaint(a) {
   if (!el || el.classList.contains('done')) return;
   const sec = wkStart ? Math.max(1, Math.round((Date.now() - wkStart) / 1000)) : 1;
   const tx = el.querySelector('.wkx');
-  if (tx) tx.textContent = t('working') + ' ' + sec + ' ' + t('sec_unit');
+  if (tx) {
+    tx.textContent = t('working') + ' ' + sec + ' ' + t('sec_unit');
+    // 运行中的状态行用文字走光替代旧的转圈小球（用户要求：去掉小球）。
+    // .shim 是 ZCode 那套「背景扫光」；这里只挂类名，驱动由全局 shimTick 负责。
+    if (!tx.classList.contains('shim')) {
+      tx.classList.add('shim');
+      shimSync(tx);
+    }
+  }
+}
+
+/** 收掉状态行的走光（收尾/中断时调用），避免定格后还在闪。 */
+function wkUnshim(a) {
+  const el = a && a.querySelector('.wktop');
+  const tx = el && el.querySelector('.wkx');
+  if (tx) {
+    tx.classList.remove('shim');
+    tx.style.backgroundPosition = '';
+    tx.style.removeProperty('--spread');
+  }
 }
 
 /** 开始计时（turn 开始时调用）。起点只记一次：切回来恢复时要接着数。 */
@@ -4418,6 +4527,8 @@ function stopSpin(a, ms) {
     const tx = el.querySelector('.wkx');
     if (tx) tx.textContent = t('worked_done').replace('{t}', fmtDur(total));
   }
+  // 定格后不该再闪：收掉「工作中」那行的走光。
+  wkUnshim(a);
   wkStart = 0;
   tgSettle(a);
   foldTurnProcess(a);
@@ -4447,7 +4558,7 @@ function tgSettle(a) {
   busy = wasBusy;
   host.querySelectorAll('.tgrp-tx.shim').forEach(tx => {
     tx.classList.remove('shim');
-    tx.style.removeProperty('--shimd');
+    tx.style.removeProperty('--shimx');
   });
 }
 
@@ -4498,8 +4609,13 @@ function setActs(a, on) {
   }
 }
 
-function fmtDur(ms) {  const s = Math.max(1, Math.round(ms / 1000));
-  const m = Math.floor(s / 60), r = s % 60;
+function fmtDur(ms) {
+  const s = Math.max(1, Math.round(ms / 1000));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), r = s % 60;
+  if (h) {
+    // 超过一小时就不再报秒：服务运行时长会一直涨，秒位是噪音。
+    return t('dur_h').replace('{n}', h) + (m ? ' ' + t('dur_m').replace('{n}', m) : '');
+  }
   return m ? t('dur_m').replace('{n}', m) + ' ' + t('dur_s').replace('{n}', r) : t('dur_s').replace('{n}', s);
 }
 
@@ -4509,6 +4625,16 @@ function fmtBytes(n) {
   if (n < 1024) return n + ' B';
   if (n < 1024 * 1024) return (n / 1024).toFixed(n < 10240 ? 1 : 0) + ' KB';
   return (n / 1024 / 1024).toFixed(n < 1024 * 1024 * 10 ? 1 : 0) + ' MB';
+}
+
+/**
+ * 思考块标题：有实测时长就写真实秒数，没有（旧数据，ms=0）就只写「思考」
+ * 而不编一个数字。旧实现重放时硬写 1 秒——用户会以为每次思考都刚好 1 秒。
+ */
+function thinkLabel(ms) {
+  const sec = Math.round((Number(ms) || 0) / 1000);
+  if (sec <= 0) return t('thought_noms');
+  return t('thought').replace('{n}', sec);
 }
 
 /**
@@ -4583,27 +4709,40 @@ function tgIsCmd(el) {
 /** 组头统计文案：「已运行N条命令，调用M个工具」，零项部分省略。 */
 function tgStats(cards) {
   const zh = S.lang === 'zh';
+  // 每张卡自己的运行态（st-tx 上的 run 类）是唯一真相：卡片没结束就是
+  // 「正在运行」，组头不能因为展开/收起就改口成「已运行」。
+  const isRun = c => { const st = c.querySelector('.st-tx'); return !!(st && st.classList.contains('run')); };
+  const anyRun = cards.some(isRun);
   let cmd = 0;
   for (const c of cards) if (tgIsCmd(c)) cmd++;
   const tool = cards.length - cmd;
-  // 单卡：不写「已运行1条命令」，直接用那张卡自己的意图/标题当组头
-  //（与 ZCode 的单条工具行一致：「已运行命令  Run first shell command」）。
+  // 单卡：组头 = 「正在/已运行命令 + 意图」。展开看进度时也必须照实说。
   if (cards.length === 1) {
     const c = cards[0];
     const fi = c.querySelector('.fi b');
     const desc = ((fi && fi.textContent) || c.dataset.desc || c.dataset.tool || '').trim();
-    const lead = cmd
-      ? (zh ? '已运行命令' : 'Ran command')
-      : (zh ? '已调用工具' : 'Called tool');
-    return desc ? lead + '  ' + desc : lead;
+    const cmdCard = tgIsCmd(c);
+    const verb = anyRun
+      ? (cmdCard ? (zh ? '正在运行命令' : 'Running command') : (zh ? '正在调用工具' : 'Calling tool'))
+      : (cmdCard ? (zh ? '已运行命令' : 'Ran command') : (zh ? '已调用工具' : 'Called tool'));
+    return desc ? verb + '  ' + desc : verb;
+  }
+  if (anyRun) {
+    // 多卡且有在跑的：分开报「正在运行 N 条 / 已完成 M 条」，别把没跑完的
+    // 说成跑完的。
+    let rCmd = 0, rTool = 0;
+    for (const c of cards) if (isRun(c)) { if (tgIsCmd(c)) rCmd++; else rTool++; }
+    const dCmd = cmd - rCmd, dTool = tool - rTool;
+    const parts = [];
+    if (rCmd) parts.push(zh ? '正在运行' + rCmd + '条命令' : (rCmd === 1 ? 'Running 1 command' : 'Running ' + rCmd + ' commands'));
+    if (rTool) parts.push(zh ? '正在调用' + rTool + '个工具' : (rTool === 1 ? 'calling 1 tool' : 'calling ' + rTool + ' tools'));
+    if (dCmd) parts.push(zh ? '已运行' + dCmd + '条' : 'ran ' + dCmd);
+    if (dTool) parts.push(zh ? '已调用' + dTool + '个' : 'called ' + dTool);
+    return parts.join(zh ? '，' : ', ');
   }
   const parts = [];
-  if (cmd) parts.push(zh
-    ? '已运行' + cmd + '条命令'
-    : (cmd === 1 ? 'Ran 1 command' : 'Ran ' + cmd + ' commands'));
-  if (tool) parts.push(zh
-    ? '调用' + tool + '个工具'
-    : (tool === 1 ? 'called 1 tool' : 'called ' + tool + ' tools'));
+  if (cmd) parts.push(zh ? '已运行' + cmd + '条命令' : (cmd === 1 ? 'Ran 1 command' : 'Ran ' + cmd + ' commands'));
+  if (tool) parts.push(zh ? '调用' + tool + '个工具' : (tool === 1 ? 'called 1 tool' : 'called ' + tool + ' tools'));
   return parts.join(zh ? '，' : ', ');
 }
 
@@ -4623,39 +4762,125 @@ function tgFollow(bin) {
 }
 
 /**
- * 走光相位同步：节点被移动/重建时浏览器会把 CSS 动画从 0 重新播放，
- * 肉眼看就是「光扫到一半突然停住、从头再来」。用墙钟算一个负的
- * animation-delay，让新节点直接接上全局相位，任何时刻重建都无缝。
+ * 走光相位与驱动。
+ *
+ * ZCode 用 motion 库逐帧推 backgroundPosition；我们这边没有 motion，就用
+ * 一条全局 rAF 循环做同样的事。SHIM_T0 是全局相位零点：任何时刻新建的
+ * 节点都会立刻接上当前相位，重建/移动时不会「从头开始扫」。
  */
-const SHIM_P = 1.8;
+const SHIM_P = 2;   // ZCode 的默认 duration（秒），受 --animd 缩放
 const SHIM_T0 = performance.now();
+
+/**
+ * 走光驱动器：把所有可见 `.shim` 的背景位置推着走。
+ *
+ * 为什么不用 CSS 动画：实测在本应用的 WebView 里，带 `background-clip:text`
+ * 的 background-position 动画会被停住（每帧读到同一个值）。ZCode 用 motion
+ * 的 JS 动画绕开这一点，我们在同等位置用 rAF 手写。
+ */
+let shimRaf = 0;
+let shimTimer = 0;
+
+function shimTick() {
+  const sec = (performance.now() - SHIM_T0) / 1000;
+  const d = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--animd')) || 1;
+  // 0 → 1 的线性相位；对应 ZCode 的 backgroundPosition 100% center → 0% center。
+  const phase = (sec / (SHIM_P * d)) % 1;
+  const pos = (100 - phase * 100).toFixed(2) + '% center, 0 0';
+  const nodes = document.querySelectorAll('.shim');
+  for (const el of nodes) {
+    // 折叠区里看不见的节点不写样式（省掉无谓的重排）。
+    if (el.getClientRects().length === 0) continue;
+    // 光带宽度跟着文字长度走（ZCode 的 spread = 字数 × 2px）。下限 40px：
+    // 太窄的亮带在 CJK 字形上几乎看不出来，稍宽一点才像「一道光扫过」。
+    const n = (el.textContent || '').length;
+    el.style.setProperty('--spread', Math.max(40, n * 2) + 'px');
+    el.style.backgroundPosition = pos;
+  }
+  return nodes.length;
+}
+
+/**
+ * 走光驱动器。
+ *
+ * 为什么不用 CSS 动画：实测 background-position（配 background-clip:text）
+ * 与伪元素 transform 动画在本 WebView 里都会「原地不动」。改用 JS 驱动，
+ * 并且 **rAF 与 setInterval 双保险**：标签页在后台时浏览器会暂停 rAF，
+ * 只靠 rAF 的话切回来那一瞬间相位会跳；setInterval 在后台仍以 1s 粒度
+ * 跑，足够让相位连续，且开销可忽略。
+ */
+function shimDrive() {
+  const n = shimTick();
+  if (!n) {           // 没有 .shim 了：两个循环都停，别空转
+    shimRaf = 0;
+    if (shimTimer) { clearInterval(shimTimer); shimTimer = 0; }
+    return;
+  }
+  // 标签页隐藏时 rAF 会被浏览器暂停；不要在这里 return，否则重新可见后
+  // 没人再点火。挂上去就行，浏览器恢复时自己会跑。
+  shimRaf = requestAnimationFrame(shimDrive);
+}
+
+/** 确保走光循环在跑（有 .shim 时启动，没有时自然停）。 */
 function shimSync(el) {
   if (!el) return el;
-  const raw = getComputedStyle(document.documentElement).getPropertyValue('--animd').trim();
-  const p = SHIM_P * (parseFloat(raw) || 1);
-  const off = ((performance.now() - SHIM_T0) / 1000) % p;
-  el.style.setProperty('--shimd', '-' + off.toFixed(3) + 's');
+  // 立刻先画一帧：节点刚挂上 .shim 时如果不写 backgroundPosition，
+  // 兜底层会先出现（整段灰字），等下一个 rAF/interval 才亮起来，看起来像
+  // 「先闪一下灰、再开始扫」。先算一次相位就无缝了。
+  shimTick();
+  // rAF 只在可见时推进；interval 无条件推进（后台 2.5s 一次），两者互补：
+  // 前台平滑、后台不断相位，切回来不会跳。
+  if (!shimRaf && !document.hidden) shimRaf = requestAnimationFrame(shimDrive);
+  if (!shimTimer) shimTimer = setInterval(() => {
+    const n = shimTick();
+    if (!n) { clearInterval(shimTimer); shimTimer = 0; }
+  }, 2500);
   return el;
 }
+
+// 标签页重新可见时立刻把 rAF 循环接上（后台期间是 interval 在兜底）。
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && !shimRaf && document.querySelector('.shim')) {
+    shimRaf = requestAnimationFrame(shimDrive);
+  }
+});
 
 /** 刷新组头：运行中（收起态）显示滚动预览，其余显示统计。只写有变化的部分。 */
 function tgPaint(g) {
   const bin = g.querySelector('.tgrp-bin');
   const cards = [...bin.children];
   if (!cards.length) return;
+  // 单卡组：组头已经复述了「已运行命令 / 正在运行命令 + 意图」，卡片自己那行
+  // 就完全重复了。打上 lone 标记，CSS 把卡头收掉，只留组头 + 调用详情两层。
+  const lone = cards.length === 1;
+  for (const c of cards) c.classList.toggle('lone', lone);
   const head = g.querySelector('.tgrp-h');
   const icEl = head.querySelector('.tgrp-ic');
   const k = cards.some(tgIsCmd) ? 'terminal' : (TOOL_ICON[cards[0].dataset.tool] || 'file');
   if (icEl.dataset.k !== k) { icEl.dataset.k = k; icEl.innerHTML = ic(k); }
   const tx = head.querySelector('.tgrp-tx');
-  const running = busy && g.parentNode && g === g.parentNode.lastElementChild;
+  const isTail = busy && g.parentNode && g === g.parentNode.lastElementChild;
+  // 有卡片没跑完就照实显示「正在运行…」——展开/收起不改口径。
+  const anyRun = cards.some(c => {
+    const st = c.querySelector('.st-tx');
+    return !!(st && st.classList.contains('run'));
+  });
   let want;
-  if (running && !g.classList.contains('open')) {
-    const act = tgActiveCard(cards);
-    const fi = act.querySelector('.fi b');
-    want = (fi && fi.textContent) || act.dataset.desc || act.dataset.tool || '';
-    tx.classList.add('shim');
-    shimSync(tx);
+  if (anyRun && isTail) {
+    if (!g.classList.contains('open')) {
+      // 收起态：预览最新一张卡的意图 + shimmer
+      const act = tgActiveCard(cards);
+      const fi = act.querySelector('.fi b');
+      want = (fi && fi.textContent) || act.dataset.desc || act.dataset.tool || '';
+      tx.classList.add('shim');
+      shimSync(tx);
+    } else {
+      // 展开态：照实显示「正在运行命令 …」。单卡组的组头是唯一的文字行，
+      // 走光继续，表示它还在跑；多卡组的成员行自带状态，组头用普通文字。
+      want = tgStats(cards);
+      if (lone) { tx.classList.add('shim'); shimSync(tx); }
+      else tx.classList.remove('shim');
+    }
   } else {
     want = tgStats(cards);
     tx.classList.remove('shim');
@@ -4728,10 +4953,15 @@ function compactToolRuns(ab) {
           '<div class="tgrp-b"><div><div class="tgrp-bin"></div></div></div>';
         g.querySelector('.tgrp-h').onclick = () => {
           g.classList.toggle('open');
-          if (g.classList.contains('open')) {
+          const open = g.classList.contains('open');
+          if (open) {
             const bin = g.querySelector('.tgrp-bin');
             bin.scrollTop = bin.scrollHeight;
           }
+          // 单卡组把卡片头收掉了，展开/收起必须由组头直接驱动卡片的详情区，
+          // 否则点了组头只展开空壳、看不到调用详情。
+          const lone = g.querySelector('.tgrp-bin > .ec.lone');
+          if (lone) lone.classList.toggle('collapsed', !open);
         };
         ab.insertBefore(g, anchor);
         changed = true;
@@ -8161,7 +8391,7 @@ async function openSession(id, focusMsg) {
           th.innerHTML = '<button class="thh"><span></span>' + ic('chev') +
             '</button><div class="thb"><div class="thbody"></div></div>';
           bindThink(th);
-          th.querySelector('.thh span').textContent = t('thought').replace('{n}', 1);
+          th.querySelector('.thh span').textContent = thinkLabel(p.ms);
           th.querySelector('.thbody').textContent = p.text || '';
           fitThink(th);
           ensureA().append(th);
@@ -8561,7 +8791,10 @@ function normParts(v) {
     if (typeof p === 'string') { out.push({ k: 'text', text: p }); continue; }
     if (p.Text !== undefined) out.push({ k: 'text', text: p.Text });
     else if (p.Thinking) {
-      out.push({ k: 'think', text: typeof p.Thinking === 'string' ? p.Thinking : (p.Thinking.text || '') });
+      const th = typeof p.Thinking === 'string' ? { text: p.Thinking } : p.Thinking;
+      // ms 是后端记录的思考耗时：重放时用它显示真实秒数。旧数据没有这个
+      // 字段（0），界面就不显示时长，而不是硬写一个「思考了 1 秒」。
+      out.push({ k: 'think', text: th.text || '', ms: th.ms || 0 });
     } else if (p.ToolUse) {
       out.push({ k: 'tool', id: p.ToolUse.id, name: p.ToolUse.name, args: p.ToolUse.args || {} });
     } else if (p.ToolResult) {
@@ -10011,8 +10244,14 @@ function panel() {
         };
       } else if (c.t === 'exp') {
         ct.className = '';
-        ct.innerHTML = '<button class="btn">' + t('expAll') + '</button>';
-        ct.firstChild.onclick = async () => {
+        // 导出 + 导入并排：数据治理要能来回走，只出不进等于把用户锁死。
+        ct.innerHTML = '<div class="abt-btns">' +
+            '<button class="btn" data-expall>' + t('expAll') + '</button>' +
+            '<button class="btn" data-impall>' + t('impAll') + '</button>' +
+          '</div>' +
+          '<div class="abt-note" id="imp-note" hidden></div>' +
+          '<input type="file" id="imp-file" accept="application/json,.json" hidden>';
+        ct.querySelector('[data-expall]').onclick = async () => {
           try {
             const r = await fetch('/api/sessions/export', { headers: { 'X-Parable-Token': TOKEN } });
             if (!r.ok) throw new Error('HTTP ' + r.status);
@@ -10024,6 +10263,44 @@ function panel() {
             document.body.append(a); a.click(); a.remove();
             setTimeout(() => URL.revokeObjectURL(a.href), 5000);
           } catch (e) { toast(e.message); }
+        };
+        const fileInp = ct.querySelector('#imp-file');
+        ct.querySelector('[data-impall]').onclick = () => fileInp.click();
+        fileInp.onchange = async () => {
+          const f = fileInp.files && fileInp.files[0];
+          if (!f) return;
+          const note = ct.querySelector('#imp-note');
+          note.hidden = false;
+          note.textContent = t('imp_reading');
+          try {
+            const text = await f.text();
+            let payload;
+            try { payload = JSON.parse(text); }
+            catch (e) { throw new Error(t('imp_badjson')); }
+            const r = await api('/sessions/import', { method: 'POST', body: payload });
+            const skipped = (r && r.skipped) || [];
+            let msg = t('imp_done')
+              .replace('{n}', String((r && r.imported) || 0))
+              .replace('{r}', String((r && r.renamed) || 0));
+            if (skipped.length) {
+              msg += '\n' + t('imp_skipped').replace('{n}', String(skipped.length)) +
+                '\n' + skipped.slice(0, 6).join('\n') +
+                (skipped.length > 6 ? '\n…' : '');
+            }
+            note.textContent = msg;
+            note.style.whiteSpace = 'pre-wrap';
+            if ((r && r.imported) > 0) {
+              await loadSessions(true);
+              toast(t('imp_toast').replace('{n}', String(r.imported)));
+            } else {
+              toast(t('imp_none'));
+            }
+          } catch (e) {
+            note.textContent = e.message;
+            toast(e.message);
+          } finally {
+            fileInp.value = '';
+          }
         };
       } else if (c.t === 'danger') {
         ct.className = '';
@@ -10068,12 +10345,22 @@ function panel() {
           '</div>' +
           '<div class="abt-note" id="srv-meta"></div>';
         const meta = ct.querySelector('#srv-meta');
-        api('/status').then(st => {
-          if (!meta) return;
-          meta.textContent = t('srv_meta')
-            .replace('{url}', location.origin)
-            .replace('{up}', fmtDur(Date.now() - (st.started_at || Date.now())));
-        }).catch(() => {});
+        // /status 给的是 uptimeMs（服务已运行的毫秒数），不是启动时间戳。
+        // 旧代码读 st.started_at → undefined → 回退成 Date.now()，差值恒为 0，
+        // 「已运行」永远显示 1 秒。
+        const paintMeta = st => {
+          const ms = typeof st.uptimeMs === 'number' ? st.uptimeMs : 0;
+          const up = fmtDur(Math.max(1000, ms));
+          const txt = t('srv_meta').replace('{url}', location.origin).replace('{up}', up);
+          if (meta && meta.textContent !== txt) meta.textContent = txt;
+        };
+        api('/status').then(paintMeta).catch(() => {});
+        // 每秒刷一次：运行时长是要"看着走"的数字，不是快照。
+        if (ct.__srvTimer) clearInterval(ct.__srvTimer);
+        ct.__srvTimer = setInterval(() => {
+          if (!document.body.contains(ct)) { clearInterval(ct.__srvTimer); return; }
+          api('/status').then(paintMeta).catch(() => {});
+        }, 1000);
         ct.querySelector('[data-opweb]').onclick = () => {
           // 桌面壳里 location.origin 就是 127.0.0.1:<port>；复制一份带 token
           // 的地址交给系统浏览器，否则新标签页会被鉴权拦下。
@@ -13636,7 +13923,7 @@ function spAgentTranscript(host, msgs) {
         th.innerHTML = '<button class="thh"><span></span>' + ic('chev') +
           '</button><div class="thb"><div class="thbody"></div></div>';
         bindThink(th);
-        th.querySelector('.thh span').textContent = t('thought').replace('{n}', 1);
+        th.querySelector('.thh span').textContent = thinkLabel(p.ms);
         th.querySelector('.thbody').textContent = p.text || '';
         fitThink(th);
         ensureA().append(th);
@@ -14355,6 +14642,33 @@ async function boot() {
 }
 
 boot();
+
+/* ---- 桌面壳窗口控制键（最小化 / 最大化还原 / 关闭） ----
+   仅在 Tauri 壳里启用：initialization_script 注入 __PARABLE_DESKTOP 标记。
+   浏览器里访问同一页面时没有该标记，#winctl 保持隐藏（浏览器自带边框）。 */
+if (window.__PARABLE_DESKTOP) {
+  document.body.classList.add('desktop');
+  const inv = c => { try { window.__TAURI_INTERNALS__.invoke(c); } catch (e) {} };
+  const byId = id => document.getElementById(id);
+  byId('wc-min').onclick = () => inv('plugin:window|minimize');
+  byId('wc-max').onclick = () => inv('plugin:window|internal_toggle_maximize');
+  byId('wc-x').onclick = () => inv('plugin:window|close');
+  // 最大化/还原图标跟随窗口状态。判定用宽松阈值（工作区减去 40px）而不是
+  // 精确相等：最大化后视口仍会被系统边框内缩几像素，高 DPI 下更明显，
+  // 精确比较会把“已最大化”判成还原。
+  const maxBtn = byId('wc-max');
+  const winIsMax = () => window.innerWidth > screen.availWidth - 40 ||
+                         window.innerHeight > screen.availHeight - 40;
+  const updMax = () => {
+    const maxed = winIsMax();
+    // E922 最大化 / E923 还原：系统图标字体里的同一对标题栏字形。
+    maxBtn.textContent = maxed ? '\uE923' : '\uE922';
+    maxBtn.title = maxed ? (S.lang === 'zh' ? '还原' : 'Restore')
+                         : (S.lang === 'zh' ? '最大化' : 'Maximize');
+  };
+  addEventListener('resize', updMax);
+  updMax();
+}
 // 启动时静默检查更新（6 小时一次，只有前台标签页才发请求）。
 bootUpdateCheck();
 

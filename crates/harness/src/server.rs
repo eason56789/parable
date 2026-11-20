@@ -261,6 +261,7 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/plugins/{id}", axum::routing::delete(delete_plugin))
         // 会话数据治理：全量导出 / 危险区清空（设置 → 数据）
         .route("/sessions/export", get(export_sessions))
+        .route("/sessions/import", post(import_sessions))
         .route("/sessions/clear-all", post(clear_all_sessions))
         // 多 Profile：一键把命名配置束套到当前配置上
         .route("/profiles/apply", post(apply_profile))
@@ -1990,6 +1991,117 @@ async fn export_sessions(State(state): State<SharedState>, headers: HeaderMap) -
         body,
     )
         .into_response()
+}
+
+/// POST /api/sessions/import —— 导入导出文件里的会话。
+///
+/// 与 `/sessions/export` 对称：接受同一个 `{app, sessions:[…]}` 信封，
+/// 也接受裸数组与单个会话对象（用户手改过的文件、别的版本导出的文件）。
+///
+/// 三条规则，都是为了「导入不能破坏现有数据」：
+///  1. **ID 冲突就换新 ID**，不覆盖本地已有会话（`rename: true` 开关）；
+///  2. **跳过而不是中止**：一条会话坏了，其余照常导入，最后一次性报告
+///     成功几条、跳过几条以及每条的原因；
+///  3. **消息逐条做结构校验**，缺 `role`/`parts` 的条目丢弃，不让坏消息
+///     进存储——它会一直卡在重放与模型历史里。
+async fn import_sessions(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    // 三种可接受形状 → 统一的 Vec<Value>
+    let raw_sessions: Vec<Value> = if let Some(arr) = body.get("sessions").and_then(|s| s.as_array()) {
+        arr.clone()
+    } else if let Some(arr) = body.as_array() {
+        arr.clone()
+    } else if body.get("messages").is_some() || body.get("id").is_some() {
+        vec![body.clone()]
+    } else {
+        return bad_request(
+            "expected an export envelope (`sessions: [...]`), an array of sessions, or one session object",
+        );
+    };
+    if raw_sessions.is_empty() {
+        return bad_request("the file contains no sessions");
+    }
+
+    let existing: std::collections::HashSet<String> =
+        state.store.list("").await.into_iter().map(|s| s.id).collect();
+    let mut imported = 0usize;
+    let mut renamed = 0usize;
+    let mut skipped: Vec<String> = Vec::new();
+    let mut used: std::collections::HashSet<String> = existing.clone();
+    let mut ids_out: Vec<String> = Vec::new();
+
+    for (i, raw) in raw_sessions.iter().enumerate() {
+        // 反序列化成 Session；旧版本缺字段靠 serde default 补齐。
+        let mut s: crate::session::Session = match serde_json::from_value(raw.clone()) {
+            Ok(v) => v,
+            Err(e) => {
+                skipped.push(format!("#{}: not a valid session ({e})", i + 1));
+                continue;
+            }
+        };
+        // 消息级校验：role 必须存在且非空，parts 必须是对象/数组。
+        let before = s.messages.len();
+        s.messages.retain(|m| {
+            !m.role.trim().is_empty()
+                && (m.parts.is_object() || m.parts.is_array() || !m.parts.is_null())
+        });
+        let dropped = before - s.messages.len();
+        if s.messages.is_empty() && before > 0 {
+            skipped.push(format!("#{}: every message was malformed", i + 1));
+            continue;
+        }
+
+        // ID 冲突 → 重新生成一个，绝不覆盖本地会话。
+        let mut id = s.meta.id.trim().to_string();
+        if id.is_empty() || used.contains(&id) {
+            let fresh = format!(
+                "s_{}",
+                &uuid::Uuid::new_v4().simple().to_string()[..12]
+            );
+            if !id.is_empty() {
+                renamed += 1;
+            }
+            id = fresh;
+        }
+        used.insert(id.clone());
+        s.meta.id = id.clone();
+        // 归档/置顶状态不随导入带进来：用户导入的是内容，不是本地视图状态。
+        s.meta.archived = false;
+        s.meta.pinned = false;
+        // 运行中的 pending 队列是瞬态，导入后不应自动开跑。
+        s.pending.clear();
+        if s.meta.title.trim().is_empty() {
+            s.meta.title = "Imported chat".into();
+        }
+
+        match state.store.insert_full(s.clone()).await {
+            Ok(()) => {
+                imported += 1;
+                ids_out.push(id);
+                let mut note = format!("imported `{}` ({} messages)", s.meta.title, s.messages.len());
+                if dropped > 0 {
+                    note.push_str(&format!(", dropped {dropped} malformed message(s)"));
+                }
+                tracing::info!("session import: {note}");
+            }
+            Err(e) => skipped.push(format!("#{}: {e}", i + 1)),
+        }
+    }
+
+    Json(json!({
+        "ok": true,
+        "imported": imported,
+        "renamed": renamed,
+        "skipped": skipped,
+        "sessionIds": ids_out,
+    }))
+    .into_response()
 }
 
 /// POST /api/sessions/clear-all — 删除全部会话（危险区，前端二次确认）。
@@ -3871,6 +3983,12 @@ pub async fn serve_in(
         .with_terms(terms.clone())
         .with_services(Some(schedule.clone()), Some(subagents.clone()))
         .await;
+    // 统计恢复：会话的轮次/token/耗时随文件持久化，但内存里的 SessStats
+    // 重启即清空——不回填的话状态栏会显示 0 tok/s、0 轮次，像是数据丢了。
+    {
+        let agent = agent.clone();
+        tokio::spawn(async move { agent.hydrate_stats().await });
+    }
     // Background scheduler: every 20s, fire tasks whose occurrence has passed.
     // Delivery is an ordinary follow-up turn into the target session.
     {

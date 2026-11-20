@@ -48,6 +48,10 @@ pub enum AsstPart {
         /// Provider signature, required when replaying thinking blocks.
         #[serde(default)]
         signature: String,
+        /// 这段思考实际花了多少毫秒。界面重放时用它显示「思考了 N 秒」；
+        /// 旧数据没有这个字段时按 0 处理，界面会隐藏时长而不是猜一个 1。
+        #[serde(default)]
+        ms: u64,
     },
     ToolUse {
         id: String,

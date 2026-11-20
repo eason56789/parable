@@ -644,6 +644,56 @@ impl AgentRuntime {
             .unwrap_or_default()
     }
 
+    /// 从会话文件重建内存统计（进程启动后调用一次）。
+    ///
+    /// 统计原本只活在 `self.stats` 这张内存表里，重启即归零——用户看到的
+    /// 就是「输出速度 0 tok/s、思考 1 秒、轮次 0」。会话文件里的 `usage`
+    /// 是每轮累加后落盘的，用它回填即可；tps / ttft / model_ms / tool_ms
+    /// 这些没有历史记录，保持 0（下一轮跑起来就会重新有值），但**不会**
+    /// 把已经统计好的轮次和 token 数抹掉。
+    pub async fn hydrate_stats(&self) {
+        let mut rebuilt: std::collections::HashMap<String, SessStats> =
+            std::collections::HashMap::new();
+        for s in self.store.list("").await {
+            let Some(full) = self.store.load(&s.id).await else { continue };
+            let u = &full.usage;
+            if u.turns == 0 && u.output_tokens == 0 && u.input_tokens == 0 {
+                continue;
+            }
+            rebuilt.insert(
+                s.id.clone(),
+                SessStats {
+                    turns: u.turns,
+                    steps: u.steps,
+                    tokens: Usage {
+                        input_tokens: u.input_tokens,
+                        output_tokens: u.output_tokens,
+                        cache_read_input_tokens: u.cache_read,
+                        cache_creation_input_tokens: u.cache_write,
+                        ..Usage::default()
+                    },
+                    wall_ms: u.wall_ms,
+                    // 下一轮会重新观测；这里留 0 而不是编一个数。
+                    tps: 0.0,
+                    ttft_ms: 0,
+                    model_ms: 0,
+                    tool_ms: 0,
+                    ..SessStats::default()
+                },
+            );
+        }
+        if rebuilt.is_empty() {
+            return;
+        }
+        let n = rebuilt.len();
+        let mut st = self.stats.lock().await;
+        for (id, v) in rebuilt {
+            // 不覆盖进程内已经跑过的统计（启动后到调用之间可能已有新轮次）。
+            st.entry(id).or_insert(v);
+        }
+        tracing::info!("hydrated per-session stats for {n} session(s) from disk");
+    }
+
     /// Kick off a turn. Returns the turn id; the work happens on a spawned task.
     pub async fn start_turn(
         &self,
@@ -1283,7 +1333,7 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
                 // 还没有解析出具体模型，model 留空。
                 self.finalize_turn(
                     session_id, turn_id, t_start, &Usage::default(), 0, "error",
-                    ctx_limit, 0, 0, 0, 0, "", &Default::default(),
+                    ctx_limit, 0, 0, 0, 0, 0, "", &Default::default(),
                 )
                 .await;
                 return Err(e);
@@ -1325,7 +1375,11 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
         let mut steps = 0usize;
         let mut turn_usage = Usage::default();
         let mut out_tokens_this_turn = 0u64;
-        let mut out_started: Option<std::time::Instant> = None;
+        // 纯输出窗口：第一段正文与最后一段正文的时间点。TPS 的分母取两者
+        // 之差，而不是整轮 wall——否则一条带工具调用的回答会把工具耗时算成
+        // 生成耗时，速度看起来莫名其妙地高。
+        let mut out_first_at: Option<std::time::Instant> = None;
+        let mut out_last_at: Option<std::time::Instant> = None;
         let mut stop_reason = "end_turn".to_string();
         // 本轮计时口径（随 status 事件发布）：
         let mut model_ms = 0u64; // 模型流耗时累计
@@ -1489,7 +1543,7 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
                 s.ctx_tools = ctx_tools as u64;
                 s.ctx_messages = ctx_msgs as u64;
             }
-            self.publish_status(session_id, &turn_usage, ctx_sys, ctx_tools, ctx_msgs, ctx_limit, &mut out_started, out_tokens_this_turn, model_ms, tool_ms, ttft_ms)
+            self.publish_status(session_id, &turn_usage, ctx_sys, ctx_tools, ctx_msgs, ctx_limit, out_first_at, out_last_at, out_tokens_this_turn, model_ms, tool_ms, ttft_ms)
                 .await;
 
             let model_t0 = std::time::Instant::now();
@@ -1513,6 +1567,10 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
             let mut text_buf = String::new();
             let mut think_buf = String::new();
             let mut think_sig = String::new();
+            // 思考窗口（本步内）：第一段 reasoning 到最后一段。落库进
+            // AsstPart::Thinking.ms，重放时界面显示真实秒数而不是恒等 1。
+            let mut think_first_at: Option<std::time::Instant> = None;
+            let mut think_last_at: Option<std::time::Instant> = None;
             let mut calls: Vec<(String, String, Value)> = Vec::new();
             let mut pending_args: HashMap<String, String> = HashMap::new();
             let mut stream_usage = Usage::default();
@@ -1542,6 +1600,14 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
                                     if ttft_ms == 0 {
                                         ttft_ms = model_t0.elapsed().as_millis() as u64;
                                     }
+                                    // 纯输出时长：第一段正文与最后一段正文之间的
+                                    // 实际跨度。TPS 只用它做分母——工具执行、思考、
+                                    // 等授权的时间都不该算进「输出速度」。
+                                    let now = std::time::Instant::now();
+                                    if out_first_at.is_none() {
+                                        out_first_at = Some(now);
+                                    }
+                                    out_last_at = Some(now);
                                     out_tokens_this_turn += crate::token::estimate(&t) as u64;
                                     self.hub.publish(session_id, "text.delta",
                                         json!({"turnId": turn_id, "text": t}));
@@ -1551,6 +1617,13 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
                                     if ttft_ms == 0 {
                                         ttft_ms = model_t0.elapsed().as_millis() as u64;
                                     }
+                                    // 思考时长：第一段到思考结束，落库进
+                                    // Thinking.ms，重放时界面才有真实的秒数
+                                    //（旧实现重放一律显示「思考了 1 秒」）。
+                                    if think_first_at.is_none() {
+                                        think_first_at = Some(std::time::Instant::now());
+                                    }
+                                    think_last_at = Some(std::time::Instant::now());
                                     self.hub.publish(session_id, "reasoning.delta",
                                         json!({"turnId": turn_id, "text": r}));
                                     think_buf.push_str(&r);
@@ -1592,7 +1665,15 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
             // Fold the streamed buffers into the neutral message history.
             let mut parts: Vec<AsstPart> = Vec::new();
             if !think_buf.is_empty() {
-                parts.push(AsstPart::Thinking { text: think_buf.clone(), signature: think_sig.clone() });
+                let think_ms = match (think_first_at, think_last_at) {
+                    (Some(a), Some(b)) => (b - a).as_millis() as u64,
+                    _ => 0,
+                };
+                parts.push(AsstPart::Thinking {
+                    text: think_buf.clone(),
+                    signature: think_sig.clone(),
+                    ms: think_ms,
+                });
             }
             if !text_buf.is_empty() {
                 parts.push(AsstPart::Text(text_buf.clone()));
@@ -1896,6 +1977,10 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
             &final_stop,
             ctx_limit,
             out_tokens_this_turn,
+            match (out_first_at, out_last_at) {
+                (Some(a), Some(b)) => (b - a).as_millis() as u64,
+                _ => 0,
+            },
             model_ms,
             tool_ms,
             ttft_ms,
@@ -1959,6 +2044,9 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
         stop_reason: &str,
         ctx_limit: u64,
         out_tokens: u64,
+        // 纯输出窗口（首个 token → 最后一个 token）的毫秒数，0 = 没测到。
+        // TPS 用它做分母，而不是整轮 wall——工具/思考/等授权不算输出速度。
+        out_span_ms: u64,
         model_ms: u64,
         tool_ms: u64,
         ttft_ms: u64,
@@ -2017,9 +2105,14 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
             }
             // Only trust an instant throughput number when the turn lasted long
             // enough to measure; sub-second mock/local runs would read absurdly high.
-            if out_tokens > 0 && wall >= 500 {
-                let instant_tps = out_tokens as f64 * 1000.0 / wall as f64;
-                let instant_tps = instant_tps.min(2000.0);
+            //
+            // 分母必须用「纯输出窗口」：从第一个 token 到最后一个 token。
+            // 旧实现用整轮 wall（含工具执行、模型思考、等待授权），同样字数下
+            // 一条带两次工具调用的回答会显示成几百 tok/s，没有参考价值。
+            // out_span_ms 为 0（没测到窗口）时退回 wall，至少不是 NaN。
+            let out_span = if out_span_ms > 0 { out_span_ms } else { wall.max(1) };
+            if out_tokens > 0 && out_span >= 500 {
+                let instant_tps = (out_tokens as f64 * 1000.0 / out_span as f64).min(2000.0);
                 s.tps = if s.tps == 0.0 { instant_tps } else { s.tps * 0.6 + instant_tps * 0.4 };
             }
         }
@@ -2109,25 +2202,27 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
         ctx_tools: usize,
         ctx_msgs: usize,
         ctx_limit: u64,
-        out_started: &mut Option<std::time::Instant>,
+        out_first_at: Option<std::time::Instant>,
+        out_last_at: Option<std::time::Instant>,
         out_tokens: u64,
         model_ms: u64,
         tool_ms: u64,
         ttft_ms: u64,
     ) {
-        if out_started.is_none() {
-            *out_started = Some(std::time::Instant::now());
-        }
         let st = self.stats.lock().await.get(session_id).cloned().unwrap_or_default();
-        let tps = if let Some(t0) = out_started {
-            let el = t0.elapsed().as_millis() as u64;
-            if el > 200 && out_tokens > 0 {
-                out_tokens as f64 * 1000.0 / el as f64
-            } else {
-                st.tps
+        // 实时 TPS 用「首 token → 现在」这一段的实测速度：这才是用户在
+        // 「输出速度」里想看的东西。还没开始输出（或刚出第一个 token 不足
+        // 200ms）时沿用上一轮的平滑值，避免数字乱跳。
+        let tps = match (out_first_at, out_last_at) {
+            (Some(first), _) if out_tokens > 0 => {
+                let el = first.elapsed().as_millis() as u64;
+                if el > 200 {
+                    out_tokens as f64 * 1000.0 / el as f64
+                } else {
+                    st.tps
+                }
             }
-        } else {
-            st.tps
+            _ => st.tps,
         };
         self.hub.publish(
             session_id,
