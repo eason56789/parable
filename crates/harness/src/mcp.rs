@@ -1030,7 +1030,7 @@ mod tests {
     async fn fake_session(
         responder: impl FnOnce(&Value) -> Option<String> + Send + 'static,
     ) -> (Arc<Shared>, tokio::task::JoinHandle<()>) {
-        let (client_w, mut server_r) = tokio::io::duplex(4096); // 请求：client → server
+        let (client_w, server_r) = tokio::io::duplex(4096); // 请求：client → server
         let (mut server_w, client_r) = tokio::io::duplex(4096); // 响应：server → client
         let shared = Arc::new(Shared::new(Box::new(client_w)));
         tokio::spawn(read_loop(client_r, Arc::clone(&shared)));

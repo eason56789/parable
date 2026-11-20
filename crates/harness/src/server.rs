@@ -81,6 +81,15 @@ fn check_auth(headers: &HeaderMap, token: Option<&str>, state: &AppState) -> boo
     from_header || from_query
 }
 
+/// C-06：会话 id 字符白名单——只允许字母数字与 `-_`，≤64 字符，防路径穿越。
+fn valid_session_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+}
+
 // ------------------------------------------------------------------ local guards
 
 /// DNS rebinding 防护:Host 必须是 `127.0.0.1:<port>` 或 `localhost:<port>`。
@@ -866,6 +875,24 @@ struct OpenUrlReq {
 ///
 /// 设置 → 关于 →「在浏览器中打开」用它：桌面壳里的内嵌 WebView 与浏览器标签
 /// 是两个独立前端，用户想在浏览器里用同一份会话时不需要自己去翻端口号。
+/// C-05：回环地址判定——解析 authority 取 host 比较，显式拒绝带 userinfo
+///（`user:pass@host`）的形似回环地址，避免 `http://127.0.0.1:80@evil.com/`
+/// 这类前缀绕过。
+fn is_loopback_url(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("http://") else {
+        return false;
+    };
+    let authority = rest.split('/').next().unwrap_or(rest);
+    if authority.contains('@') {
+        return false;
+    }
+    let host = authority
+        .strip_prefix('[')
+        .and_then(|h| h.split(']').next())
+        .unwrap_or_else(|| authority.rsplit(':').next().unwrap_or(authority));
+    matches!(host, "127.0.0.1" | "localhost" | "::1")
+}
+
 async fn service_open(
     State(state): State<SharedState>,
     headers: HeaderMap,
@@ -876,10 +903,7 @@ async fn service_open(
     }
     let url = r.url.trim();
     // 只允许打开本机地址：这个接口是「打开发布页」，不是通用 URL 启动器。
-    let ok = url.starts_with("http://127.0.0.1:")
-        || url.starts_with("http://localhost:")
-        || url.starts_with("http://[::1]:");
-    if !ok {
+    if !is_loopback_url(url) {
         return bad_request("only loopback URLs may be opened from here");
     }
     match crate::computer::spawn_system_browser(url) {
@@ -948,6 +972,21 @@ async fn reveal_file(
     }
     if !p.exists() {
         return bad_request("file not found");
+    }
+    // C-18：只允许定位工作区或 ~/.parable/uploads 下的文件，避免借资源管理器
+    // 暴露本机任意路径的文件名/位置。
+    let uploads = crate::config::Config::home_dir().join("uploads");
+    let mut allowed_roots: Vec<std::path::PathBuf> = vec![uploads];
+    for s in state.store.list("").await {
+        if !s.workspace.is_empty() {
+            allowed_roots.push(std::path::PathBuf::from(s.workspace));
+        }
+    }
+    let within = allowed_roots
+        .iter()
+        .any(|root| crate::permission::inside_workspace(root, &p));
+    if !within {
+        return bad_request("路径不在工作区或上传目录内，已拒绝定位");
     }
     #[cfg(windows)]
     let spawned = std::process::Command::new("explorer")
@@ -2106,9 +2145,10 @@ async fn import_sessions(
             continue;
         }
 
-        // ID 冲突 → 重新生成一个，绝不覆盖本地会话。
+        // ID 冲突或含路径穿越字符 → 重新生成一个，绝不覆盖本地会话。
+        // C-06：id 只允许字母数字 `-_`，防 `../` 经 path_for 写出 sessions 根目录。
         let mut id = s.meta.id.trim().to_string();
-        if id.is_empty() || used.contains(&id) {
+        if id.is_empty() || !valid_session_id(&id) || used.contains(&id) {
             let fresh = format!(
                 "s_{}",
                 &uuid::Uuid::new_v4().simple().to_string()[..12]
@@ -3046,6 +3086,12 @@ async fn agent_say(
     if !check_auth(&headers, None, &state) {
         return unauthorized();
     }
+    // C-11：与 /api/chat 同一套 permission_mode 白名单，非法值直接 400。
+    if !r.permission_mode.is_empty()
+        && !crate::config::PERMISSION_MODES.contains(&r.permission_mode.as_str())
+    {
+        return bad_request("permission_mode must be ask|ws|full");
+    }
     let mut opts = TurnOptions::default();
     if !r.model.is_empty() {
         opts.model_sel = r.model.clone();
@@ -3460,7 +3506,15 @@ async fn browser_click(
 
 /// GET /browser-boot — 内置浏览器 app 窗口的引导页：--app= 需要真实 URL，
 /// about:blank 会被 Chromium 无视而回退普通窗口。页面本身是惰性占位。
-async fn browser_boot() -> Response {
+/// C-16：必须携带有效 token；此页禁止注入凭据/状态数据。
+async fn browser_boot(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(q): Query<IndexQuery>,
+) -> Response {
+    if !check_auth(&headers, q.token.as_deref(), &state) {
+        return unauthorized();
+    }
     axum::response::Html(
         "<!doctype html><title>Parable Browser</title>         <body style=\"margin:0;display:grid;place-items:center;height:100vh;         background:#1f1e1d;color:#8a8a85;font:14px/1.6 system-ui\">         Parable Browser</body>",
     )
@@ -4032,10 +4086,11 @@ pub async fn serve_in(
         store.clone(),
     )
     .with_usage(usage.clone());
-    // 内置浏览器：app 引导页 + 无头开关（默认隐藏窗口，侧栏实况即视图）
+    // 内置浏览器：app 引导页 + 无头开关（默认隐藏窗口，侧栏实况即视图）。
+    // C-16：引导页同样走鉴权，token 经 query 带入（与桌面启动链接同一口径）。
     agent_base
         .computer
-        .set_boot_url(&format!("http://127.0.0.1:{port}/browser-boot"));
+        .set_boot_url(&format!("http://127.0.0.1:{port}/browser-boot?token={token}"));
     {
         let cfg = config.read().await;
         agent_base.computer.set_headless(cfg.browser_headless);

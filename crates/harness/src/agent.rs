@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{oneshot, Mutex, RwLock};
+use tokio::sync::{oneshot, Mutex, RwLock, Semaphore};
 use tokio_util::sync::CancellationToken;
 
 pub const MAX_STEPS: usize = 100;
@@ -709,6 +709,12 @@ impl AgentRuntime {
             return Err(HarnessError::Other(
                 "this session is archived; unarchive it before starting a turn".into(),
             ));
+        }
+        // C-17：入口先确认会话存在，避免未知 id 空跑一轮模型才在落库时报 NotFound。
+        if !self.store.exists(session_id).await {
+            return Err(HarnessError::NotFound(format!(
+                "session {session_id} not found"
+            )));
         }
         let cancel = CancellationToken::new();
         {
@@ -1782,6 +1788,9 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
                         i += 1;
                     }
                     let batch: Vec<(String, String, Value)> = calls[start..i].to_vec();
+                    // C-14：只读批并发上限 8，防止模型一次吐出几十条只读调用
+                    // 并发拉起几十个任务争抢线程/句柄/上游连接。
+                    let sem = Arc::new(Semaphore::new(8));
                     // (id, name, handle)：JoinError 时句柄内部数据已丢，
                     // 用外侧留存的 id/name 补发 tool_result。
                     let mut handles: Vec<(
@@ -1809,11 +1818,24 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
                                 continue;
                             }
                         }
+                        let permit = match sem.clone().acquire_owned().await {
+                            Ok(p) => p,
+                            Err(_) => {
+                                let msg = "工具并发信号量已关闭".to_string();
+                                self.record_outcome(
+                                    session_id, turn_id, &id, &name,
+                                    Err(HarnessError::Tool(msg.clone())), &mut outcomes,
+                                )
+                                .await;
+                                continue;
+                            }
+                        };
                         let reg = Arc::clone(&registry);
                         let ctx = self.tool_ctx(&workspace, &opts, session_id, turn_id, &id, &search_key, &search_pref, &anysearch_key).await;
                         let cancel_tool = cancel.clone();
                         let t0 = std::time::Instant::now();
                         handles.push((id.clone(), name.clone(), tokio::spawn(async move {
+                            let _permit = permit;
                             let r = tokio::select! {
                                 biased;
                                 _ = cancel_tool.cancelled() => Err(HarnessError::Tool("用户已终止本轮".into())),

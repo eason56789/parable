@@ -1570,6 +1570,7 @@ mod tests {
             owner_name: Some("agent-1".into()),
             blocked_by: vec!["task-0".into()],
             write_scopes: vec!["docs".into()],
+            created_by: "agent-1".into(),
         });
         let s = Session {
             meta: SessionSummary {
