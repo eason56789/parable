@@ -6626,7 +6626,9 @@ document.addEventListener('click', e => {
   if (!/^https?:/i.test(abs)) return;
   // 本服务自己的地址（关于页「在浏览器中打开」用的是原生按钮，不是链接）
   // 也走统一入口：系统浏览器模式下正好就是想要的落点。
+  // Shift+点击 = 只这一次强制走系统浏览器（不用去设置里改默认值）。
   e.preventDefault();
+  if (e.shiftKey) { openExternal(abs); return; }
   openLink(abs);
 }, true);
 

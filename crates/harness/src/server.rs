@@ -843,23 +843,8 @@ struct OpenUrlReq {
     url: String,
 }
 
-/// 用系统默认浏览器打开一个 URL（调用方已校验协议）。
-fn spawn_system_browser(url: &str) -> std::io::Result<std::process::Child> {
-    #[cfg(windows)]
-    {
-        std::process::Command::new("cmd")
-            .args(["/C", "start", "", url])
-            .spawn()
-    }
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("open").arg(url).spawn()
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        std::process::Command::new("xdg-open").arg(url).spawn()
-    }
-}
+// spawn_system_browser 在 crate::computer 里（computer_navigate 的
+// target=system 也用它），这里直接引用。
 
 /// POST /api/service/open —— 用系统默认浏览器打开本服务的页面。
 ///
@@ -881,7 +866,7 @@ async fn service_open(
     if !ok {
         return bad_request("only loopback URLs may be opened from here");
     }
-    match spawn_system_browser(url) {
+    match crate::computer::spawn_system_browser(url) {
         Ok(_) => Json(json!({"ok": true})).into_response(),
         Err(e) => server_error(e),
     }
@@ -909,7 +894,7 @@ async fn open_external(
     if url.chars().any(|c| c.is_control()) {
         return bad_request("invalid URL");
     }
-    match spawn_system_browser(url) {
+    match crate::computer::spawn_system_browser(url) {
         Ok(_) => Json(json!({"ok": true})).into_response(),
         Err(e) => server_error(e),
     }

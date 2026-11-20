@@ -1122,10 +1122,11 @@ skill matches the current request, then follow the steps it contains. Read-only.
             },
             ToolSpec {
                 name: "computer_navigate".into(),
-                description: "Navigate the controlled browser: to a URL (waits for load to settle) or back/forward/reload in history. Returns url/title and a fresh screenshot.".into(),
+                description: "Navigate the controlled browser: to a URL (waits for load to settle) or back/forward/reload in history. Returns url/title and a fresh screenshot. target picks WHERE the page opens: builtin (default, the shared sidebar view — you can read/screenshot it afterwards), window (a visible app window, still readable), or system (the user's default browser, e.g. Edge/Chrome — the page then lives outside Parable and CANNOT be read or screenshotted by you; only use it when the user explicitly asks to open a page in their own browser).".into(),
                 input_schema: obj(json!({
                     "url": str_prop("http(s) URL to open (action=open, the default)"),
                     "action": str_prop("open | back | forward | reload"),
+                    "target": str_prop("builtin (default) | window | system — where the page opens; system pages are unreadable to you afterwards"),
                 }), &[]),
             },
             ToolSpec {

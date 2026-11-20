@@ -1184,6 +1184,28 @@ fn request_shell_browser_window() -> bool {
     std::fs::write(&sig, b"1").is_ok()
 }
 
+/// 用系统默认浏览器（Edge / Chrome / …，取决于用户的文件关联）打开一个 URL。
+///
+/// 调用方负责校验协议：这里只认 http(s)，`file://` 会读本地文件、
+/// `javascript:` 会在页面源上执行代码，都不该交给系统浏览器。控制字符
+/// 由调用方挡（拼进 `cmd /C start` 会被拆成多条命令）。
+pub fn spawn_system_browser(url: &str) -> std::io::Result<std::process::Child> {
+    #[cfg(windows)]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .spawn()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open").arg(url).spawn()
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open").arg(url).spawn()
+    }
+}
+
 /// 校验 /json/version 的 `Browser` 字段,只认 Chromium 系(Chrome/Chromium/
 /// Edge(含 UA 形式 `Edg/`)/Headless)。防止本机其他进程恰好占住端口后被当成
 /// 受控浏览器。
@@ -1581,16 +1603,61 @@ pub async fn select_option(a: &Value, ctx: &super::tools::ToolCtx) -> Result<sup
 }
 
 /// computer_navigate：打开网址 / 后退 / 前进 / 刷新，等加载稳定后观察。
+///
+/// `target` 让模型选择页面去哪里：builtin（默认，内置浏览器的共用视图，
+/// 之后还能读/截图）、window（可见独立窗口，同样可读）、system（用户的
+/// 系统默认浏览器——页面从此在 Parable 之外，模型读不到，只在用户明确
+/// 要求"用我自己的浏览器打开"时使用）。
 pub async fn navigate(a: &Value, ctx: &super::tools::ToolCtx) -> Result<super::tools::ToolOutcome, HarnessError> {
     let bridge = bridge_of(ctx)?;
     let action = a.get("action").and_then(|v| v.as_str()).unwrap_or("open");
+    let target = a.get("target").and_then(|v| v.as_str()).unwrap_or("builtin");
+    let target = match target {
+        "builtin" | "window" | "system" => target,
+        other => {
+            return Err(HarnessError::Tool(format!(
+                "target 必须是 builtin | window | system，收到 `{other}`"
+            )))
+        }
+    };
     let (desc, what) = if action == "back" || action == "forward" || action == "reload" {
         (format!("{action} (history)"), action.to_string())
     } else {
         let url = need_str(a, "url")?;
         (normalize_url(&url)?, url.clone())
     };
+    let desc = if target == "builtin" {
+        desc
+    } else {
+        format!("{desc} → {target}")
+    };
     ctx.authorize("computer_navigate", &desc, crate::permission::Risk::Network).await?;
+
+    // target=system：页面交给系统浏览器，模型后续读不到它。历史动作与
+    // system 无关（历史属于内置浏览器的会话），直接报参数错更清楚。
+    if target == "system" {
+        if action != "open" {
+            return Err(HarnessError::Tool(
+                "target=system 只支持 action=open：后退/前进/刷新属于内置浏览器的会话".into(),
+            ));
+        }
+        let url = normalize_url(&what)?;
+        spawn_system_browser(&url)
+            .map_err(|e| HarnessError::Tool(format!("无法启动系统浏览器：{e}")))?;
+        return Ok(super::tools::ToolOutcome {
+            ok: true,
+            title: format!("已在系统浏览器打开 {url}"),
+            display: super::tools::DisplayKind::Plain(format!(
+                "已在系统浏览器打开 {url}"
+            )),
+            for_model: format!(
+                "已在用户的系统默认浏览器打开 {url}。该页面在 Parable 之外，\
+                 你无法读取它的内容或截图——如果之后需要基于页面内容继续工作，\
+                 请改用 target=builtin（或默认）重新打开。"
+            ),
+        });
+    }
+
     match action {
         // 后退/前进用组合键实现：navigateToHistoryEntry 需要 entryId，
         // 而 /json 端点拿不到历史列表——Alt+Left/Right 是等价且最稳的路径。
@@ -1605,7 +1672,13 @@ pub async fn navigate(a: &Value, ctx: &super::tools::ToolCtx) -> Result<super::t
         }
         _ => {
             let url = normalize_url(&what)?;
-            bridge.cmd("Page.navigate", json!({"url": url})).await?;
+            if target == "window" {
+                // 可见独立窗口：用户（或模型）明确要围观，无头实例没有窗口
+                // 可看，先按可见模式重建。
+                bridge.navigate_in_window(&url).await?;
+            } else {
+                bridge.cmd("Page.navigate", json!({"url": url})).await?;
+            }
         }
     }
     bridge.wait_ready(8000).await;
@@ -1883,5 +1956,59 @@ mod tests {
         assert_eq!(f2["x"], json!(3.0));
         let t2 = point_arg(&flat, "to").unwrap();
         assert_eq!(t2["ref"], json!(9));
+    }
+
+    /// computer_navigate 的 target 分流：system 真的交给系统浏览器（不碰
+    /// CDP），非法 target / system+历史动作被拒绝。用 full 权限模式免掉
+    /// 确认面板，EventHub 无订阅者，事件落空即可。
+    #[tokio::test]
+    async fn navigate_target_routes() {
+        let hub = crate::event::EventHub::new();
+        let ctx = super::super::tools::ToolCtx {
+            workspace: std::path::PathBuf::from("."),
+            permission_mode: "full".into(),
+            plan_mode: false,
+            broker: Arc::new(crate::permission::PermissionBroker::new(hub.clone())),
+            questions: Arc::new(crate::agent::QuestionBroker::new()),
+            hub,
+            session_id: "t".into(),
+            call_id: "c".into(),
+            schedule: None,
+            subagents: None,
+            store: Arc::new(crate::session::SessionStore::new()),
+            runtime: None,
+            search_key: String::new(),
+            anysearch_key: String::new(),
+            search_pref: "auto".into(),
+            computer: Some(Arc::new(ComputerBridge::new())),
+            desktop: None,
+            ask_timeout_ms: 0,
+            hooks: Arc::new(Vec::new()),
+            checkpoint: None,
+            turn_id: "t".into(),
+            mcp: None,
+            config: None,
+            terms: None,
+        };
+
+        // system：打开成功，卡片标题带 URL，模型提示里说明读不到页面
+        let out = navigate(&json!({"url": "https://example.org/nav-sys", "target": "system"}), &ctx)
+            .await
+            .expect("system target must succeed");
+        assert!(out.ok);
+        assert!(out.title.contains("example.org/nav-sys"), "title: {}", out.title);
+        assert!(out.for_model.contains("无法读取") || out.for_model.contains("cannot"), "for_model: {}", out.for_model);
+
+        // 非法 target
+        let err = navigate(&json!({"url": "https://example.org/x", "target": "firefox"}), &ctx).await;
+        assert!(err.is_err(), "unknown target must be rejected");
+
+        // system + 历史动作：历史属于内置浏览器会话，必须拒绝
+        let err = navigate(&json!({"action": "back", "target": "system"}), &ctx).await;
+        assert!(err.is_err(), "system+history must be rejected");
+
+        // file:// 在任何 target 下都被 URL 白名单挡下
+        let err = navigate(&json!({"url": "file:///C:/Windows", "target": "system"}), &ctx).await;
+        assert!(err.is_err(), "file:// must stay blocked");
     }
 }
