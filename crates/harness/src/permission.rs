@@ -371,6 +371,15 @@ impl PermissionBroker {
         }
     }
 
+    /// C-07：规则表命中 `deny` 时硬阻断——不进确认流、面板上点「允许一次」
+    /// 也不能覆盖。`ask`/`allow`/未命中仍走 `auto_allow` 的既有流程。
+    pub async fn rule_denied(&self, tool: &str, path: &str, command: Option<&str>) -> bool {
+        matches!(
+            self.rules.read().await.decide(tool, path, command),
+            Some(RuleOutcome::Deny)
+        )
+    }
+
     /// Suspend until the user answers. Emits `permission.request` and waits.
     /// `command` 是 shell 类工具渲染后的命令原文(bash / 插件命令),用于 Always
     /// 规则的精确持久化;非 shell 工具传 None。

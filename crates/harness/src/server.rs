@@ -334,16 +334,32 @@ pub fn build_router(state: SharedState) -> Router {
 
 // ------------------------------------------------------------------ index
 
-async fn index(State(state): State<SharedState>) -> Response {
+#[derive(Debug, Deserialize)]
+struct IndexQuery {
+    token: Option<String>,
+}
+
+async fn index(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(q): Query<IndexQuery>,
+) -> Response {
     let html = match load_index() {
         Ok(h) => h,
         Err(e) => return server_error(format!("cannot load web/index.html: {e}")),
     };
-    // The token is injected so the page can authenticate without a manual step.
-    let html = html.replace(
-        "<head>",
-        &format!("<head><script>window.__PARABLE_TOKEN={:?};</script>", state.token),
-    );
+    // C-04：裸页不再无差别内联 token。启动链接（main.rs 拼 `?token=…`）或
+    // 已带凭证的请求通过 check_auth 后才把 token 注入页面；未鉴权请求只拿到
+    // 无凭据外壳，避免本机任意进程靠裸页 harvest 明文 token。
+    let authed = check_auth(&headers, q.token.as_deref(), &state);
+    let html = if authed {
+        html.replace(
+            "<head>",
+            &format!("<head><script>window.__PARABLE_TOKEN={:?};</script>", state.token),
+        )
+    } else {
+        html
+    };
     // 页面每次请求都是现读盘，绝不能被浏览器启发式缓存：
     // 一旦拿到旧 JS，刷新也还是旧行为（侧聊逐段叠行就是这么来的）。
     let mut resp = Html(html).into_response();
@@ -4058,6 +4074,7 @@ pub async fn serve_in(
         let schedule = schedule.clone();
         let agent = agent.clone();
         let config = config.clone();
+        let broker = broker.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(20)).await;
@@ -4074,6 +4091,26 @@ pub async fn serve_in(
                         };
                         let perm = cfg.permission_mode.clone();
                         drop(cfg);
+                        // C-01：无人值守通道也要过权限网关。后台无法弹确认，
+                        // auto_allow 为 false（ws/ask 模式、deny/ask 规则）一律
+                        // 拒绝并留痕；只有 full 模式或显式 allow 规则放行。
+                        let allowed = broker
+                            .auto_allow(
+                                &perm,
+                                "bash",
+                                &ws.to_string_lossy(),
+                                Some(&command),
+                                crate::permission::Risk::Shell,
+                                &ws,
+                            )
+                            .await;
+                        if !allowed {
+                            tracing::warn!(
+                                "scheduled shell task {} 被权限网关拒绝（{perm} 模式，无人值守不可确认）: {command}",
+                                task.id
+                            );
+                            continue;
+                        }
                         tracing::info!(
                             "scheduled shell task {} firing ({} mode): {}",
                             task.id, perm, command

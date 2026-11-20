@@ -224,6 +224,14 @@ impl ToolCtx {
         // 只读工具硬拦：用户要 agent 直接查看自己的会话/日志/配置时，这条
         // 规则会让它连读都读不到。改动仍受权限链约束（写操作照常询问），
         // 凭据泄露风险由下面的权限提示与「提示词注入」系统规则兜底。
+        // C-07：deny 规则是硬阻断，直接拒绝、不弹确认框（确认流里的「允许
+        // 一次」不能覆盖 deny）。ask/allow/未命中交给下面的规则/模式判定。
+        if self.broker.rule_denied(tool, path, command).await {
+            self.broker.note_decision(&self.call_id, "deny").await;
+            return Err(HarnessError::PermissionDenied(format!(
+                "denied by rule: {tool} on {path}"
+            )));
+        }
         if self
             .broker
             .auto_allow(
@@ -1854,8 +1862,30 @@ Poll `background_list` to check status/output, or `background_kill` to stop it."
         if vals.is_empty() {
             return Err(HarnessError::Tool("`values` is empty — nothing to change".into()));
         }
-        ctx.authorize("settings_set", &format!("{} key(s)", vals.len()), Risk::Write)
-            .await?;
+        // C-02：`permission_mode` 是提权键——一次弱审批即可自提权到 full 并落盘。
+        // 升级为 Destructive 风险，审批理由列出键名与旧→新值；其余键维持 Write。
+        let escalated = vals.contains_key("permission_mode");
+        let before_snap = settings_snapshot(&crate::config::Config::load());
+        let detail: Vec<String> = vals
+            .iter()
+            .map(|(k, v)| {
+                let old = before_snap
+                    .iter()
+                    .find(|(n, _, _)| n == k)
+                    .map(|(_, x, _)| x.clone())
+                    .unwrap_or_default();
+                format!("{k}: {old} → {v}")
+            })
+            .collect();
+        let risk = if escalated { Risk::Destructive } else { Risk::Write };
+        ctx.authorize_with_reason(
+            "settings_set",
+            &detail.join("; "),
+            risk,
+            &detail.join("\n"),
+            None,
+        )
+        .await?;
         let known = settings_snapshot(&crate::config::Config::load());
         // 未知键直接拒绝：默默忽略会让模型以为改成功了。
         let unknown: Vec<&String> = vals
@@ -2112,8 +2142,6 @@ you cannot switch models yourself.",
                     _ => crate::schedule::Target::Reuse,
                 };
                 let label = a["name"].as_str().unwrap_or("task");
-                // 定时任务会长期反复向会话投递 prompt:写入级权限,plan 模式下被拒
-                ctx.authorize("schedule_create", label, Risk::Write).await?;
                 // 动作：默认投递提示词；给了 command 就按 shell 任务处理。
                 let action = match a["command"].as_str() {
                     Some(c) if !c.trim().is_empty() => crate::schedule::TaskAction::Shell {
@@ -2121,6 +2149,17 @@ you cannot switch models yourself.",
                     },
                     _ => crate::schedule::TaskAction::Agent,
                 };
+                // C-01：shell 动作按 Shell 风险走权限网关，命令原文进审批理由；
+                // 不再只按 Write 审批就把一条可反复执行的命令挂进定时任务。
+                match &action {
+                    crate::schedule::TaskAction::Shell { command } => {
+                        ctx.authorize_shell("schedule_create", label, Risk::Shell, command)
+                            .await?;
+                    }
+                    crate::schedule::TaskAction::Agent => {
+                        ctx.authorize("schedule_create", label, Risk::Write).await?;
+                    }
+                }
                 let t = svc
                     .create(
                         a["name"].as_str().unwrap_or("task").to_string(),

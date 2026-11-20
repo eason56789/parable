@@ -1681,12 +1681,24 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
             for (id, name, args) in &calls {
                 parts.push(AsstPart::ToolUse { id: id.clone(), name: name.clone(), args: args.clone() });
             }
-            if !parts.is_empty() {
-                history.push(Msg::Assistant(parts.clone()));
+            // C-03：取消/流中断早于工具执行循环时，这些 ToolUse 从未落地，
+            // 落库时摘除，避免下次重放出现没有 ToolResult 配对的 dangling
+            // ToolUse（provider 会拒）。文本/思考部分照常保留。
+            let persisted: Vec<AsstPart> = if cancelled || stream_err.is_some() {
+                parts
+                    .iter()
+                    .filter(|p| !matches!(p, AsstPart::ToolUse { .. }))
+                    .cloned()
+                    .collect()
+            } else {
+                parts.clone()
+            };
+            if !persisted.is_empty() {
+                history.push(Msg::Assistant(persisted.clone()));
                 let saved = self.store
                     .append_message(session_id, StoredMessage {
                         role: "assistant".into(),
-                        parts: serde_json::to_value(&Msg::Assistant(parts.clone())).unwrap_or(Value::Null),
+                        parts: serde_json::to_value(&Msg::Assistant(persisted.clone())).unwrap_or(Value::Null),
                         displays: Vec::new(),
                         turn: turn_id.to_string(),
                         hidden: false,
