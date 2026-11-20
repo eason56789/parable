@@ -19,7 +19,7 @@
 
 use crate::error::HarnessError;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 
@@ -211,6 +211,10 @@ struct Worker {
     walker: Option<IUIAutomationTreeWalker>,
     refs: HashMap<i64, DRef>,
     next_ref: i64,
+    /// B-06：最近一次 `window_list` 枚举到的合法顶层窗口 hwnd 集合；
+    /// focus/minimize/maximize/close 只允许操作集合内的窗口，防止猜/遍历
+    /// hwnd 控制用户其他应用。
+    known_hwnds: HashSet<isize>,
 }
 
 #[cfg(not(windows))]
@@ -249,7 +253,7 @@ fn worker_main(rx: Receiver<Job>) {
             }
             Err(_) => (None, None),
         };
-        let mut worker = Worker { uia, walker, refs: HashMap::new(), next_ref: 1 };
+        let mut worker = Worker { uia, walker, refs: HashMap::new(), next_ref: 1, known_hwnds: HashSet::new() };
         for job in rx {
             let result = worker.run(job.cmd);
             let _ = job.reply.send(result);
@@ -1240,10 +1244,23 @@ impl Worker {
     // ------------------------------------------------------- 窗口管理
 
     fn window_list(&mut self) -> Result<JobReply, HarnessError> {
-        Ok(JobReply::Windows(enum_windows_info()?))
+        let wins = enum_windows_info()?;
+        self.known_hwnds = wins.iter().map(|w| w.hwnd).collect();
+        Ok(JobReply::Windows(wins))
+    }
+
+    /// B-06：操作类窗口动作必须命中最近一次枚举到的 hwnd 集合。
+    fn check_hwnd(&self, hwnd: isize) -> Result<(), HarnessError> {
+        if !self.known_hwnds.contains(&hwnd) {
+            return Err(HarnessError::Tool(
+                "hwnd 不在最近一次窗口清单内（先 action=list 查看），已拒绝".into(),
+            ));
+        }
+        Ok(())
     }
 
     fn window_show(&mut self, hwnd: isize, action: &str) -> Result<JobReply, HarnessError> {
+        self.check_hwnd(hwnd)?;
         let h = HWND(hwnd as *mut _);
         unsafe {
             if !IsWindow(Some(h)).as_bool() {
@@ -1279,6 +1296,7 @@ impl Worker {
     }
 
     fn window_close(&mut self, hwnd: isize) -> Result<JobReply, HarnessError> {
+        self.check_hwnd(hwnd)?;
         let h = HWND(hwnd as *mut _);
         unsafe {
             if !IsWindow(Some(h)).as_bool() {

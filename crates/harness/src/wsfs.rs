@@ -12,10 +12,12 @@
 //! symlink/junction escapes. The read-only variant (`resolve_readonly`)
 //! deliberately lets absolute paths through — that is right for the model
 //! (reading a log outside the workspace is the point) but wrong for a UI
-//! browser, so we do not use it here. On top of that, `~/.parable` internals
-//! (config, permissions, sessions, uploads) are refused outright: the HTTP
-//! layer bypasses the tool permission gate, so this check is the only thing
-//! standing between a caller and the API keys.
+//! browser, so we do not use it here. The `~/.parable` internals are no
+//! longer refused outright (the user may browse sessions/logs/config), but
+//! secret/key material (`.env`, `*.key`, `*.pem`, SSH private keys) is
+//! blacklisted from both listing and read: the HTTP layer bypasses the tool
+//! permission gate, so this check is the only thing standing between a
+//! caller and the API keys.
 
 use crate::error::HarnessError;
 use serde::Serialize;
@@ -74,6 +76,20 @@ const SKIP_DIRS: &[&str] = &[".git", "node_modules", "target", ".venv", "__pycac
 /// Files above this size are listed but never opened.
 const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 
+/// B-04：密钥/凭据文件名黑名单——列表面板不展示、读取接口拒绝打开。
+fn is_secret_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower == ".env"
+        || lower.starts_with("id_rsa")
+        || lower.starts_with("id_ed25519")
+        || lower.starts_with("id_ecdsa")
+        || lower.starts_with("id_dsa")
+        || lower.ends_with(".key")
+        || lower.ends_with(".pem")
+        || lower.ends_with(".p12")
+        || lower.ends_with(".pfx")
+}
+
 /// Resolve a caller-supplied path against the workspace, refusing anything
 /// that escapes it. `~/.parable` is no longer special-cased — the user asked
 /// to be able to browse sessions/logs/config through the same tools.
@@ -121,7 +137,10 @@ pub fn tree(workspace: &Path, raw: &str) -> Result<Vec<Entry>, HarnessError> {
     for e in std::fs::read_dir(&dir)? {
         let Ok(e) = e else { continue };
         let name = e.file_name().to_string_lossy().to_string();
-        if name.starts_with('.') && name != ".env" {
+        if is_secret_name(&name) {
+            continue;
+        }
+        if name.starts_with('.') {
             continue;
         }
         let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
@@ -162,6 +181,16 @@ pub fn read(workspace: &Path, raw: &str, offset: u64, limit: u64) -> Result<File
     if meta.is_dir() {
         return Err(HarnessError::Tool(format!(
             "{} is a directory",
+            path.display()
+        )));
+    }
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    if is_secret_name(&file_name) {
+        return Err(HarnessError::Tool(format!(
+            "{} 是密钥/凭据文件，已拒绝在面板中打开",
             path.display()
         )));
     }
@@ -228,8 +257,11 @@ pub fn search(workspace: &Path, query: &str) -> Result<Vec<Match>, HarnessError>
                 break;
             }
             let name = e.file_name().to_string_lossy().to_string();
+            if is_secret_name(&name) {
+                continue;
+            }
             let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
-            if name.starts_with('.') && name != ".env" {
+            if name.starts_with('.') {
                 continue;
             }
             if is_dir && SKIP_DIRS.contains(&name.as_str()) {
@@ -316,6 +348,18 @@ mod tests {
         assert_eq!(f.offset, 2);
         assert_eq!(f.total_lines, 3);
         assert!(f.truncated);
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn read_blocks_secret_files() {
+        let ws = tmp_ws("secret");
+        std::fs::write(ws.join(".env"), "KEY=secret").unwrap();
+        std::fs::write(ws.join("server.key"), "abc").unwrap();
+        assert!(read(&ws, ".env", 1, 10).is_err());
+        assert!(read(&ws, "server.key", 1, 10).is_err());
+        let entries = tree(&ws, "").unwrap();
+        assert!(entries.iter().all(|e| !is_secret_name(&e.name)));
         let _ = std::fs::remove_dir_all(&ws);
     }
 

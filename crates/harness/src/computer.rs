@@ -1269,15 +1269,13 @@ fn request_shell_browser_window() -> bool {
 
 /// 用系统默认浏览器（Edge / Chrome / …，取决于用户的文件关联）打开一个 URL。
 ///
-/// 调用方负责校验协议：这里只认 http(s)，`file://` 会读本地文件、
-/// `javascript:` 会在页面源上执行代码，都不该交给系统浏览器。控制字符
-/// 由调用方挡（拼进 `cmd /C start` 会被拆成多条命令）。
+/// 调用方负责校验协议与字符集（见 `normalize_url`）。Windows 侧直接走
+/// `explorer.exe` 单参数拉起，不再经 `cmd /C start`——cmd 会把 `& | ^` 等
+/// 元字符拆成第二条命令，绕过 shell 解析即消除这条注入面。
 pub fn spawn_system_browser(url: &str) -> std::io::Result<std::process::Child> {
     #[cfg(windows)]
     {
-        std::process::Command::new("cmd")
-            .args(["/C", "start", "", url])
-            .spawn()
+        std::process::Command::new("explorer.exe").arg(url).spawn()
     }
     #[cfg(target_os = "macos")]
     {
@@ -1309,6 +1307,14 @@ fn normalize_url(url: &str) -> Result<String, HarnessError> {
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         return Err(HarnessError::Tool(
             "url 必须以 http(s):// 开头（file:// 与 javascript: 被禁止）".into(),
+        ));
+    }
+    // B-05：拒绝控制字符与引号/重定向类元字符，避免拼进命令行时被二次解析。
+    if url.chars()
+        .any(|c| c.is_control() || matches!(c, '"' | '`' | '^' | '<' | '>'))
+    {
+        return Err(HarnessError::Tool(
+            "url 含非法控制字符或元字符（\" ` ^ < >），已拒绝".into(),
         ));
     }
     Ok(url.to_string())

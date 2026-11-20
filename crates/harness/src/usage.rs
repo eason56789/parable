@@ -169,17 +169,16 @@ impl UsageJournal {
     /// carrying its cumulative totals, attributed to the day the session was
     /// last updated.
     pub async fn backfill_legacy(&self, sessions_root: &Path) {
-        {
-            let done = self.backfilled.lock().await;
-            if *done {
-                return;
-            }
+        // B-08：marker 检查、导入、写 marker 全程持同一把锁，并发 snapshot
+        // 不会在首个调用写 marker 之前双双通过检查、把旧会话用量合并两遍。
+        let mut done = self.backfilled.lock().await;
+        if *done {
+            return;
         }
         // The sentinel — not the journal file — marks the import as done.
         // A journal that already holds real turns must still get the legacy
         // sessions imported, otherwise their tokens are lost from the total.
         if self.marker.exists() {
-            let mut done = self.backfilled.lock().await;
             *done = true;
             return;
         }
@@ -203,7 +202,6 @@ impl UsageJournal {
         if let Err(e) = std::fs::write(&self.marker, b"1") {
             tracing::warn!("usage journal: could not write legacy-import marker: {e}");
         }
-        let mut done = self.backfilled.lock().await;
         *done = true;
     }
 

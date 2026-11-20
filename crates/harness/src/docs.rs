@@ -132,6 +132,24 @@ fn plain_text_edit_hint() -> String {
 
 type ZipEntries = Vec<(String, Vec<u8>)>;
 
+/// B-03：单个 zip 条目解压上限（50MB），防高压缩比条目把内存打到 OOM。
+const MAX_ZIP_ENTRY_BYTES: u64 = 50 * 1024 * 1024;
+/// B-03：整包解压总量上限（200MB）。
+const MAX_ZIP_TOTAL_BYTES: u64 = 200 * 1024 * 1024;
+
+/// 带上限读取条目字节：超过 `max` 即报错，不把整份条目读进内存。
+fn read_bounded<R: std::io::Read>(f: &mut R, max: u64) -> Result<Vec<u8>, HarnessError> {
+    let mut buf = Vec::new();
+    let mut limited = f.take(max.saturating_add(1));
+    limited.read_to_end(&mut buf)?;
+    if buf.len() as u64 > max {
+        return Err(HarnessError::Tool(format!(
+            "zip 条目超过 {MAX_ZIP_ENTRY_BYTES} 字节上限，已拒绝解压"
+        )));
+    }
+    Ok(buf)
+}
+
 fn open_zip(path: &Path) -> Result<zip::ZipArchive<std::io::BufReader<std::fs::File>>, HarnessError> {
     let f = std::fs::File::open(path)
         .map_err(|e| HarnessError::Tool(format!("无法打开 {}: {e}", path.display())))?;
@@ -152,8 +170,7 @@ fn zip_read_entry(path: &Path, name: &str) -> Result<Vec<u8>, HarnessError> {
     let mut f = a
         .by_name(name)
         .map_err(|e| HarnessError::Tool(format!("{} 缺少 {name}: {e}", path.display())))?;
-    let mut buf = Vec::new();
-    f.read_to_end(&mut buf)?;
+    let buf = read_bounded(&mut f, MAX_ZIP_ENTRY_BYTES)?;
     Ok(buf)
 }
 
@@ -162,31 +179,59 @@ fn zip_read_all(path: &Path) -> Result<ZipEntries, HarnessError> {
     let mut a = open_zip(path)?;
     let names: Vec<String> = a.file_names().map(String::from).collect();
     let mut out = Vec::with_capacity(names.len());
+    let mut total: u64 = 0;
     for name in names {
         let mut f = a
             .by_name(&name)
             .map_err(|e| HarnessError::Tool(format!("{} 读 {name} 失败: {e}", path.display())))?;
-        let mut buf = Vec::new();
-        f.read_to_end(&mut buf)?;
+        let buf = read_bounded(&mut f, MAX_ZIP_ENTRY_BYTES)?;
+        total += buf.len() as u64;
+        if total > MAX_ZIP_TOTAL_BYTES {
+            return Err(HarnessError::Tool(format!(
+                "zip 解压总量超过 {MAX_ZIP_TOTAL_BYTES} 字节上限，已拒绝"
+            )));
+        }
         out.push((name, buf));
     }
     Ok(out)
 }
 
-fn zip_write_all(path: &Path, entries: &ZipEntries) -> Result<(), HarnessError> {
-    let f = std::fs::File::create(path)?;
-    let mut w = zip::ZipWriter::new(f);
-    for (name, data) in entries {
-        let opts: zip::write::SimpleFileOptions =
-            zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-        w.start_file(name.as_str(), opts)
-            .map_err(|e| HarnessError::Tool(format!("zip 写入 {name} 失败: {e}")))?;
-        std::io::Write::write_all(&mut w, data)
-            .map_err(|e| HarnessError::Tool(format!("zip 写入 {name} 内容失败: {e}")))?;
+/// B-02：二进制/压缩包先写同目录临时文件，收尾后 rename 覆盖目标；中途崩溃
+/// 或磁盘满不会把原文件截断成半成品。
+fn tmp_path(path: &Path) -> PathBuf {
+    let mut n = path.as_os_str().to_os_string();
+    n.push(".tmp");
+    PathBuf::from(n)
+}
+
+fn atomic_rename(tmp: &Path, target: &Path) -> Result<(), HarnessError> {
+    match std::fs::rename(tmp, target) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            // Windows：目标已存在时 rename 可能失败——先删再改名重试。
+            std::fs::remove_file(target).ok();
+            std::fs::rename(tmp, target).map_err(Into::into)
+        }
     }
-    w.finish()
-        .map_err(|e| HarnessError::Tool(format!("zip 收尾失败: {e}")))?;
-    Ok(())
+}
+
+fn zip_write_all(path: &Path, entries: &ZipEntries) -> Result<(), HarnessError> {
+    let tmp = tmp_path(path);
+    {
+        let f = std::fs::File::create(&tmp)?;
+        let mut w = zip::ZipWriter::new(f);
+        for (name, data) in entries {
+            let opts: zip::write::SimpleFileOptions =
+                zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+            w.start_file(name.as_str(), opts)
+                .map_err(|e| HarnessError::Tool(format!("zip 写入 {name} 失败: {e}")))?;
+            std::io::Write::write_all(&mut w, data)
+                .map_err(|e| HarnessError::Tool(format!("zip 写入 {name} 内容失败: {e}")))?;
+        }
+        w.finish()
+            .map_err(|e| HarnessError::Tool(format!("zip 收尾失败: {e}")))?;
+    }
+    atomic_rename(&tmp, path)
 }
 
 // ===================================================================== 读取实现
@@ -339,8 +384,7 @@ fn extract_pptx(path: &Path) -> Result<(String, usize), HarnessError> {
         let mut f = archive
             .by_name(name)
             .map_err(|e| HarnessError::Tool(format!("读 {name} 失败: {e}")))?;
-        let mut buf = Vec::new();
-        f.read_to_end(&mut buf)?;
+        let buf = read_bounded(&mut f, MAX_ZIP_ENTRY_BYTES)?;
         let lines = parse_pptx_slide_xml(&String::from_utf8_lossy(&buf));
         out.push_str(&format!("--- 第 {} 页 ---\n", i + 1));
         out.push_str(&lines.join("\n"));
@@ -684,16 +728,23 @@ fn parse_slides(doc: &Value) -> Result<Vec<SlideSpec>, HarnessError> {
 
 fn create_text_file(path: &Path, text: &str) -> Result<String, HarnessError> {
     ensure_parent(path)?;
-    std::fs::write(path, text)?;
+    crate::atomic_write(path, text.as_bytes())?;
     Ok(format!("{} 行", text.lines().count()))
 }
 
 /// CSV 转义（RFC 4180）：含逗号/引号/换行的字段加引号，内部引号翻倍。
+/// B-01：以 `= + - @` 或 Tab/CR 开头的单元格前置单引号，防止 Excel/WPS
+/// 双击打开时把文本当作公式求值（CSV 公式注入）。
 fn csv_field(s: &str) -> String {
-    if s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r') {
-        format!("\"{}\"", s.replace('"', "\"\""))
+    let neutralized = match s.chars().next() {
+        Some(c) if matches!(c, '=' | '+' | '-' | '@' | '\t' | '\r') => format!("'{s}"),
+        _ => s.to_string(),
+    };
+    let v = neutralized.as_str();
+    if v.contains(',') || v.contains('"') || v.contains('\n') || v.contains('\r') {
+        format!("\"{}\"", v.replace('"', "\"\""))
     } else {
-        s.to_string()
+        v.to_string()
     }
 }
 
@@ -705,7 +756,7 @@ fn create_csv_file(path: &Path, rows: &[Vec<String>]) -> Result<String, HarnessE
     ensure_parent(path)?;
     // RFC 4180 用 CRLF 做行分隔，Excel 直接双击打开不串行
     let body: Vec<String> = rows.iter().map(|r| csv_row(r)).collect();
-    std::fs::write(path, body.join("\r\n"))?;
+    crate::atomic_write(path, body.join("\r\n").as_bytes())?;
     Ok(format!("{} 行", rows.len()))
 }
 
@@ -761,8 +812,10 @@ fn create_xlsx_file(
             }
         }
     }
-    wb.save(path)
+    let tmp = tmp_path(path);
+    wb.save(&tmp)
         .map_err(|e| HarnessError::Tool(format!("xlsx 写入失败: {e}")))?;
+    atomic_rename(&tmp, path)?;
     Ok(format!("{} 表 {} 行", sheets.len(), total_rows))
 }
 
@@ -874,11 +927,15 @@ fn create_docx_file(path: &Path, blocks: &[Block]) -> Result<String, HarnessErro
             _ => docx = docx.add_paragraph(docx_paragraph_for(b)),
         }
     }
-    let f = std::fs::File::create(path)?;
-    docx
-        .build()
-        .pack(f)
-        .map_err(|e| HarnessError::Tool(format!("docx 写入失败: {e}")))?;
+    let tmp = tmp_path(path);
+    {
+        let f = std::fs::File::create(&tmp)?;
+        docx
+            .build()
+            .pack(f)
+            .map_err(|e| HarnessError::Tool(format!("docx 写入失败: {e}")))?;
+    }
+    atomic_rename(&tmp, path)?;
     Ok(format!("{} 块", blocks.len()))
 }
 
@@ -1554,11 +1611,15 @@ fn edit_docx_file(path: &Path, ops: &Value) -> Result<String, HarnessError> {
             }
         }
     }
-    let f = std::fs::File::create(path)?;
-    docx
-        .build()
-        .pack(f)
-        .map_err(|e| HarnessError::Tool(format!("docx 保存失败: {e}")))?;
+    let tmp = tmp_path(path);
+    {
+        let f = std::fs::File::create(&tmp)?;
+        docx
+            .build()
+            .pack(f)
+            .map_err(|e| HarnessError::Tool(format!("docx 保存失败: {e}")))?;
+    }
+    atomic_rename(&tmp, path)?;
     Ok(notes.join(" · "))
 }
 
@@ -1777,9 +1838,11 @@ fn pdf_apply_op(
                 docs.push(d);
             }
             let mut merged = merge_pdf_documents(docs)?;
-            merged.save(path).map_err(|e| {
+            let tmp = tmp_path(path);
+            merged.save(&tmp).map_err(|e| {
                 HarnessError::Tool(format!("合并结果保存失败: {e}"))
             })?;
+            atomic_rename(&tmp, path)?;
             *current = None; // 落盘后内存副本作废
             Ok(format!("merge +{} 页", paths.len()))
         }
@@ -1813,9 +1876,11 @@ fn pdf_apply_op(
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "document".into());
             let out = path.with_file_name(format!("{stem}-pages.pdf"));
-            doc.save(&out).map_err(|e| {
+            let tmp = tmp_path(&out);
+            doc.save(&tmp).map_err(|e| {
                 HarnessError::Tool(format!("保存 {} 失败: {e}", out.display()))
             })?;
+            atomic_rename(&tmp, &out)?;
             Ok(format!(
                 "extract_pages {from}-{to} → {}",
                 out.file_name().unwrap_or_default().to_string_lossy()

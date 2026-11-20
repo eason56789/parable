@@ -220,6 +220,35 @@ fn env_dir(var: &str) -> PathBuf {
     PathBuf::from(std::env::var(var).unwrap_or_default())
 }
 
+/// B-07：profile 段只允许单段文件名（拒绝 `/ \ ..` 与空段），防路径穿越。
+fn safe_profile_segment(profile: &str) -> Result<(), HarnessError> {
+    if profile.is_empty()
+        || profile.contains('/')
+        || profile.contains('\\')
+        || profile.split(&['/', '\\'][..]).any(|seg| seg == "..")
+    {
+        return Err(HarnessError::Tool(format!("非法 profile 段: {profile:?}")));
+    }
+    Ok(())
+}
+
+/// B-07：canonicalize 后复核候选路径仍在预期根目录下。
+fn ensure_under(root: &Path, candidate: &Path) -> Result<PathBuf, HarnessError> {
+    let root_real = root.canonicalize().map_err(|e| {
+        HarnessError::Tool(format!("无法定位浏览器根目录 {}: {e}", root.display()))
+    })?;
+    let cand_real = candidate.canonicalize().map_err(|e| {
+        HarnessError::Tool(format!("无法定位 cookie 库 {}: {e}", candidate.display()))
+    })?;
+    if !cand_real.starts_with(&root_real) {
+        return Err(HarnessError::Tool(format!(
+            "cookie 库路径越出浏览器根目录: {}",
+            candidate.display()
+        )));
+    }
+    Ok(cand_real)
+}
+
 fn chromium_kinds() -> [ChromiumKind; 4] {
     [
         ChromiumKind {
@@ -536,17 +565,19 @@ pub async fn extract_source_ex(
     let (kind, profile) = id.split_once(':').ok_or_else(|| {
         HarnessError::Tool(format!("无效的来源 id: {id}（应形如 edge:Default）"))
     })?;
+    safe_profile_segment(profile)?;
     match kind {
         "firefox" => {
-            let dir = env_dir("APPDATA")
+            let root = env_dir("APPDATA")
                 .join("Mozilla")
                 .join("Firefox")
-                .join("Profiles")
-                .join(profile);
+                .join("Profiles");
+            let dir = root.join(profile);
             let db = dir.join("cookies.sqlite");
             if !db.is_file() {
                 return Err(HarnessError::Tool(format!("找不到 Firefox 配置 {id}")));
             }
+            let db = ensure_under(&root, &db)?;
             Ok(ExtractReport {
                 cookies: extract_firefox(&db)?,
                 ..Default::default()
@@ -566,8 +597,9 @@ pub async fn extract_source_ex(
                 .find(|k| k.key == kind)
                 .and_then(|k| (k.exes)().into_iter().find(|p| p.is_file()))
                 .ok_or_else(|| HarnessError::Tool(format!("{kind} 的浏览器程序未找到")))?;
-            let db = cookie_db_of(&root.join(profile))
+            let mut db = cookie_db_of(&root.join(profile))
                 .ok_or_else(|| HarnessError::Tool(format!("找不到 {profile} 的 cookie 库")))?;
+            db = ensure_under(&root, &db)?;
 
             let mut closed = false;
             if source_locked(&db) {

@@ -363,7 +363,7 @@ impl CheckpointStore {
         // 先备份当前内容，再动手恢复：任何一步失败都不至于丢用户数据。
         let ts = now_ms();
         let pre = dir.join("pre-restore");
-        let mut backups: Vec<PathBuf> = Vec::new();
+        let mut backups: Vec<Option<PathBuf>> = Vec::new();
         for (i, f) in m.files.iter().enumerate() {
             let cur = Path::new(&f.path);
             if cur.is_file() {
@@ -371,42 +371,81 @@ impl CheckpointStore {
                 let bytes = std::fs::read(cur)?;
                 let bak = pre.join(format!("{i}_{ts}.bin"));
                 crate::atomic_write(&bak, &bytes)?;
-                backups.push(bak);
+                backups.push(Some(bak));
+            } else {
+                backups.push(None);
             }
         }
 
-        let mut touched = Vec::new();
+        // B-09 阶段一：把全部快照读进内存并校验可读。任一条缺失/损坏就在
+        // 动盘之前整体中止，避免恢复到一半留下混合状态。
+        let mut staged: Vec<Option<Vec<u8>>> = Vec::with_capacity(m.files.len());
         for f in &m.files {
-            let cur = Path::new(&f.path);
-            if f.existed {
-                let bytes = std::fs::read(dir.join("snaps").join(&f.snap)).map_err(|e| {
+            let bytes = if f.existed {
+                Some(std::fs::read(dir.join("snaps").join(&f.snap)).map_err(|e| {
                     HarnessError::Tool(format!(
                         "checkpoint: snapshot {} missing or unreadable: {e}",
                         f.snap
                     ))
-                })?;
-                // 文件可能被整目录删除过：先把父目录补回来再原子写。
-                if let Some(parent) = cur.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                crate::atomic_write(cur, &bytes)?;
-                touched.push(f.path.clone());
-            } else if cur.exists() {
-                // 新建文件回退 = 删除。如果现在变成目录（极端情况），跳过并记
-                // 警告，不让单条异常打断整轮恢复。
-                match std::fs::remove_file(cur) {
-                    Ok(()) => touched.push(f.path.clone()),
-                    Err(e) => {
-                        tracing::warn!(
-                            "checkpoint: cannot remove {} during restore: {e}",
-                            cur.display()
-                        );
+                })?)
+            } else {
+                None
+            };
+            staged.push(bytes);
+        }
+
+        // B-09 阶段二：逐条应用；中途失败按 pre-restore 备份把已改条目回退。
+        let mut touched_idx: Vec<usize> = Vec::new();
+        let apply_result: Result<(), HarnessError> = (|| {
+            for (i, f) in m.files.iter().enumerate() {
+                let cur = Path::new(&f.path);
+                if f.existed {
+                    let bytes = staged[i].clone().unwrap_or_default();
+                    // 文件可能被整目录删除过：先把父目录补回来再原子写。
+                    if let Some(parent) = cur.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    crate::atomic_write(cur, &bytes)?;
+                    touched_idx.push(i);
+                } else if cur.exists() {
+                    // 新建文件回退 = 删除。如果现在变成目录（极端情况），跳过并记
+                    // 警告，不让单条异常打断整轮恢复。
+                    match std::fs::remove_file(cur) {
+                        Ok(()) => touched_idx.push(i),
+                        Err(e) => {
+                            tracing::warn!(
+                                "checkpoint: cannot remove {} during restore: {e}",
+                                cur.display()
+                            );
+                        }
                     }
                 }
             }
+            Ok(())
+        })();
+
+        if let Err(e) = apply_result {
+            // 补偿恢复：已写条目按备份回退；原本不存在的文件删除。
+            for &i in &touched_idx {
+                let cur = Path::new(&m.files[i].path);
+                match &backups[i] {
+                    Some(bak) => {
+                        if let Ok(bytes) = std::fs::read(bak) {
+                            let _ = crate::atomic_write(cur, &bytes);
+                        }
+                    }
+                    None => {
+                        let _ = std::fs::remove_file(cur);
+                    }
+                }
+            }
+            return Err(HarnessError::Tool(format!(
+                "checkpoint: 恢复失败，已回退已改动条目: {e}"
+            )));
         }
+
         // 备份成功即留在盘上，由 prune 随 turn 目录一起清理。
-        drop(backups);
+        let touched: Vec<String> = touched_idx.iter().map(|&i| m.files[i].path.clone()).collect();
         Ok(touched)
     }
 
