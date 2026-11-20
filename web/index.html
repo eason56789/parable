@@ -1985,6 +1985,8 @@ const L = {
     bhHeadless:'隐藏浏览器窗口', bhHeadlessH:'内置浏览器无头运行——桌面零窗口，侧栏「内置浏览器」面板的实况截图就是视图；关闭后弹出可见 app 窗口可围观操作',
     linkT:'链接打开位置', linkTH:'点正文里的链接、关于页的项目地址、获取 Key 这些外链时去哪里打开。内置浏览器与 agent 共用同一视图；系统浏览器则用你自己平时的登录态',
     link_in_browser:'已在内置浏览器打开',
+    link_in_system:'已在系统浏览器打开',
+    link_copied:'无法启动浏览器，链接已复制',
     ctxWarn:'上下文告警阈值', ctxWarnH:'状态栏的上下文占用百分比达到该值时变警示色（+10% 转红色）',
     notify:'后台完成通知', notifySound:'通知提示音', notifyH:'页面在后台时，一轮结束弹系统通知',
     notifySoundH:'通知伴随一声短提示音（需要允许通知）',
@@ -2241,6 +2243,8 @@ const L = {
     bhHeadless:'Hide browser window', bhHeadlessH:'Run the built-in browser headless — no window on your desktop; the side-pane live screenshots ARE the view. Off = visible app window to watch the agent',
     linkT:'Open links in', linkTH:'Where links from replies, the About page and the Get-key buttons open. The built-in browser shares one view with the agent; the system browser uses your own sessions and extensions',
     link_in_browser:'Opened in the built-in browser',
+    link_in_system:'Opened in your system browser',
+    link_copied:'Could not launch a browser — link copied',
     ctxWarn:'Context warn threshold', ctxWarnH:'The status-bar context percentage turns warning-colored at this percent (red at +10%)',
     notify:'Background notifications', notifySound:'Notification sound', notifyH:'System notification when a turn finishes while the page is hidden',
     notifySoundH:'Play a short beep with the notification (permission required)',
@@ -12584,18 +12588,17 @@ async function openLink(url, opts) {
 }
 
 /**
- * 交给系统默认浏览器。桌面壳里用 `window.open(..., '_blank')` 会被
- * WebView2 拦下（没有实现 new-window handler），所以走服务端的
- * /service/open —— 它只允许 loopback 地址，因此这里对普通外链改用
- * 一个专用端点。
+ * 交给系统默认浏览器。
+ *
+ * 不再先试 `window.open(..., '_blank')`：Tauri 的 wry 没装 new-window
+ * handler 时会 `SetHandled(true)` 把这个请求静默吞掉——既不打开窗口也不
+ * 抛错，返回 null。看起来"点了没反应"，还会把用户引向错误结论。直接走
+ * 服务端 `cmd /C start` / `xdg-open`，这条路在三个平台上行为一致。
  */
 function openExternal(url) {
-  try {
-    const w = window.open(url, '_blank', 'noopener');
-    if (w) return;
-  } catch (e) {}
   api('/open-external', { method: 'POST', body: { url } })
-    .catch(() => copyText(url));
+    .then(() => toast(t('link_in_system')))
+    .catch(() => { copyText(url); toast(t('link_copied')); });
 }
 
 /** 打开某个面板类型的新标签。 */

@@ -2679,6 +2679,17 @@ fn build_system_prompt(cfg: &Config, workspace: &PathBuf, opts: &TurnOptions) ->
     ));
     s.push_str(&format!(" - Current model: {}\n", opts.model_label));
     s.push_str(&format!(" - Permission mode: {}\n", opts.permission_mode));
+    // 用户的链接偏好。不告诉模型的话，computer_navigate 的默认 target
+    // （builtin）会和用户「用系统浏览器」的选择直接冲突——用户看到的是
+    // 「我明明选了系统浏览器，页面却进了内置浏览器」。
+    s.push_str(&format!(
+        " - Links open in: {}\n",
+        match cfg.link_target.as_str() {
+            "system" => "the user's own system browser (Edge/Chrome). Open pages there with computer_navigate target=\"system\", and remember you cannot read or screenshot such pages afterwards — use target=\"builtin\" when you need to inspect the page yourself.",
+            "window" => "a separate built-in browser window. Use computer_navigate target=\"window\" when the page should be visible on its own.",
+            _ => "the built-in browser's shared side view (the default). Pages opened that way stay readable to you.",
+        }
+    ));
     if opts.plan_mode {
         s.push_str("PLAN MODE IS ON. You may only read and plan. Do not write files or run commands. Produce a plan and use todo_write to track it.\n");
     }
