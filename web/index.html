@@ -4674,16 +4674,17 @@ function finishThink(el) {
  * 就会改变时序：原来的「正文 → 工具 → 正文」变成「工具 + 正文」，中断时尤其刺眼。
  * 只有气泡第一个内容节点就是过程节点时，校正才不改变顺序，才允许做。
  */
+/**
+ * 是否允许在 turn.end 时用存储校正气泡。
+ *
+ * reconcileTail 现在只「补缺的尾巴」，不删不重排已经显示出来的正文，所以
+ * 正文与过程节点交错也不再是危险布局——曾经这里要求「过程节点必须全部
+ * 排在正文前面」，结果多步 turn 整个跳过校正，尾部真丢了也补不上。现在
+ * 只要气泡还在就允许校正，具体动不动由 reconcileTail 按文本前缀比对决定。
+ */
 function foldSafe(a) {
   const ab = a && a.querySelector('.ab');
-  if (!ab) return false;
-  const kids = [...ab.children];
-  // 错误行 / 压缩提示是内联带色的提示，不算正文，也不该影响判断。
-  const main = kids.filter(k => !(k.style && k.style.color));
-  const proc = main.filter(k =>
-    k.classList.contains('ec') || k.classList.contains('th') || k.classList.contains('tgrp') || k.classList.contains('tfold'));
-  if (!proc.length) return true;      // 本轮没有过程节点：校正无事可做，允许走存储校正
-  return main[0] === proc[0];         // 只有过程先行时，校正才不改变时序
+  return !!ab;
 }
 
 /* ---- 工具运行组：同一气泡内连续的工具卡折叠为一行可展开统计 ----
@@ -8798,14 +8799,84 @@ async function reconcileTail() {
     if (!lastA || !want.trim()) return;
     const ab = lastA.querySelector('.ab');
     if (!ab) return;
-    [...ab.children].forEach(k => {
-      const c = k.classList;
-      if (k.style && k.style.color) return;           // 错误/提示行保留
-      // 过程节点保留：工具卡、思考块、工具运行组、过程折叠壳（壳内卡片随壳保留）
-      if (!c.contains('ec') && !c.contains('th') && !c.contains('tgrp') && !c.contains('chgbar') && !c.contains('tfold')) k.remove();
-    });
-    renderBlocks(ab, want);
+
+    // 只补尾部，不重排。
+    //
+    // 旧实现把气泡里所有正文节点删掉，再把「最后一条提问之后的所有
+    // assistant 正文」拼成一大段重画。多步 turn 里模型在工具之间说过话时，
+    // 那些段落在存储里是彼此独立的 assistant 消息——拼接后字数不变但分段
+    // 全没了，用户看到的就是「输出结束后所有文本重新刷了一遍」。
+    //
+    // 现在的判据：把屏幕上的正文按顺序拼起来，和存储里的理想文本比。屏幕
+    // 是存储的前缀（正常情况两者完全相等）就什么都不做；屏幕缺尾巴才把缺
+    // 的那一截追加到最后一个正文节点之后。屏幕内容与存储不一致（顺序被
+    // 打乱、内容被改）时同样不动：实时看到的顺序本身就承载信息，宁可不补
+    // 也不能重排。
+    const isProc = k =>
+      k.classList.contains('ec') || k.classList.contains('th') ||
+      k.classList.contains('tgrp') || k.classList.contains('tfold') ||
+      k.classList.contains('chgbar') ||
+      (k.style && k.style.color);           // 错误/压缩提示行：不算正文
+    const bodyNodes = [...ab.children].filter(k => !isProc(k));
+    // 比对用「空白归一化」的串（换行数量、缩进不影响是否完整的判断），
+    // 但真正要补的那一截必须从原始文本里切——归一化后的串已经丢了换行和
+    // markdown 结构，拿它去渲染会把补的内容挤成一行。
+    const norm = s => String(s || '').replace(/\s+/g, ' ').trim();
+    const shownRaw = bodyNodes.map(k => k.textContent).join('\n\n');
+    const shown = norm(shownRaw);
+    const ideal = norm(want);
+    if (!shown) {
+      // 气泡里一个字正文都没有（纯过程轮次）：直接按存储补上全部正文。
+      renderBlocks(ab, want);
+      return;
+    }
+    if (shown === ideal) return;               // 已完整，别碰
+    if (!ideal.startsWith(shown)) return;       // 内容/顺序对不上：不重排
+    // 屏幕是存储的严格前缀 —— 在原始文本里按同样的归一化口径走到屏幕末尾，
+    // 从那里切出还没显示的原始内容。
+    const tail = sliceAfterNormalizedPrefix(want, shown.length).trim();
+    if (!tail) return;
+    const holder = document.createElement('div');
+    holder.className = 'mblk';
+    renderBlocks(holder, tail);
+    const anchor = bodyNodes[bodyNodes.length - 1];
+    if (anchor && anchor.parentNode === ab) {
+      let n = anchor;
+      while (holder.firstChild) {
+        const moved = holder.firstChild;
+        n.after(moved);
+        n = moved;
+      }
+    } else {
+      renderBlocks(ab, tail);
+    }
   } catch (e) { /* 存储读取失败就放弃校正 */ }
+}
+
+/**
+ * 在 `raw` 里找到「按空白归一化后长度为 n」的那个位置，返回其后的原始文本。
+ *
+ * reconcileTail 用归一化串判断屏幕内容是否为存储的前缀，但补写时必须在
+ * 原始串上切——否则换行与 markdown 分隔全被压平。这里逐字符推进，只在
+ * 产生新归一化字符时才计数，连续空白块按一次计。
+ */
+function sliceAfterNormalizedPrefix(raw, n) {
+  const s = String(raw || '');
+  let count = 0;
+  let i = 0;
+  // 与前缀比较时前端已经被 trim 过，先跳过开头的空白。
+  while (i < s.length && /\s/.test(s[i])) i++;
+  while (i < s.length && count < n) {
+    if (/\s/.test(s[i])) {
+      // 一整块空白只贡献一个归一化字符
+      while (i < s.length && /\s/.test(s[i])) i++;
+      count++;
+    } else {
+      i++;
+      count++;
+    }
+  }
+  return s.slice(i);
 }
 
 /**
