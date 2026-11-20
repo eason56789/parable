@@ -27,6 +27,22 @@ use tokio::sync::{watch, Mutex, RwLock};
 /// great-grandchild is depth 3. Beyond this, `spawn_agent` is refused.
 pub const MAX_DEPTH: u32 = 3;
 
+/// 同时存活的子代理并发上限（SB-01）：模型一轮内反复 spawn 不再无限堆积
+/// 子轮/任务/内存。信号量许可随子代理收尾释放；revive 复用同一槽位。
+pub const MAX_CONCURRENT: usize = 8;
+
+/// 目录保留的已收尾子代理条数上限（SB-05）：超出后按最老淘汰，避免长期
+/// 运行后 catalog / outcomes 单调上涨。
+pub const CATALOG_MAX_SETTLED: usize = 200;
+
+/// `seed_history` 复制进子会话的父历史条数上限（SB-07）：超长早期历史
+/// 不再整段搬进子会话，只带最近若干条。
+const SEED_HISTORY_CAP: usize = 20;
+
+/// 信号量许可的共享槽位（SB-01/SB-03）：许可随子代理存活持有，revive
+/// 时在新旧 watcher 之间转交。
+type PermitSlot = Arc<Mutex<Option<tokio::sync::OwnedSemaphorePermit>>>;
+
 /// Where the child's result is delivered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -206,6 +222,33 @@ impl ChildCatalog {
         }
         format!("agent-{}", uuid::Uuid::new_v4().simple())
     }
+
+    /// 淘汰超出上限的已收尾记录（SB-05）：运行中的子代理永远保留；已收尾
+    /// 记录按入目录顺序，最老的先出。
+    pub async fn prune_settled(&self, max: usize) {
+        let mut order = self.order.lock().await;
+        let mut map = self.children.write().await;
+        let settled: Vec<usize> = order
+            .iter()
+            .enumerate()
+            .filter(|(_, id)| {
+                map.get(*id)
+                    .map(|c| c.status != ChildStatus::Running)
+                    .unwrap_or(true)
+            })
+            .map(|(i, _)| i)
+            .collect();
+        if settled.len() <= max {
+            return;
+        }
+        let excess = settled.len() - max;
+        for idx in settled.into_iter().take(excess) {
+            if let Some(id) = order.get(idx) {
+                map.remove(id);
+            }
+        }
+        order.retain(|id| map.contains_key(id));
+    }
 }
 
 /// 命名规则：1–32 个字符（按字符计），允许中文、字母、数字与连字符，
@@ -238,12 +281,47 @@ pub fn name_from_label(label: &str) -> Option<String> {
     }
 }
 
+/// 解析子代理工作目录（SB-02）：相对路径相对父工作区拼接；绝对路径直接
+/// 使用。canonicalize 后必须仍在父工作区内，否则回落父工作区；目录不存在
+/// 同样回落，避免把会话挂到工作区外或意外创建的路径上。
+fn resolve_child_workspace(parent_workspace: &str, cwd: Option<&str>) -> String {
+    let Some(cwd) = cwd.map(str::trim).filter(|s| !s.is_empty()) else {
+        return parent_workspace.to_string();
+    };
+    let parent = std::path::PathBuf::from(parent_workspace);
+    let candidate = if std::path::Path::new(cwd).is_absolute() {
+        std::path::PathBuf::from(cwd)
+    } else {
+        parent.join(cwd)
+    };
+    let Ok(parent_real) = parent.canonicalize() else {
+        return parent_workspace.to_string();
+    };
+    let Ok(cand_real) = candidate.canonicalize() else {
+        return parent_workspace.to_string();
+    };
+    if cand_real.starts_with(&parent_real) {
+        cand_real.to_string_lossy().into_owned()
+    } else {
+        parent_workspace.to_string()
+    }
+}
+
 // ---------------------------------------------------------------- service
 
 pub struct SubagentService {
     pub catalog: Arc<ChildCatalog>,
     hub: EventHub,
     running: Arc<Mutex<HashMap<String, tokio_util::sync::CancellationToken>>>,
+    /// 子代理并发信号量（SB-01）：许可在 spawn 时获取，随 watcher 收尾释放；
+    /// revive 复用同一槽位，不重复占用许可。
+    semaphore: Arc<tokio::sync::Semaphore>,
+    /// 每个子代理的 watcher 代次（SB-03）：revive 递增代次，旧代 watcher
+    /// 自检发现代次过期即退出，不再向新轮投递过期结果。
+    gens: Arc<RwLock<HashMap<String, u64>>>,
+    /// 信号量许可的共享槽位：revive 时把许可从旧 watcher 转交给新 watcher，
+    /// 避免旧代提前释放槽位导致并发上限被绕过。
+    permits: Arc<Mutex<HashMap<String, PermitSlot>>>,
     /// 注入的共享 AgentRuntime（`with_runtime`，server.rs 装配时调用）：
     /// 用于子 turn 完成判定（`is_running`）、超时/取消时终止子 turn
     /// （`interrupt`），以及继承父 turn 的 `TurnOptions`（权限模式等）。
@@ -269,6 +347,9 @@ impl SubagentService {
             catalog: Arc::new(ChildCatalog::new()),
             hub,
             running: Arc::new(Mutex::new(HashMap::new())),
+            semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT)),
+            gens: Arc::new(RwLock::new(HashMap::new())),
+            permits: Arc::new(Mutex::new(HashMap::new())),
             runtime: Arc::new(RwLock::new(None)),
             outcomes: Arc::new(RwLock::new(HashMap::new())),
             store: None,
@@ -360,6 +441,16 @@ impl SubagentService {
             },
         };
 
+        // 并发上限（SB-01）：先拿信号量许可再建子会话；许可由 watcher 持有到
+        // 子代理收尾。revive 复用同一槽位，不重复占用。
+        let permit = self
+            .semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| HarnessError::Other("subagent concurrency semaphore closed".into()))?;
+        let permit_slot: PermitSlot = Arc::new(Mutex::new(Some(permit)));
+
         // The child gets its own session so its history is isolated from the parent.
         // Use the shared store when we have one: a private instance has its own
         // cache, which would not see the child's later writes.
@@ -367,8 +458,11 @@ impl SubagentService {
         let store = shared_store.clone().unwrap_or_else(|| {
             Arc::new(crate::session::SessionStore::new())
         });
+        // SB-02：cwd 相对父工作区解析并校验必须落在父工作区内；越界或目录
+        // 不存在时回落父工作区，不把子会话挂到工作区外的路径。
+        let child_workspace = resolve_child_workspace(parent_workspace, req.cwd.as_deref());
         let child_session = store
-            .create(parent_workspace, &format!("⚙ {label}", label = req.label))
+            .create(&child_workspace, &format!("⚙ {label}", label = req.label))
             .await
             .meta
             .id;
@@ -402,7 +496,11 @@ impl SubagentService {
 
         // Seeding: hand the child the parent's history so prior context matters.
         if req.seed_history {
-            let msgs = store.neutral_messages(parent_session).await;
+            let mut msgs = store.neutral_messages(parent_session).await;
+            // SB-07：只带最近若干条，超长早期历史不再整段搬进子会话。
+            if msgs.len() > SEED_HISTORY_CAP {
+                msgs.drain(..msgs.len() - SEED_HISTORY_CAP);
+            }
             for m in msgs.iter() {
                 // role 跟消息类型对齐（此前全部塞 "user"，assistant 上下文失真）：
                 // assistant → "assistant"，user/tool_result → "user"。parts 内的
@@ -455,6 +553,11 @@ impl SubagentService {
 
         let cancel = tokio_util::sync::CancellationToken::new();
         self.running.lock().await.insert(child_id.clone(), cancel.clone());
+        self.permits
+            .lock()
+            .await
+            .insert(child_id.clone(), permit_slot.clone());
+        let gen = self.next_gen(&child_id).await;
 
         // 子 turn 启动：await 的只是 start_turn 的「派发」本身（实际轮在它
         // 内部的 spawned task 里跑），这里不持有 opaque future，无 E0391。
@@ -463,9 +566,6 @@ impl SubagentService {
         } else {
             starter.start_child(&child_session, &req.task, &req.model).await
         };
-        let shared_store = self.store.clone().unwrap_or_else(|| {
-            Arc::new(crate::session::SessionStore::new())
-        });
         self.spawn_watcher(
             child_id.clone(),
             name.clone(),
@@ -476,6 +576,8 @@ impl SubagentService {
             req.delivery.unwrap_or(Delivery::Parent),
             started,
             self.store.clone(),
+            gen,
+            permit_slot,
         );
 
         Ok(child_id)
@@ -497,12 +599,16 @@ impl SubagentService {
         delivery: Delivery,
         started: Result<String, HarnessError>,
         shared_store: Option<crate::session::SharedStore>,
+        gen: u64,
+        permit_slot: PermitSlot,
     ) {
         let cat = self.catalog.clone();
         let hub = self.hub.clone();
         let running = self.running.clone();
         let runtime = self.runtime.clone();
         let outcomes = self.outcomes.clone();
+        let gens = self.gens.clone();
+        let permits = self.permits.clone();
         tokio::spawn(async move {
             let res = started;
             // A child turn is a normal turn on its own session.
@@ -527,6 +633,11 @@ impl SubagentService {
                 Arc::new(crate::session::SessionStore::new())
             });
             loop {
+                // SB-03：代次自检。revive 已挂新代 watcher 时，旧代直接退出，
+                // 不再向目录/等待通道/父历史投递过期结果。
+                if gens.read().await.get(&cid).copied() != Some(gen) {
+                    return;
+                }
                 if cancel.is_cancelled() {
                     // 父侧取消：同时终止子 turn，避免留下孤儿轮继续跑。
                     if let Some(rt) = runtime.read().await.as_ref() {
@@ -569,6 +680,11 @@ impl SubagentService {
                 tokio::time::sleep(std::time::Duration::from_millis(POLL_MS)).await;
             }
 
+            // 退出轮询后再做一次代次自检：轮询期间可能已被 revive 接管。
+            if gens.read().await.get(&cid).copied() != Some(gen) {
+                return;
+            }
+
             let (status, err) = if timed_out {
                 // 超时：先 interrupt 子 turn 并等它清槽，再标 Failed——不留孤儿运行槽。
                 if let Some(rt) = runtime.read().await.as_ref() {
@@ -591,10 +707,12 @@ impl SubagentService {
                 (ChildStatus::Done, None)
             };
 
+            // SB-08：失败/取消的摘要带上错误原因，而不是空字符串——父代理与
+            // 面板都需要知道子代理为什么没产出。
             let summary = if matches!(status, ChildStatus::Done) {
                 final_text.trim().to_string()
             } else {
-                String::new()
+                err.clone().unwrap_or_else(|| "child produced no output".to_string())
             };
 
             cat.update(&cid, |c| {
@@ -608,6 +726,15 @@ impl SubagentService {
             .await;
 
             running.lock().await.remove(&cid);
+            // SB-05：收尾后清掉完成通道与代次记录，并淘汰超量的已收尾目录项；
+            // 信号量许可随槽位取出释放，并发槽位回收。
+            outcomes.write().await.remove(&cid);
+            gens.write().await.remove(&cid);
+            if let Some(permit) = permit_slot.lock().await.take() {
+                drop(permit);
+            }
+            permits.lock().await.remove(&cid);
+            cat.prune_settled(CATALOG_MAX_SETTLED).await;
 
             // 唤醒所有等待者（agent_wait）：终态经通道广播，等待者立刻返回。
             let outcome = ChildOutcome {
@@ -646,7 +773,7 @@ impl SubagentService {
                 let deliver_store = shared_store.clone().unwrap_or_else(|| {
                     Arc::new(crate::session::SessionStore::new())
                 });
-                let _ = deliver_store
+                if let Err(e) = deliver_store
                     .append_message(
                         &parent_sid,
                         crate::session::StoredMessage {
@@ -660,7 +787,11 @@ impl SubagentService {
                             created_at: crate::event::now_ms(),
                         },
                     )
-                    .await;
+                    .await
+                {
+                    // SB-08：投递失败留痕，避免静默丢失父侧上下文。
+                    tracing::warn!(agent = %cid, error = %e, "subagent result could not be appended to parent history");
+                }
                 hub.publish(
                     &parent_sid,
                     "subagent.result",
@@ -693,9 +824,11 @@ impl SubagentService {
     /// 带附件时 steer 自动退化为 queue（本轮结束后作为下一轮送达）——
     /// enqueue_input 内部处理该退化与立即 drain，附件与 opts 全程透传。
     ///
-    /// `agent` 接受子代理 id 或其子会话 id（前端手头只有会话 id）。
+    /// `agent` 接受子代理 id、名称或其子会话 id；解析被限制在
+    /// `root_session` 所属的子树内（SB-09），跨树引用直接拒绝。
     pub async fn say(
         &self,
+        root_session: &str,
         agent: &str,
         text: &str,
         attachments: Vec<crate::agent::Attachment>,
@@ -705,7 +838,7 @@ impl SubagentService {
         if text.is_empty() {
             return Err(HarnessError::Other("text must not be empty".into()));
         }
-        let Some(child) = self.resolve_any(agent).await else {
+        let Some(child) = self.resolve_child(root_session, agent).await else {
             return Err(HarnessError::Other(format!("no such agent: {agent}")));
         };
         let Some(rt) = self.runtime.read().await.clone() else {
@@ -727,8 +860,9 @@ impl SubagentService {
         Ok((child.id, sid, item.kind))
     }
 
-    /// 按 id 或子会话 id 解析子代理。
-    async fn resolve_any(&self, agent: &str) -> Option<Child> {
+    /// 按 id 或子会话 id 解析子代理（不限定子树）。仅供服务端在缺少调用方
+    /// 会话上下文时先查出所属根，再走子树内的 `say`/`interrupt`。
+    pub async fn resolve_any(&self, agent: &str) -> Option<Child> {
         if let Some(c) = self.catalog.get(agent).await {
             return Some(c);
         }
@@ -736,7 +870,21 @@ impl SubagentService {
     }
 
     /// 复活已收尾的子代理：清终态、重挂完成通道与取消令牌、重启监视器。
+    ///
+    /// SB-03：先取消旧代令牌并推进代次，旧代 watcher 自检过期即退出；信号量
+    /// 许可从旧槽位转交给新 watcher，不重复占用并发槽位。
     async fn revive(&self, child: &Child) {
+        if let Some(old) = self.running.lock().await.remove(&child.id) {
+            old.cancel();
+        }
+        let gen = self.next_gen(&child.id).await;
+        let permit_slot = self
+            .permits
+            .lock()
+            .await
+            .get(&child.id)
+            .cloned()
+            .unwrap_or_else(|| Arc::new(Mutex::new(None)));
         let cancel = tokio_util::sync::CancellationToken::new();
         self.running
             .lock()
@@ -755,9 +903,6 @@ impl SubagentService {
             "subagent.start",
             json!({"agentId": child.id, "name": child.name, "label": child.label}),
         );
-        let shared_store = self.store.clone().unwrap_or_else(|| {
-            Arc::new(crate::session::SessionStore::new())
-        });
         self.spawn_watcher(
             child.id.clone(),
             child.name.clone(),
@@ -768,7 +913,17 @@ impl SubagentService {
             Delivery::Parent,
             Ok(String::new()),
             self.store.clone(),
+            gen,
+            permit_slot,
         );
+    }
+
+    /// 推进并返回某子代理的 watcher 代次（SB-03）。
+    async fn next_gen(&self, cid: &str) -> u64 {
+        let mut g = self.gens.write().await;
+        let next = g.get(cid).copied().unwrap_or(0) + 1;
+        g.insert(cid.to_string(), next);
+        next
     }
 
     /// Wait for one child of `parent_session`'s tree to finish.
@@ -812,18 +967,21 @@ impl SubagentService {
         tree.iter().find(|c| c.session_id == r).cloned()
     }
 
-    pub async fn interrupt(&self, child_id: &str) -> bool {
-        let c = self.running.lock().await.get(child_id).cloned();
+    /// 中断 `root_session` 子树内的子代理（SB-06）：先按子树解析，跨树引用
+    /// 直接拒绝，避免一个树的父代理停掉另一个树的子代理。
+    pub async fn interrupt(&self, root_session: &str, child_id: &str) -> bool {
+        let Some(child) = self.resolve_child(root_session, child_id).await else {
+            return false;
+        };
+        let c = self.running.lock().await.get(&child.id).cloned();
         if let Some(c) = c {
             c.cancel();
             // 同步取消子会话的 turn：只停轮询不停子 turn 会留下孤儿轮继续跑。
-            if let Some(ch) = self.catalog.get(child_id).await {
-                if let Some(rt) = self.runtime.read().await.as_ref() {
-                    rt.interrupt(&ch.session_id).await;
-                }
+            if let Some(rt) = self.runtime.read().await.as_ref() {
+                rt.interrupt(&child.session_id).await;
             }
             self.catalog
-                .update(child_id, |ch| {
+                .update(&child.id, |ch| {
                     if ch.status == ChildStatus::Running {
                         ch.status = ChildStatus::Cancelled;
                         ch.ended_at = Some(crate::event::now_ms().to_string());
@@ -836,7 +994,7 @@ impl SubagentService {
                 result: String::new(),
                 error: Some("cancelled by parent".to_string()),
             };
-            if let Some(tx) = self.outcomes.read().await.get(child_id) {
+            if let Some(tx) = self.outcomes.read().await.get(&child.id) {
                 let _ = tx.send(Some(outcome));
             }
             true
