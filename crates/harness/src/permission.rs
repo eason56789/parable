@@ -287,23 +287,6 @@ pub fn inside_workspace(workspace: &Path, path: &Path) -> bool {
     )
 }
 
-/// `~/.parable` 内部(config.toml / permissions.toml / sessions / logs / uploads
-/// / plugins / schedule.json…)是 harness 自身的私密目录。只读工具一律不碰,
-/// 工具层(authorize)据此直接报错,不弹确认面板——防凭据/会话泄露与提示词注入。
-/// 这是"不命中即放行"的检查,所以逻辑形态与 canonicalize 形态任一命中都算内部,
-/// 防 8.3 短名(C:\Users\EASON~1\)与符号链接形态差异导致的漏判。
-pub fn is_parable_internal(path: &Path) -> bool {
-    let root = crate::config::Config::home_dir();
-    let root_real = root.canonicalize().unwrap_or_else(|_| root.clone());
-    if norm_prefix(&root, path) || norm_prefix(&root_real, path) {
-        return true;
-    }
-    match path.canonicalize() {
-        Ok(p) => norm_prefix(&root, &p) || norm_prefix(&root_real, &p),
-        Err(_) => false,
-    }
-}
-
 pub struct PendingRequest {
     pub tx: oneshot::Sender<Decision>,
     pub tool: String,
@@ -732,14 +715,4 @@ mod tests {
         std::fs::remove_dir_all(&base).ok();
     }
 
-    #[test]
-    fn parable_internal_detection() {
-        let root = crate::config::Config::home_dir();
-        assert!(is_parable_internal(&root.join("config.toml")));
-        assert!(is_parable_internal(&root.join("uploads").join("x.png")));
-        // 组件级 `..` 被弹出,不再落在 ~/.parable 下
-        assert!(!is_parable_internal(&root.join("..")));
-        // 根自身也算内部
-        assert!(is_parable_internal(&root));
-    }
 }

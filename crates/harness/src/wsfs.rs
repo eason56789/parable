@@ -75,20 +75,17 @@ const SKIP_DIRS: &[&str] = &[".git", "node_modules", "target", ".venv", "__pycac
 const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 
 /// Resolve a caller-supplied path against the workspace, refusing anything
-/// that escapes it or lands in `~/.parable`.
+/// that escapes it. `~/.parable` is no longer special-cased — the user asked
+/// to be able to browse sessions/logs/config through the same tools.
 ///
 /// `raw` is workspace-relative; the empty string means the workspace root.
 pub fn resolve(workspace: &Path, raw: &str) -> Result<PathBuf, HarnessError> {
     let raw = raw.trim().replace('\\', "/");
     // `resolve_within` rejects the empty string, so map the root to ".".
     let probe = if raw.is_empty() || raw == "." { "." } else { raw.as_str() };
-    let path = crate::tools::fs::resolve_within(workspace, probe)?;
-    if crate::permission::is_parable_internal(&path) {
-        return Err(HarnessError::PermissionDenied(
-            "refusing to touch ~/.parable internals".into(),
-        ));
-    }
-    Ok(path)
+    // 只做工作区越界检查；~/.parable 内部不再特殊拦截（用户要能直接浏览
+    // 自己的会话与日志文件）。
+    crate::tools::fs::resolve_within(workspace, probe)
 }
 
 /// Path relative to the workspace, with `/` separators.
@@ -239,9 +236,6 @@ pub fn search(workspace: &Path, query: &str) -> Result<Vec<Match>, HarnessError>
                 continue;
             }
             let path = e.path();
-            if crate::permission::is_parable_internal(&path) {
-                continue;
-            }
             if name.to_lowercase().contains(&q) {
                 out.push(Match {
                     path: rel(workspace, &path),
@@ -295,15 +289,23 @@ mod tests {
     }
 
     #[test]
-    fn resolve_rejects_parable_internals() {
-        // Point the workspace at the home directory so that `~/.parable`
-        // really is *inside* it — otherwise the containment check fires
-        // first and we would not be exercising the internals guard at all.
+    fn resolve_allows_parable_internals() {
+        // ~/.parable 现在只是普通目录（用户要能通过同一套工具浏览会话、
+        // 日志与配置）。工作区包含它时，解析必须成功而不是被内部守卫拒绝。
         let home = crate::config::Config::home_dir();
         let ws = home.parent().unwrap_or(&home).to_path_buf();
         let rel = Path::new(".parable").join("sessions");
-        let err = resolve(&ws, rel.to_string_lossy().as_ref()).unwrap_err();
-        assert!(err.to_string().contains("~/.parable"), "unexpected: {err}");
+        let ok = resolve(&ws, rel.to_string_lossy().as_ref())
+            .expect("~/.parable paths must resolve now");
+        assert!(ok.ends_with(Path::new(".parable").join("sessions")));
+    }
+
+    #[test]
+    fn resolve_still_rejects_escape() {
+        // 移除内部守卫不等于放开越界：工作区之外仍然拒绝。
+        let ws = tmp_ws("escape");
+        assert!(resolve(&ws, "../outside.txt").is_err());
+        let _ = std::fs::remove_dir_all(&ws);
     }
 
     #[test]

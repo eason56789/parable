@@ -220,15 +220,10 @@ impl ToolCtx {
                 "plan mode is on: only read-only tools and planning are allowed".into(),
             ));
         }
-        // 只读工具一律不碰 ~/.parable 内部(config/permissions/sessions/logs/
-        // uploads):直接报错,不弹确认面板。
-        if matches!(tool, "read_file" | "glob" | "grep" | "list_dir")
-            && crate::permission::is_parable_internal(Path::new(path))
-        {
-            return Err(HarnessError::PermissionDenied(
-                "refusing to touch ~/.parable internals".into(),
-            ));
-        }
+        // ~/.parable 内部（config/permissions/sessions/logs/uploads）不再被
+        // 只读工具硬拦：用户要 agent 直接查看自己的会话/日志/配置时，这条
+        // 规则会让它连读都读不到。改动仍受权限链约束（写操作照常询问），
+        // 凭据泄露风险由下面的权限提示与「提示词注入」系统规则兜底。
         if self
             .broker
             .auto_allow(

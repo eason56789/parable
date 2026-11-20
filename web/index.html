@@ -6,7 +6,7 @@
 <title>Parable</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&family=Inter:wght@400;500;600&display=swap">
 <style>
-:root{--bg:#faf9f5;--side:#f5f4ed;--fg:#141413;--fg2:#73726c;--line:rgba(31,30,29,.14);--input:#fff;--bubble:#f0eee6;--hov:rgba(31,30,29,.06);--accent:#d97757;--sans:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei","Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-serif;--serif:"Source Serif 4",ui-serif,Georgia,"Songti SC","Noto Serif CJK SC","Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",serif;--mono:ui-monospace,"SF Mono",Menlo,Consolas,"PingFang SC","Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",monospace;--chat:var(--serif);--fs:16px;--w:760px;--blur:8px;--sf:1.5;--cd:calc(.65s * var(--animd));--animd:1;--anim:1;--code-bg:#1e1e1e;--code-fg:#d4d4d4;--code-ln:#6b7280;--uch1:#0b7fff;--uch2:#1e8a3e;--uch3:#9e77ed;--uch4:#e03131;--uch5:#e07b00;--uch6:#0aa7a7;--qe:cubic-bezier(.42,0,.58,1);box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+:root{--bg:#faf9f5;--side:#f5f4ed;--fg:#141413;--fg2:#73726c;--line:rgba(31,30,29,.14);--input:#fff;--bubble:#f0eee6;--hov:rgba(31,30,29,.06);--accent:#d97757;--sans:"Inter",-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei","Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-serif;--serif:"Source Serif 4",ui-serif,Georgia,"Songti SC","Noto Serif CJK SC","Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",serif;--mono:ui-monospace,"SF Mono",Menlo,Consolas,"PingFang SC","Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",monospace;--chat:var(--serif);--fs:16px;--w:760px;--blur:8px;--sf:1.5;--cd:calc(.65s * var(--animd));--animd:1;--anim:1;--code-bg:#1e1e1e;--code-fg:#d4d4d4;--code-ln:#6b7280;--uch1:#0b7fff;--uch2:#1e8a3e;--uch3:#9e77ed;--uch4:#e03131;--uch5:#e07b00;--uch6:#0aa7a7;--qe:cubic-bezier(.42,0,.58,1);--qeio:cubic-bezier(.65,0,.35,1);box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
 @media(prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#262624;--side:#1f1e1d;--fg:#faf9f5;--fg2:#9c9a92;--line:rgba(222,220,209,.15);--input:#30302e;--bubble:#141413;--hov:rgba(222,220,209,.08);--uch1:#4099ff;--uch2:#46bf72;--uch3:#7b5ce5;--uch4:#ff5c5c;--uch5:#ff8a30;--uch6:#42c8c8}}
 :root[data-theme="dark"]{--bg:#262624;--side:#1f1e1d;--fg:#faf9f5;--fg2:#9c9a92;--line:rgba(222,220,209,.15);--input:#30302e;--bubble:#141413;--hov:rgba(222,220,209,.08);--uch1:#4099ff;--uch2:#46bf72;--uch3:#7b5ce5;--uch4:#ff5c5c;--uch5:#ff8a30;--uch6:#42c8c8}
 *{box-sizing:border-box}
@@ -236,19 +236,50 @@ body.chat #chat{opacity:1;pointer-events:auto}
 .tgrp-bin{position:relative;border-left:2px solid var(--line);padding:2px 0 2px 12px;margin-left:4px;display:flex;flex-direction:column;max-height:480px;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin}
 .tgrp-bin .ec{margin:3px 0;animation:none}
 .tgrp-bin .ec>.eh{padding-top:3px;padding-bottom:3px}
-/* ---- 轮末改动摘要条（对标 ZCode files-changed bar）---- */
+/* ---- 轮末改动摘要条（对标 ZCode files-changed bar）----
+   默认只有一行汇总（可点展/收），展开后每行一个文件：扩展名着色图标、
+   文件名、目录、±统计、以及「审阅」「打开」两个按钮。 */
 .chgbar{margin:10px 0 2px;border:1px solid var(--line);border-radius:12px;background:color-mix(in srgb,var(--hov) 40%,transparent);font:13px var(--sans);overflow:hidden}
-.chg-r1{display:flex;align-items:center;gap:6px;padding:8px 12px;min-width:0}
+.chg-r1{display:flex;align-items:center;gap:6px;padding:8px 12px;min-width:0;cursor:pointer;user-select:none}
+.chg-cv{flex:none;display:grid;place-items:center;width:16px;height:16px;color:var(--fg2);transition:transform calc(.2s * var(--animd)) var(--qeio)}
+.chg-cv svg{width:12px;height:12px}
+/* chev 本身朝下：收起时转 -90° 朝右，展开后转回朝下 */
+.chg-cv{transform:rotate(-90deg)}
+.chgbar.open .chg-cv{transform:rotate(0deg)}
 .chg-t{display:flex;align-items:center;gap:7px;min-width:0;color:var(--fg);font:600 13px var(--sans)}
 .chg-t b{font-weight:600;white-space:nowrap}
 .chg-names{font:12.5px var(--sans);font-weight:400;color:var(--fg2);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .chg-t .add,.chg-r2 .add{color:#4ade80;font-weight:600}
 .chg-t .del,.chg-r2 .del{color:#f87171;font-weight:600}
-.chg-btn{margin-left:auto;flex:none;font:12.5px var(--sans);border:1px solid var(--line);background:none;color:var(--fg2);padding:3px 11px;border-radius:8px;cursor:pointer;transition:color calc(.2s * var(--animd)),background-color calc(.2s * var(--animd))}
+.chg-btn{flex:none;font:12.5px var(--sans);border:1px solid var(--line);background:none;color:var(--fg2);padding:3px 11px;border-radius:8px;cursor:pointer;transition:color calc(.2s * var(--animd)),background-color calc(.2s * var(--animd))}
 .chg-btn:hover{color:var(--fg);background:var(--hov)}
-.chg-u{display:flex;align-items:center;gap:5px;flex:none;background:none;border:0;color:var(--fg2);font:13px var(--sans);cursor:pointer;padding:3px 9px;border-radius:8px;transition:color calc(.2s * var(--animd)),background-color calc(.2s * var(--animd))}
-.cbu:hover{color:var(--fg);background:var(--hov)}
-.cbu svg{width:14px;height:14px}
+.chg-u{display:flex;align-items:center;gap:5px;flex:none;margin-left:auto;background:none;border:0;color:var(--fg2);font:13px var(--sans);cursor:pointer;padding:3px 9px;border-radius:8px;transition:color calc(.2s * var(--animd)),background-color calc(.2s * var(--animd))}
+.chg-u:hover{color:var(--fg);background:var(--hov)}
+.chg-u svg{width:14px;height:14px}
+/* 逐文件列表：默认收起，展开后按行渲染 */
+/* 展开/收起：0.2s、前慢中快后慢。
+   grid-template-rows 0fr↔1fr 让高度自适应地展开（不必预估 max-height），
+   但 fr→像素的映射不是线性的：把缓动直接加在 fr 上时，实测速度会变成
+   「中段快、收尾更快」的反直觉曲线。所以行容器再加一层 transform，让
+   缓动直接作用在可见位移上；高度过渡只负责把父容器撑开。 */
+.chg-list{display:grid;grid-template-rows:0fr;opacity:0;border-top:1px solid transparent;
+  transition:grid-template-rows calc(.2s * var(--animd)) var(--qeio),
+             opacity calc(.2s * var(--animd)) var(--qeio),
+             border-color calc(.2s * var(--animd)) var(--qeio)}
+.chg-list>.chg-in{overflow:hidden;min-height:0;transform:translateY(-6px);
+  transition:transform calc(.2s * var(--animd)) var(--qeio)}
+.chgbar.open .chg-list{grid-template-rows:1fr;opacity:1;border-top-color:var(--line)}
+.chgbar.open .chg-list>.chg-in{transform:translateY(0)}
+.chg-r2{display:flex;align-items:center;gap:8px;padding:9px 12px;min-width:0;border-top:1px solid color-mix(in srgb,var(--line) 55%,transparent)}
+.chg-r2:first-child{border-top:0}
+.chg-r2:hover{background:color-mix(in srgb,var(--hov) 55%,transparent)}
+.chg-ic{flex:none;display:grid;place-items:center;width:16px;height:16px}
+.chg-ic svg{width:15px;height:15px}
+.chg-nm{font:13px var(--sans);color:var(--fg);white-space:nowrap;flex:none;max-width:190px;overflow:hidden;text-overflow:ellipsis}
+.chg-dir{font:12.5px var(--sans);color:var(--fg2);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.chg-st{flex:none;font:11.5px var(--sans);color:var(--fg2);padding:1px 7px;border-radius:6px;background:var(--hov)}
+.chg-r2 .add,.chg-r2 .del{flex:none;font:12.5px var(--mono)}
+.chg-r2 .chg-btn{padding:3px 10px}
 .chgbar.undone .chg-u{pointer-events:none;opacity:.55;color:var(--fg2)}
 .chgbar.undone .chg-t b{color:var(--fg2);font-weight:500}
 .chgbar .df .ad{background:color-mix(in srgb,#4ade80 12%,transparent)}
@@ -5077,20 +5108,61 @@ function buildChangeBar(ck, sid) {
   const bar = document.createElement('div');
   bar.className = 'chgbar';
   bar.dataset.turn = ck.turn || '';
+  // 逐文件行：图标（按扩展名着色）+ 文件名 + 目录 + 状态 + ±统计 + 操作。
+  // 默认收起，点整行汇总区展开。
+  const fileRows = files.map(f => {
+    const p = String(f.path).replace(/\\/g, '/');
+    const slashAt = p.lastIndexOf('/');
+    const name = p.slice(slashAt + 1);
+    const dir = slashAt >= 0 ? p.slice(0, slashAt + 1) : '';
+    // 状态标签：新建/删除对用户有意义，modified 是常态（有 ± 统计就够），
+    // 不额外占位。
+    const stMap = {
+      created: t('chg_created'),
+      deleted: t('chg_deleted'),
+    };
+    const st = stMap[f.status] || '';
+    const tint = extTint(p);
+    return '<div class="chg-r2" data-path="' + esc(f.path) + '">' +
+      '<span class="chg-ic" style="color:' + tint + '">' + ic('file') + '</span>' +
+      '<span class="chg-nm">' + esc(noEmoji(name)) + '</span>' +
+      '<span class="chg-dir">' + esc(noEmoji(dir)) + '</span>' +
+      (st ? '<span class="chg-st">' + esc(st) + '</span>' : '') +
+      (f.added ? '<span class="add">+' + f.added + '</span>' : '') +
+      (f.removed ? '<span class="del">-' + f.removed + '</span>' : '') +
+      '<button class="chg-btn" data-a="review">' + esc(t('chg_review')) + '</button>' +
+      '<button class="chg-btn" data-a="open">' + esc(t('chg_open')) + '</button>' +
+      '</div>';
+  }).join('');
   bar.innerHTML =
     '<div class="chg-r1">' +
+      '<span class="chg-cv">' + ic('chev') + '</span>' +
       '<span class="chg-t"><b>' + esc(label) + '</b>' +
         '<span class="chg-names">' + esc(noEmoji(names)) + '</span>' +
         (A ? '<span class="add">+' + A + '</span>' : '') +
         (B ? '<span class="del">-' + B + '</span>' : '') + '</span>' +
-      '<button class="chg-btn" data-a="side-review">' + esc(t('chg_review')) + '</button>' +
       '<button class="chg-u" type="button">' + ic('retry') + '<span>' + t('chg_undo') + '</span></button>' +
-    '</div>';
+    '</div>' +
+    '<div class="chg-list"><div class="chg-in">' + fileRows + '</div></div>';
 
-  bar.querySelector('[data-a="side-review"]').onclick = () => {
-    // 审查在侧边栏打开：完整文件内容 + 增减行标记
-    spOpen('changes', { sid: sid, turn: ck.turn });
-  };
+  // 汇总行点一下展开/收起；撤销按钮自己的点击不触发（stopPropagation）
+  bar.querySelector('.chg-r1').onclick = () => bar.classList.toggle('open');
+
+  // 逐文件操作
+  bar.querySelectorAll('.chg-r2').forEach(row => {
+    const path = row.dataset.path || '';
+    row.querySelector('[data-a="review"]').onclick = e => {
+      e.stopPropagation();
+      // 审查在侧边栏打开该文件：完整内容 + 增减行标记
+      spOpen('changes', { sid: sid, turn: ck.turn, path });
+    };
+    row.querySelector('[data-a="open"]').onclick = e => {
+      e.stopPropagation();
+      // 「打开」= 在侧栏文件面板里定位到该文件（不是系统编辑器打开）。
+      // 先用侧栏文件标签打开其所在目录，再让面板自己选中文件。
+      openInFilesPane(path);
+    };
+  });
   const undoBtn = bar.querySelector('.chg-u');
   undoBtn.onclick = async ev => {
     ev.stopPropagation();
@@ -5110,6 +5182,22 @@ function buildChangeBar(ck, sid) {
     }
   };
   return bar;
+}
+
+/**
+ * 在侧栏文件面板里定位到一个文件（改动摘要条的「打开」按钮用它）。
+ *
+ * 面板按目录浏览：先打开文件所在目录，再让文件面板选中该文件。路径统一
+ * 成 `/` 分隔（后端返回 Windows 反斜杠路径，面板用的是前者）。
+ */
+function openInFilesPane(path) {
+  const norm = String(path).replace(/\\/g, '/');
+  const slash = norm.lastIndexOf('/');
+  const dir = slash >= 0 ? norm.slice(0, slash) : '';
+  const tab = spOpen('files', { path: dir });
+  // spFilesOpen 需要目录树就绪后才能选中文件，放到下一帧再调。
+  setTimeout(() => { try { spFilesOpen(tab, norm); } catch (e) { /* 目录还没加载好就算了 */ } }, 60);
+  return tab;
 }
 
 /** turn 收尾后挂摘要条：拉检查点 → 有实际改动才渲染。引用气泡快照，防 resetTurn 竞态。 */
