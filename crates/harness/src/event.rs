@@ -65,21 +65,25 @@ impl EventHub {
     }
 
     pub fn publish(&self, session_id: &str, kind: &str, payload: Value) -> Event {
-        let ev = Event {
-            kind: kind.to_string(),
-            session_id: session_id.to_string(),
-            seq: self.seq.fetch_add(1, Ordering::Relaxed),
-            ts: now_ms(),
-            payload,
-        };
-        // If nobody is listening the send fails; that is fine and expected.
-        let _ = self.tx.send(ev.clone());
-        if let Ok(mut ring) = self.ring.lock() {
+        // B-41：序号分配与入队放在同一把锁内，保证 ring 内事件严格按 seq 升序，
+        // 并发 publish 不会出现「高 seq 先入队、低 seq 后入队」的错位。
+        let ev = {
+            let mut ring = self.ring.lock().unwrap();
+            let ev = Event {
+                kind: kind.to_string(),
+                session_id: session_id.to_string(),
+                seq: self.seq.fetch_add(1, Ordering::Relaxed),
+                ts: now_ms(),
+                payload,
+            };
             if ring.len() == RING_CAP {
                 ring.pop_front();
             }
             ring.push_back(ev.clone());
-        }
+            ev
+        };
+        // If nobody is listening the send fails; that is fine and expected.
+        let _ = self.tx.send(ev.clone());
         ev
     }
 
@@ -93,7 +97,7 @@ impl EventHub {
     /// delivered (duplicates are dropped by the client's `seq` watermark).
     pub fn subscribe_since(&self, since: u64) -> (Vec<Event>, broadcast::Receiver<Event>) {
         let rx = self.tx.subscribe();
-        let backlog = match self.ring.lock() {
+        let mut backlog = match self.ring.lock() {
             Ok(ring) => ring
                 .iter()
                 .filter(|e| e.seq > since)
@@ -106,6 +110,7 @@ impl EventHub {
                 .cloned()
                 .collect(),
         };
+        backlog.sort_by_key(|e| e.seq);
         (backlog, rx)
     }
 

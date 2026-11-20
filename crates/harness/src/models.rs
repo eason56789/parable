@@ -14,6 +14,9 @@ use crate::error::HarnessError;
 use serde::Serialize;
 use serde_json::Value;
 
+/// B-40：模型目录响应体上限 10MB，防异常上游把内存打满。
+const MAX_MODEL_LIST_BYTES: usize = 10 * 1024 * 1024;
+
 /// One model the upstream advertises.
 #[derive(Debug, Clone, Serialize)]
 pub struct UpstreamModel {
@@ -57,19 +60,12 @@ pub async fn list_upstream(cfg: &ProviderConfig) -> Result<Vec<UpstreamModel>, H
     }
 
     // Try each known catalogue endpoint; the first that answers wins.
+    // B-39：key 含非法头部字符时直接报错，不发无鉴权请求。
+    let auth = bearer(&cfg.key)?;
     let candidates: Vec<(String, reqwest::header::HeaderMap)> = vec![
-        (
-            format!("{base}/v1/models"),
-            bearer(&cfg.key),
-        ),
-        (
-            format!("{base}/api/tags"),
-            bearer(&cfg.key),
-        ),
-        (
-            format!("{base}/models"),
-            bearer(&cfg.key),
-        ),
+        (format!("{base}/v1/models"), auth.clone()),
+        (format!("{base}/api/tags"), auth.clone()),
+        (format!("{base}/models"), auth),
     ];
 
     let mut last_err = String::new();
@@ -77,7 +73,12 @@ pub async fn list_upstream(cfg: &ProviderConfig) -> Result<Vec<UpstreamModel>, H
         match client.get(&url).headers(headers).send().await {
             Ok(resp) => {
                 let status = resp.status();
-                let text = resp.text().await.unwrap_or_default();
+                let bytes = resp.bytes().await.unwrap_or_default();
+                if bytes.len() > MAX_MODEL_LIST_BYTES {
+                    last_err = format!("response too large ({} bytes)", bytes.len());
+                    continue;
+                }
+                let text = String::from_utf8_lossy(&bytes).into_owned();
                 if !status.is_success() {
                     last_err = format!("HTTP {status}");
                     continue;
@@ -101,16 +102,16 @@ pub async fn list_upstream(cfg: &ProviderConfig) -> Result<Vec<UpstreamModel>, H
     )))
 }
 
-fn bearer(key: &str) -> reqwest::header::HeaderMap {
+fn bearer(key: &str) -> Result<reqwest::header::HeaderMap, HarnessError> {
     let mut h = reqwest::header::HeaderMap::new();
-    h.insert(
-        "authorization",
-        format!("Bearer {key}")
-            .parse()
-            .unwrap_or_else(|_| reqwest::header::HeaderValue::from_static("")),
-    );
+    let value = format!("Bearer {key}")
+        .parse::<reqwest::header::HeaderValue>()
+        .map_err(|_| {
+            HarnessError::Config("API Key 含非法头部字符，无法构造 Authorization".into())
+        })?;
+    h.insert("authorization", value);
     h.insert("content-type", reqwest::header::HeaderValue::from_static("application/json"));
-    h
+    Ok(h)
 }
 
 /// Parse the shapes providers use for their catalogue.

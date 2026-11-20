@@ -399,6 +399,7 @@ impl CheckpointStore {
         let apply_result: Result<(), HarnessError> = (|| {
             for (i, f) in m.files.iter().enumerate() {
                 let cur = Path::new(&f.path);
+                Self::refuse_symlink(cur)?;
                 if f.existed {
                     let bytes = staged[i].clone().unwrap_or_default();
                     // 文件可能被整目录删除过：先把父目录补回来再原子写。
@@ -428,6 +429,10 @@ impl CheckpointStore {
             // 补偿恢复：已写条目按备份回退；原本不存在的文件删除。
             for &i in &touched_idx {
                 let cur = Path::new(&m.files[i].path);
+                if Self::refuse_symlink(cur).is_err() {
+                    tracing::warn!("checkpoint: 跳过符号链接回退 {}", cur.display());
+                    continue;
+                }
                 match &backups[i] {
                     Some(bak) => {
                         if let Ok(bytes) = std::fs::read(bak) {
@@ -447,6 +452,17 @@ impl CheckpointStore {
         // 备份成功即留在盘上，由 prune 随 turn 目录一起清理。
         let touched: Vec<String> = touched_idx.iter().map(|&i| m.files[i].path.clone()).collect();
         Ok(touched)
+    }
+
+    /// B-33：写/删前确认目标不是符号链接，避免回退内容跟随链接写到工作区外。
+    fn refuse_symlink(p: &Path) -> Result<(), HarnessError> {
+        match std::fs::symlink_metadata(p) {
+            Ok(md) if md.file_type().is_symlink() => Err(HarnessError::Tool(format!(
+                "checkpoint: 目标 {} 是符号链接，拒绝跟随",
+                p.display()
+            ))),
+            _ => Ok(()),
+        }
     }
 
     /// 只保留最近 `keep` 个 turn 的检查点，其余（含损坏目录）删除。
@@ -473,8 +489,16 @@ impl CheckpointStore {
         }
         // 按 ts 新→旧排；损坏目录（u64::MAX）排最后，优先被清。
         turns.sort_by(|a, b| b.0.cmp(&a.0));
+        // B-35：单个旧轮次删除失败不中断后续清理，收集错误最后统一返回。
+        let mut errs: Vec<std::io::Error> = Vec::new();
         for (_, dir) in turns.into_iter().skip(keep) {
-            std::fs::remove_dir_all(&dir)?;
+            if let Err(e) = std::fs::remove_dir_all(&dir) {
+                tracing::warn!("checkpoint prune: 删除 {} 失败: {e}", dir.display());
+                errs.push(e);
+            }
+        }
+        if let Some(e) = errs.into_iter().last() {
+            return Err(HarnessError::Io(e));
         }
         Ok(())
     }

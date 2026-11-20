@@ -808,7 +808,7 @@ fn create_xlsx_file(
             total_rows += 1;
             let row_no = r as u32;
             for (c, cell) in row.iter().enumerate() {
-                xlsx_write_cell(ws, row_no, c as u16, cell)?;
+                xlsx_write_cell(ws, row_no, c as u32, cell)?;
             }
         }
     }
@@ -822,22 +822,24 @@ fn create_xlsx_file(
 fn xlsx_write_cell(
     ws: &mut rust_xlsxwriter::Worksheet,
     r: u32,
-    c: u16,
+    c: u32,
     v: &Value,
 ) -> Result<(), HarnessError> {
-    if r >= XLSX_MAX_ROWS || c as u32 >= XLSX_MAX_COLS {
+    // B-14：先按 u32 比上限，通过后再收窄 u16，避免超列回绕到小值骗过检查。
+    if r >= XLSX_MAX_ROWS || c >= XLSX_MAX_COLS {
         return Err(HarnessError::Tool(format!(
             "单元格 ({r},{c}) 超出 Excel 网格上限（{XLSX_MAX_ROWS} 行 × {XLSX_MAX_COLS} 列）"
         )));
     }
+    let c16 = c as u16;
     let res = match v {
         // 空串/Null 跳过——写进 Excel 只会撑大文件
         Value::Null => Ok(()),
         Value::String(s) if s.is_empty() => Ok(()),
-        Value::Bool(b) => ws.write_boolean(r, c, *b).map(|_| ()),
-        Value::Number(n) => ws.write_number(r, c, n.as_f64().unwrap_or(0.0)).map(|_| ()),
-        Value::String(s) => ws.write_string(r, c, s.as_str()).map(|_| ()),
-        other => ws.write_string(r, c, other.to_string()).map(|_| ()),
+        Value::Bool(b) => ws.write_boolean(r, c16, *b).map(|_| ()),
+        Value::Number(n) => ws.write_number(r, c16, n.as_f64().unwrap_or(0.0)).map(|_| ()),
+        Value::String(s) => ws.write_string(r, c16, s.as_str()).map(|_| ()),
+        other => ws.write_string(r, c16, other.to_string()).map(|_| ()),
     };
     res.map_err(|e| HarnessError::Tool(format!("写入单元格 ({r},{c}) 失败: {e}")))
 }
@@ -1368,6 +1370,13 @@ fn xlsx_apply_op(book: &mut umya_spreadsheet::Spreadsheet, op: &Value) -> Result
                 let names = sheet_names_of(&book);
                 return Err(HarnessError::Tool(format!(
                     "工作表 `{from}` 不存在。现有表：{names}"
+                )));
+            }
+            // B-15：目标名不得与其他工作表重名（umya 不校验时我们自己把守）。
+            if book.get_sheet_by_name(to).is_some() {
+                let names = sheet_names_of(&book);
+                return Err(HarnessError::Tool(format!(
+                    "工作表 `{to}` 已存在。现有表：{names}"
                 )));
             }
             let ws = book.get_sheet_by_name_mut(from).unwrap();
@@ -2141,9 +2150,8 @@ pub async fn doc_create(a: &Value, ctx: &super::tools::ToolCtx) -> Result<super:
             path.display()
         )));
     }
-    let exists = path.exists();
-    let risk = if exists { crate::permission::Risk::Destructive } else { crate::permission::Risk::Write };
-    ctx.authorize("doc_create", &path.to_string_lossy(), risk).await?;
+    // 走到这里文件必然不存在，按 Write 授权；TOCTOU 竞态由写盘前的路径复核兜底。
+    ctx.authorize("doc_create", &path.to_string_lossy(), crate::permission::Risk::Write).await?;
     let ext = ext_of(&path).unwrap_or_default();
     let rel = rel_display(&ctx.workspace, &path);
     let (label, summary) = match ext.as_str() {
@@ -2598,11 +2606,9 @@ mod tests {
         assert!(text.contains("## 月度"));
         assert!(!text.contains("## 汇总"));
 
-        // rename 到已存在的名字
+        // rename 到已存在的名字：B-15 由后端预检拒绝。
         let ops = json!([{"op": "rename_sheet", "from": "月度", "to": "新增"}]);
-        // umya set_name 可能允许重名——这里我们自己把守：当前实现依赖 umya 校验，
-        // 若 umya 放行则至少不能崩
-        let _ = edit_xlsx_file(&p, &ops);
+        assert!(edit_xlsx_file(&p, &ops).is_err(), "重名工作表应被拒绝");
     }
 
     // ---------- pptx ----------

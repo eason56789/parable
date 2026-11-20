@@ -63,7 +63,33 @@ fn short_id() -> String {
     format!("term_{}", &raw[..10])
 }
 
+/// B-37：剥离子进程输出里的 ANSI 转义序列与 C0/C1 控制字符（仅保留 `\n`、`\t`），
+/// 避免终端模拟器被注入光标移动/清屏/OSC 链接等序列。
+fn sanitize_controls(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut skip_seq = false;
+    for c in s.chars() {
+        if skip_seq {
+            let code = c as u32;
+            // CSI/转义序列以 0x40–0x7E 的终结字节结束。
+            if (0x40..=0x7E).contains(&code) {
+                skip_seq = false;
+            }
+            continue;
+        }
+        let code = c as u32;
+        match c {
+            '\u{1B}' => skip_seq = true,
+            '\n' | '\t' => out.push(c),
+            c if code < 0x20 || c == '\u{7F}' || (0x80..=0x9F).contains(&code) => {}
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 fn tail(s: &str) -> String {
+    let s = sanitize_controls(s);
     if s.chars().count() <= MAX_TAIL {
         return s.to_string();
     }
@@ -135,14 +161,16 @@ impl TerminalRegistry {
     async fn finish(&self, id: &str, exit: i32, output: String, ok: bool) {
         let mut inner = self.inner.lock().await;
         inner.handles.remove(id);
-        if let Some(job) = inner.jobs.get_mut(id) {
-            if job.status != "killed" {
-                job.status = "exited".into();
-            }
-            job.exit = Some(exit);
-            job.ended_at = Some(now_ms());
-            job.output = tail(&output);
+        let Some(job) = inner.jobs.get_mut(id) else { return };
+        // B-38：已被 kill 的任务保留 killed 状态与 kill 事件，不被事后退出覆盖。
+        if job.status == "killed" {
+            return;
         }
+        job.status = "exited".into();
+        job.exit = Some(exit);
+        job.ended_at = Some(now_ms());
+        job.output = tail(&output);
+        let _ = ok;
     }
 
     /// Abort a running job. The shell tool's child is `kill_on_drop`, so
@@ -224,6 +252,19 @@ mod tests {
         let t = tail(&long);
         assert_eq!(t.chars().count(), MAX_TAIL);
         assert!(t.ends_with('答'));
+    }
+
+    #[test]
+    fn tail_strips_ansi_and_control_chars() {
+        let raw = "正常输出\u{1B}[31m红色\u{1B}[0m\n下一行\r\0\u{07}";
+        let t = tail(raw);
+        assert!(!t.contains('\u{1B}'));
+        assert!(!t.contains('\r'));
+        assert!(!t.contains('\0'));
+        assert!(!t.contains('\u{07}'));
+        assert!(t.contains("正常输出"));
+        assert!(t.contains("红色"));
+        assert!(t.contains('\n'));
     }
 
     #[tokio::test]

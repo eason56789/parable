@@ -1834,7 +1834,7 @@ pub async fn tabs(a: &Value, ctx: &super::tools::ToolCtx) -> Result<super::tools
             let tabs = bridge.list_tabs().await?;
             let hit = match (idx, tid) {
                 (Some(i), _) => tabs.iter().find(|(_, n, ..)| *n == i as usize),
-                (_, Some(t)) => tabs.iter().find(|(id, ..)| id.starts_with(t.as_str())),
+                (_, Some(t)) => tabs.iter().find(|(id, ..)| id.as_str() == t.as_str()),
                 _ => None,
             };
             let Some((id, _, title, url, _)) = hit else {
@@ -1851,7 +1851,7 @@ pub async fn tabs(a: &Value, ctx: &super::tools::ToolCtx) -> Result<super::tools
             let tabs = bridge.list_tabs().await?;
             let hit = match (idx, tid) {
                 (Some(i), _) => tabs.iter().find(|(_, n, ..)| *n == i as usize),
-                (_, Some(t)) => tabs.iter().find(|(id, ..)| id.starts_with(t.as_str())),
+                (_, Some(t)) => tabs.iter().find(|(id, ..)| id.as_str() == t.as_str()),
                 _ => None,
             };
             let Some((id, _, title, _, _)) = hit else {

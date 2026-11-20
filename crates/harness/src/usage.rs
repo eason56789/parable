@@ -84,8 +84,13 @@ fn one() -> u64 {
 impl UsageRecord {
     /// Total tokens attributed to this record.
     pub fn total(&self) -> u64 {
-        self.input_tokens + self.output_tokens + self.cache_read + self.cache_write
-    }}
+        // B-31：饱和求和，release 下不回绕、debug 下不溢出 panic。
+        self.input_tokens
+            .saturating_add(self.output_tokens)
+            .saturating_add(self.cache_read)
+            .saturating_add(self.cache_write)
+    }
+}
 
 /// Number of weeks shown in the heatmap (a GitHub-style year view).
 const HEATMAP_WEEKS: usize = 53;
