@@ -10693,7 +10693,8 @@ function panel() {
             '<button class="abt-btn" data-opweb>' + ic('globe') + '<span>' + t('srv_open') + '</span></button>' +
             '<button class="abt-btn" data-srvstop>' + ic('stop') + '<span>' + t('srv_stop') + '</span></button>' +
           '</div>' +
-          '<div class="abt-note" id="srv-meta"></div>';
+          '<div class="abt-note" id="srv-meta"></div>' +
+          '<div class="abt-note" style="color:var(--danger-text)">' + (S.lang === 'zh' ? '链接含本机访问凭证，请勿转发到其他设备或截图外发。' : 'This link carries a local access token — do not share it or screenshot it.') + '</div>';
         const meta = ct.querySelector('#srv-meta');
         // /status 给的是 uptimeMs（服务已运行的毫秒数），不是启动时间戳。
         // 旧代码读 st.started_at → undefined → 回退成 Date.now()，差值恒为 0，
@@ -12642,63 +12643,156 @@ function dkInit() {
 }
 
 let esRetry = 0;
+
+/**
+ * 自建 SSE 客户端（fetch + ReadableStream）。
+ *
+ * 旧实现用 EventSource：它不能自定义请求头，只能把 token 拼进 query 串，
+ * 凭证会留在 URL、访问日志与浏览器历史里。这里改用 fetch 流式读取，凭证
+ * 走 X-Parable-Token 请求头，query 只带断线补发用的 since 游标。
+ *
+ * 对外暴露与 EventSource 兼容的最小接口：close() / readyState
+ * （0=连接中 1=已打开 2=已关闭），既有 ensureEvents 等引用不用改。
+ * 既有行为保持不退化：断线退避重连、since 补发、seq 水位去重（dispatch 内）、
+ * 事件按到达顺序逐帧派发。
+ */
+function createEventStream(url, handlers) {
+  const ctrl = typeof AbortController === 'function' ? new AbortController() : null;
+  const client = { readyState: 0, closed: false, close: close };
+  let reader = null;
+  let buf = '';
+  let badRun = 0;
+  const decoder = new TextDecoder();
+
+  function close() {
+    client.closed = true;
+    client.readyState = 2;
+    try { if (ctrl) ctrl.abort(); } catch (e) {}
+    if (reader) { try { reader.cancel(); } catch (e) {} reader = null; }
+  }
+
+  function handleFrame(frame) {
+    if (!frame) return;
+    const dataLines = [];
+    for (const rawLine of frame.split('\n')) {
+      const line = rawLine.replace(/\r$/, '');
+      if (!line || line[0] === ':') continue;            // 空行 / 注释（keepalive）
+      if (line.startsWith('data:')) dataLines.push(line.slice(5).replace(/^ /, ''));
+      // event: / id: / retry: 现有后端不使用，忽略
+    }
+    if (!dataLines.length) return;
+    const raw = dataLines.join('\n');
+    let ev;
+    try {
+      ev = JSON.parse(raw);
+    } catch (err) {
+      // B-02：坏帧不再静默吞掉。连续 5 帧解析失败提示一次；
+      // 原始帧只留最后一条在内存（不写日志、不附带 token）。
+      badRun++;
+      client.lastBadRaw = raw.slice(0, 500);
+      if (badRun >= 5) { try { handlers.onbad && handlers.onbad(); } catch (e) {} }
+      return;
+    }
+    badRun = 0;
+    try { handlers.onmessage && handlers.onmessage(ev); } catch (err) {}
+  }
+
+  (async () => {
+    try {
+      const res = await fetch(url, {
+        headers: { 'X-Parable-Token': TOKEN },
+        signal: ctrl ? ctrl.signal : undefined,
+        cache: 'no-store',
+      });
+      if (client.closed) { close(); return; }
+      if (!res.ok || !res.body) throw new Error('HTTP ' + res.status);
+      client.readyState = 1;
+      try { handlers.onopen && handlers.onopen(); } catch (e) {}
+      reader = res.body.getReader();
+      for (;;) {
+        const r = await reader.read();
+        if (r.done) break;
+        buf += decoder.decode(r.value, { stream: true });
+        let idx;
+        while ((idx = buf.indexOf('\n\n')) >= 0) {
+          handleFrame(buf.slice(0, idx));
+          buf = buf.slice(idx + 2);
+        }
+      }
+      // 流被对端关闭：交给上层按断线处理（退避重连）。
+      if (!client.closed) { try { handlers.onerror && handlers.onerror(); } catch (e) {} }
+    } catch (e) {
+      if (!client.closed) { try { handlers.onerror && handlers.onerror(e); } catch (e2) {} }
+    }
+  })();
+
+  return client;
+}
+
 function connectEvents() {
-  if (es) { try { es.close(); } catch (e) {} }
+  if (es && es.close) { try { es.close(); } catch (e) {} }
   // 带上已收到的最大 seq：服务端会先把断线期间的事件补发一遍，再进实时流。
   // 没有这一步，断线时丢掉的 turn.end 就永远回不来，界面停在「思考中」。
-  const since = lastSeq > 0 ? '&since=' + lastSeq : '';
-  es = new EventSource('/api/events?token=' + encodeURIComponent(TOKEN) + since);
-  es.onmessage = e => {
-    disarmBusyWatchdog();
-    try { dispatch(JSON.parse(e.data)); } catch (err) {}
-  };
-  es.onopen = () => {
-    // 重连成功。seq 水位不再清零：回放事件就是靠它去重的，清零会把断线
-    // 期间补发的事件重复执行一遍。服务端重启（seq 重新从 1 开始）由 hello
-    // 的 latest 字段检测后复位。
-    esRetry = 0;
-    connectEvents.warned = false;
-    loadServerStatus();
-    restorePending();
-    if (busy && conv && conv.id) {
-      if (!INFLIGHT[conv.id]) {
-        busy = false;
-        stopSpin(curA);
-        sync();
-        // 不在途却断过连：以存储校正一次收尾视图
-        reconcileTail();
-      } else {
-        // INFLIGHT 还挂着：turn 可能在断连期间已结束。挂看门狗兜底；
-        // turn 真还在跑时不动 DOM（reconcileTail 会拆掉在途流式节点）。
-        disarmBusyWatchdog();
-        busyWatchdog = setTimeout(() => {
-          busyWatchdog = null;
-          if (busy) {
-            busy = false;
-            stopSpin(curA);
-            sync();
-            reconcileTail();
-          }
-        }, 15000);
+  const qs = lastSeq > 0 ? '?since=' + lastSeq : '';
+  es = createEventStream('/api/events' + qs, {
+    onmessage(ev) {
+      disarmBusyWatchdog();
+      try { dispatch(ev); } catch (err) {}
+    },
+    onopen() {
+      // 重连成功。seq 水位不再清零：回放事件就是靠它去重的，清零会把断线
+      // 期间补发的事件重复执行一遍。服务端重启（seq 重新从 1 开始）由 hello
+      // 的 latest 字段检测后复位。
+      esRetry = 0;
+      connectEvents.warned = false;
+      loadServerStatus();
+      restorePending();
+      if (busy && conv && conv.id) {
+        if (!INFLIGHT[conv.id]) {
+          busy = false;
+          stopSpin(curA);
+          sync();
+          // 不在途却断过连：以存储校正一次收尾视图
+          reconcileTail();
+        } else {
+          // INFLIGHT 还挂着：turn 可能在断连期间已结束。挂看门狗兜底；
+          // turn 真还在跑时不动 DOM（reconcileTail 会拆掉在途流式节点）。
+          disarmBusyWatchdog();
+          busyWatchdog = setTimeout(() => {
+            busyWatchdog = null;
+            if (busy) {
+              busy = false;
+              stopSpin(curA);
+              sync();
+              reconcileTail();
+            }
+          }, 15000);
+        }
       }
+    },
+    onbad() {
+      if (!connectEvents.badWarned) {
+        connectEvents.badWarned = true;
+        toast(document.documentElement.lang === 'zh-CN'
+          ? '收到无法解析的事件，正在重连' : 'Unparseable events received, reconnecting');
+      }
+    },
+    onerror() {
+      if (!connectEvents.warned) {
+        connectEvents.warned = true;
+        toast(t('conn_lost'));
+      }
+      setTimeout(() => { connectEvents.warned = false; connectEvents.badWarned = false; }, 4000);
+      // 自己接管重连：只有重建连接才能把新的 since 带上去。退避到
+      // 最多 6 秒，避免服务端刚重启时的重连风暴。
+      if (es && es.close) { try { es.close(); } catch (e) {} }
+      esRetry = Math.min(esRetry + 1, 6);
+      clearTimeout(connectEvents.timer);
+      // 不再判断 document.hidden：隐藏标签页里断线后如果跳过重连，就再也没
+      // 有路径把它接回来，切回前台会永久停在断线状态。
+      connectEvents.timer = setTimeout(connectEvents, 1000 * esRetry);
     }
-  };
-  es.onerror = () => {
-    // EventSource reconnects on its own; surface it once.
-    if (!connectEvents.warned) {
-      connectEvents.warned = true;
-      toast(t('conn_lost'));
-    }
-    setTimeout(() => { connectEvents.warned = false; }, 4000);
-    // 自己接管重连：只有重建 EventSource 才能把新的 since 带上去。退避到
-    // 最多 6 秒，避免服务端刚重启时的重连风暴。
-    try { es.close(); } catch (e) {}
-    esRetry = Math.min(esRetry + 1, 6);
-    clearTimeout(connectEvents.timer);
-    // 不再判断 document.hidden：隐藏标签页里断线后如果跳过重连，就再也没
-    // 有路径把它接回来，切回前台会永久停在断线状态。
-    connectEvents.timer = setTimeout(connectEvents, 1000 * esRetry);
-  };
+  });
 }
 
 /** 页面回到前台/获得焦点时，如果连接已关闭就立刻重建。 */
@@ -12955,8 +13049,13 @@ function spClose(id) {
   if (tab.st && tab.st.cleanup) { try { tab.st.cleanup(); } catch (e) {} }
   // 侧聊关掉后不再收到 turn.end：必须自己清计时器并中断服务端那一轮，
   // 否则 1s 定时器永久空转、后端还在继续烧 token。
-  if (tab.kind === 'sidechat' && tab.st) {
+  if (tab.st) {
     if (tab.st.wkt) { clearInterval(tab.st.wkt); tab.st.wkt = 0; }
+    // 内置浏览器的 3s 实况轮询同样要注销：标签关掉后没人再把它清掉，
+    // 残留至多一个周期空转（B-06）。
+    if (tab.st.poll) { clearInterval(tab.st.poll); tab.st.poll = 0; }
+  }
+  if (tab.kind === 'sidechat' && tab.st) {
     if (tab.st.streaming && tab.st.sid) {
       api('/interrupt', { method: 'POST', body: { session_id: tab.st.sid } }).catch(() => {});
     }
@@ -13248,6 +13347,41 @@ async function spRenderReview(host, tab) {
     '<div class="spgit" id="spg-list"></div><div id="spg-diff"></div>';
   host.querySelector('#spg-ref').onclick = () => spRenderReview(host, tab);
   const list = host.querySelector('#spg-list');
+  const box = host.querySelector('#spg-diff');
+  const branch = host.querySelector('#spg-branch');
+  const zh = S.lang === 'zh';
+
+  // 1) 优先聚合当前会话 checkpoints 已落盘的文件改动（既有 /sessions/:id/checkpoints
+  //    数据，按目录分组、逐文件展开 checkpoint-diff；本次不新增后端路由）。
+  if (conv && conv.id) {
+    let sessionFiles = [];
+    try {
+      const r = await api('/sessions/' + conv.id + '/checkpoints');
+      if (SP.active !== tab.id) return;
+      const byPath = new Map();
+      (r.checkpoints || []).forEach(c => {
+        (c.files || []).forEach(f => {
+          if (f.status === 'unchanged' || f.status === 'gone') return;
+          const norm = String(f.path).replace(/\\/g, '/');
+          const prev = byPath.get(norm);
+          byPath.set(norm, {
+            path: norm, status: f.status, turn: c.turn,
+            added: (prev ? prev.added : 0) + (f.added || 0),
+            removed: (prev ? prev.removed : 0) + (f.removed || 0),
+          });
+        });
+      });
+      sessionFiles = [...byPath.values()];
+    } catch (e) { sessionFiles = []; }
+
+    if (sessionFiles.length) {
+      if (branch) branch.textContent = conv.title || conv.id;
+      paintReviewTree(list, box, tab, sessionFiles);
+      return;
+    }
+  }
+
+  // 2) 降级：git 工作区状态（既有 /git/status + /git/diff）；都没有时空态。
   list.innerHTML = '<div class="spempty">…</div>';
   let res;
   try {
@@ -13258,7 +13392,6 @@ async function spRenderReview(host, tab) {
   }
   const st = res.status || {};
   if (SP.active !== tab.id) return;
-  const branch = host.querySelector('#spg-branch');
   if (branch) branch.textContent = st.is_repo ? st.branch : '';
   if (!st.is_repo) {
     list.innerHTML = '<div class="spempty">' + esc(t('sp_not_repo')) + '</div>';
@@ -13279,6 +13412,67 @@ async function spRenderReview(host, tab) {
   list.querySelectorAll('[data-spgp]').forEach(r => {
     r.onclick = () => spGitDiff(tab, r.dataset.spgp);
   });
+}
+
+/** 会话变更文件树：按父目录分组，逐文件点击展开 checkpoint-diff。 */
+function paintReviewTree(list, box, tab, files) {
+  const zh = S.lang === 'zh';
+  const dirs = new Map();
+  files.forEach(f => {
+    const idx = f.path.lastIndexOf('/');
+    const dir = idx > 0 ? f.path.slice(0, idx) : '.';
+    if (!dirs.has(dir)) dirs.set(dir, []);
+    dirs.get(dir).push(f);
+  });
+  const totalA = files.reduce((s, f) => s + (f.added || 0), 0);
+  const totalD = files.reduce((s, f) => s + (f.removed || 0), 0);
+  const stLetter = f => ({ created: 'A', modified: 'M', deleted: 'D' }[f.status] || 'M');
+  list.innerHTML = '<div class="spg-sum">' +
+    esc((zh ? '本次会话 ' : 'Session ') + files.length + (zh ? ' 个文件变更' : ' files') + ' · +' + totalA + ' −' + totalD) +
+    '</div>' + [...dirs.keys()].sort().map(dir => {
+      const rows = dirs.get(dir).sort((a, b) => a.path.localeCompare(b.path)).map(f => {
+        const nm = f.path.slice(f.path.lastIndexOf('/') + 1);
+        return '<div class="spgf mod" data-rvp="' + esc(f.path) + '" data-rvt="' + f.turn + '">' +
+          '<span class="chg-st">' + stLetter(f) + '</span>' +
+          '<span class="nm">' + esc(nm) + '</span>' +
+          (f.added ? '<span class="add">+' + f.added + '</span>' : '') +
+          (f.removed ? '<span class="del">-' + f.removed + '</span>' : '') +
+          '</div>';
+      }).join('');
+      return '<div class="spg-dir"><div class="spg-dirh">▸ ' + esc(dir) + '</div><div class="spg-rows">' + rows + '</div></div>';
+    }).join('');
+  list.querySelectorAll('.spg-dirh').forEach(h => {
+    h.onclick = () => h.parentElement.classList.toggle('closed');
+  });
+  list.querySelectorAll('[data-rvp]').forEach(r => {
+    r.onclick = () => {
+      list.querySelectorAll('[data-rvp]').forEach(x => x.classList.remove('on'));
+      r.classList.add('on');
+      reviewCheckpointDiff(box, tab, r.dataset.rvt, r.dataset.rvp);
+    };
+  });
+}
+
+/** 展开某文件的 checkpoint 行级 diff（复用既有 checkpoint-diff 接口）。 */
+async function reviewCheckpointDiff(box, tab, turn, path) {
+  if (!conv || !conv.id) return;
+  box.innerHTML = '<div class="spempty">…</div>';
+  let d;
+  try {
+    d = await api('/sessions/' + conv.id + '/checkpoint-diff?full=1&turn=' +
+      encodeURIComponent(turn) + '&path=' + encodeURIComponent(path));
+  } catch (e) {
+    box.innerHTML = '<div class="spempty">' + esc(e.message) + '</div>';
+    return;
+  }
+  if (SP.active !== tab.id) return;
+  box.innerHTML = '<div class="spdiff"><div class="hh">' + esc(path) + ' · +' + d.added + ' -' + d.removed + '</div>' +
+    (d.lines || []).map(l => {
+      const cls = l.sign === '+' ? 'p' : l.sign === '-' ? 'm' : '';
+      const no = l.new_no != null ? l.new_no : (l.old_no != null ? l.old_no : '');
+      return '<div class="dl ' + cls + ' nowrap">' +
+        '<span class="sg">' + esc(l.sign) + '</span><span class="no">' + no + '</span><span>' + esc(l.text) + '</span></div>';
+    }).join('') + '</div>';
 }
 
 async function spGitDiff(tab, path) {
@@ -14933,16 +15127,40 @@ function spOnEvent(ev) {
     if (root.tagName === 'SELECT') enhance(root);
   }
 
-  // 新增节点里的未增强 select；被移除的包装节点连带清理挂在 body 的浮层
+  // 无障碍兜底：图标按钮补 aria-label（取 title/可见文本），svg 标记 aria-hidden，
+  // 开关补 aria-pressed。静态与后续动态插入的按钮都走这里（D-09）。
+  function polishA11y(root) {
+    if (!root || !root.querySelectorAll) return;
+    root.querySelectorAll('button').forEach(function(b){
+      if (!b.hasAttribute('aria-label')) {
+        var txt = (b.textContent || '').trim();
+        if (!txt) {
+          var lab = b.getAttribute('title') || '';
+          if (lab) b.setAttribute('aria-label', lab);
+        }
+      }
+      b.querySelectorAll('svg').forEach(function(s){
+        if (!s.hasAttribute('aria-hidden')) s.setAttribute('aria-hidden', 'true');
+      });
+      if (b.classList.contains('tg')) b.setAttribute('aria-pressed', b.classList.contains('on') ? 'true' : 'false');
+    });
+  }
+  polishA11y(document);
+
+  // 新增节点里的未增强 select；被移除的包装节点连带清理挂在 body 的浮层。
+  // 会话消息流（#feed）里从不出现 select：流式追加/工具卡片插入全部跳过，
+  // 避免每帧 DOM 变更都触发一遍 select 选择器扫描（B-05）。
+  var inFeed = function(n){ return n.closest && n.closest('#feed'); };
   var obs = new MutationObserver(function(muts){
     muts.forEach(function(m){
       Array.prototype.slice.call(m.addedNodes).forEach(function(n){
-        if (n.nodeType !== 1) return;
+        if (n.nodeType !== 1 || inFeed(n)) return;
         if (n.tagName === 'SELECT') enhance(n);
         if (n.querySelectorAll) n.querySelectorAll('select').forEach(enhance);
+        polishA11y(n);
       });
       Array.prototype.slice.call(m.removedNodes).forEach(function(n){
-        if (n.nodeType !== 1) return;
+        if (n.nodeType !== 1 || inFeed(n)) return;
         var wraps = n.querySelectorAll ? n.querySelectorAll('.selx') : [];
         Array.prototype.slice.call(wraps).forEach(function(ww){ if (ww._pop) ww._pop.remove(); });
         if (n.matches && n.matches('.selx') && n._pop) n._pop.remove();
