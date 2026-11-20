@@ -104,7 +104,10 @@ body.sc #side{width:0}body.sc #sin{opacity:0}
 #mh{position:absolute;top:0;left:0;right:0;height:46px;display:flex;align-items:center;justify-content:center;gap:4px;z-index:2;opacity:0;transition:opacity calc(.5s * var(--animd));pointer-events:none}
 #ttl{max-width:50%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:500}
 body.chat #mh{opacity:1}
-#chat{position:absolute;inset:0;overflow-y:auto;padding:56px 20px calc(var(--ch,150px) + 8px);opacity:0;pointer-events:none;transition:opacity calc(.6s * var(--animd))}
+/* 滚动条槽位常驻（both-edges）：内容从"放得下"变成"放不下"时不再因为
+   多出 10px 滚动条把居中正文列整体左移 5px。用 both-edges 而不是只留
+   右侧，是为了让左右留白始终对称——只在右侧留槽会让正文看起来偏左 5px。 */
+#chat{position:absolute;inset:0;overflow-y:auto;scrollbar-gutter:stable both-edges;padding:56px 20px calc(var(--ch,150px) + 8px);opacity:0;pointer-events:none;transition:opacity calc(.6s * var(--animd))}
 body.chat #chat{opacity:1;pointer-events:auto}
 /* 顶部渐隐蒙版：滚到标题下方的内容渐渐模糊、变暗融入背景，不再硬切 */
 #main::after{content:'';position:absolute;top:0;left:0;right:0;height:52px;z-index:1;pointer-events:none;
