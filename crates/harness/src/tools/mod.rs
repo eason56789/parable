@@ -2423,7 +2423,8 @@ you cannot switch models yourself.",
 
             "agent_interrupt" => {
                 let id = a["id"].as_str().unwrap_or("");
-                let ok = sub.interrupt(id).await;
+                let root = self.team_root(&sub, &ctx.session_id).await;
+                let ok = sub.interrupt(&root, id).await;
                 Ok(ToolOutcome::text(
                     ok,
                     if ok { format!("Stopped {id}") } else { format!("{id} is not running") },
@@ -2492,7 +2493,15 @@ you cannot switch models yourself.",
         };
         match name {
             "team_task_create" => {
-                let (root, mut state) = self.team_board(&sub, ctx).await?;
+                let root = self.team_root(&sub, &ctx.session_id).await;
+                // T-01：整板读-改-写放在 per-root 锁内。
+                let board_lock = ctx.store.team_lock(&root).await;
+                let _guard = board_lock.lock().await;
+                let mut state = ctx
+                    .store
+                    .get_team(&root)
+                    .await
+                    .ok_or_else(|| HarnessError::Other("agent teams are not enabled for this session".into()))?;
                 ctx.authorize("team_task_create", &root, Risk::Write).await?;
                 let caller = self.team_caller(&sub, ctx, &root).await;
                 let req = crate::team::CreateTask {
@@ -2616,7 +2625,15 @@ you cannot switch models yourself.",
             }
 
             "team_task_update" => {
-                let (root, mut state) = self.team_board(&sub, ctx).await?;
+                let root = self.team_root(&sub, &ctx.session_id).await;
+                // T-01：整板读-改-写放在 per-root 锁内。
+                let board_lock = ctx.store.team_lock(&root).await;
+                let _guard = board_lock.lock().await;
+                let mut state = ctx
+                    .store
+                    .get_team(&root)
+                    .await
+                    .ok_or_else(|| HarnessError::Other("agent teams are not enabled for this session".into()))?;
                 ctx.authorize("team_task_update", &root, Risk::Write).await?;
                 let caller = self.team_caller(&sub, ctx, &root).await;
                 let action = a["action"].as_str().unwrap_or("");

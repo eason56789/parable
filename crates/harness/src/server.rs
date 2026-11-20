@@ -2991,7 +2991,14 @@ async fn interrupt_agent(
     if !check_auth(&headers, None, &state) {
         return unauthorized();
     }
-    let ok = state.subagents.interrupt(&id).await;
+    // 面板请求不带调用方会话：先查出子代理所属根，再在其子树内中断。
+    let root = state
+        .subagents
+        .resolve_any(&id)
+        .await
+        .map(|c| c.root_session)
+        .unwrap_or_else(|| id.clone());
+    let ok = state.subagents.interrupt(&root, &id).await;
     Json(json!({"interrupted": ok})).into_response()
 }
 
@@ -3034,7 +3041,14 @@ async fn agent_say(
         opts.thinking_level = l;
     }
     opts.plan_mode = r.plan_mode;
-    match state.subagents.say(&id, &r.text, r.attachments, opts).await {
+    // 面板请求不带调用方会话：先查出子代理所属根，再在其子树内投递消息。
+    let root = state
+        .subagents
+        .resolve_any(&id)
+        .await
+        .map(|c| c.root_session)
+        .unwrap_or_else(|| id.clone());
+    match state.subagents.say(&root, &id, &r.text, r.attachments, opts).await {
         Ok((agent_id, session_id, delivered)) => Json(json!({
             "ok": true, "agentId": agent_id, "sessionId": session_id, "delivered": delivered,
         }))
@@ -3131,6 +3145,9 @@ async fn create_team_task(
         return unauthorized();
     }
     let root = root_of(&state, &r.session_id).await;
+    // T-01：整板读-改-写放在 per-root 锁内，并发 create/update 不互相覆盖。
+    let board_lock = state.store.team_lock(&root).await;
+    let _board_guard = board_lock.lock().await;
     let mut board = match state.store.get_team(&root).await {
         Some(b) if b.enabled => b,
         _ => return bad_request("agent teams are not enabled for this session"),
@@ -3200,6 +3217,9 @@ async fn update_team_task(
         None => return bad_request("unknown action; expected claim | release | edit | set_dependencies | complete | reopen | reassign | delete"),
     };
     let root = root_of(&state, &r.session_id).await;
+    // T-01：整板读-改-写放在 per-root 锁内，并发 create/update 不互相覆盖。
+    let board_lock = state.store.team_lock(&root).await;
+    let _board_guard = board_lock.lock().await;
     let mut board = match state.store.get_team(&root).await {
         Some(b) if b.enabled => b,
         _ => return bad_request("agent teams are not enabled for this session"),

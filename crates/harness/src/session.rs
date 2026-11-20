@@ -204,6 +204,9 @@ pub struct SessionStore {
     meta_index: Mutex<HashMap<String, MetaEntry>>,
     /// Per-session searchable text, memoised by file stamp.
     text_index: Mutex<HashMap<String, TextEntry>>,
+    /// Per-root team-board locks (T-01)：看板是「读-改-写」整板落盘，两个并发
+    /// 请求各读半板再回写会互相覆盖；按根会话一把锁把整段临界区串起来。
+    team_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
 }
 
 #[derive(Clone)]
@@ -265,6 +268,7 @@ impl SessionStore {
             cache: Mutex::new(HashMap::new()),
             meta_index: Mutex::new(HashMap::new()),
             text_index: Mutex::new(HashMap::new()),
+            team_locks: Mutex::new(HashMap::new()),
         }
     }
 
@@ -276,6 +280,7 @@ impl SessionStore {
             cache: Mutex::new(HashMap::new()),
             meta_index: Mutex::new(HashMap::new()),
             text_index: Mutex::new(HashMap::new()),
+            team_locks: Mutex::new(HashMap::new()),
         }
     }
 
@@ -1110,6 +1115,16 @@ impl SessionStore {
     /// Read the Agent Teams board of the tree rooted at this session.
     pub async fn get_team(&self, id: &str) -> Option<crate::team::TeamState> {
         self.load(id).await.and_then(|s| s.team)
+    }
+
+    /// Per-root board lock (T-01)：调用方在整段「读看板 → 改 → 落盘」临界区
+    /// 内持有返回的 guard，并发的 create/update 不会各读半板再互相覆盖。
+    pub async fn team_lock(&self, id: &str) -> Arc<Mutex<()>> {
+        let mut locks = self.team_locks.lock().await;
+        locks
+            .entry(id.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
     }
 
     /// Persist the Agent Teams board of the tree rooted at this session.

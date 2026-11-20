@@ -117,6 +117,9 @@ pub struct TeamTask {
     /// Advisory workspace-relative path prefixes this task expects to modify.
     #[serde(default)]
     pub write_scopes: Vec<String>,
+    /// Name of the member that created the task (T-04)；空串表示旧数据/面板创建。
+    #[serde(default)]
+    pub created_by: String,
 }
 
 /// The whole board for one tree, persisted with the root Session.
@@ -148,6 +151,18 @@ impl TeamState {
             .iter()
             .filter(|t| t.status != TaskStatus::Deleted)
             .collect()
+    }
+
+    /// 回收不再被任何活跃任务 blocker 引用的墓碑条目（T-02）：Deleted 条目
+    /// 只保留仍被引用的，其余从整板移除，避免墓碑只增不减。
+    pub fn gc_tombstones(&mut self) {
+        let referenced: HashSet<String> = self
+            .live_tasks()
+            .iter()
+            .flat_map(|t| t.blocked_by.iter().cloned())
+            .collect();
+        self.tasks
+            .retain(|t| t.status != TaskStatus::Deleted || referenced.contains(&t.id));
     }
 
     pub fn find(&self, id: &str) -> Option<&TeamTask> {
@@ -182,6 +197,8 @@ pub struct TaskView {
     pub ready: bool,
     #[serde(rename = "writeScopeWarnings")]
     pub write_scope_warnings: Vec<String>,
+    #[serde(rename = "createdBy", skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<String>,
 }
 
 // ---------------------------------------------------------------- validation
@@ -353,6 +370,7 @@ pub fn project_task_view(state: &TeamState, task: &TeamTask) -> TaskView {
         write_scopes: task.write_scopes.clone(),
         ready: task.status == TaskStatus::Pending && task_ready(state, task),
         write_scope_warnings: warnings,
+        created_by: (!task.created_by.is_empty()).then(|| task.created_by.clone()),
     }
 }
 
@@ -434,6 +452,8 @@ pub fn create_task(
     let description = required_text(&req.description, "description", MAX_DESCRIPTION)?;
     let blocked_by = normalize_blockers(&req.blocked_by, state, None)?;
     let write_scopes = normalize_scopes(&req.write_scopes)?;
+    // T-02：落新任务前先回收无引用墓碑，避免历史删除项把整板撑大。
+    state.gc_tombstones();
 
     let task = TeamTask {
         id,
@@ -445,12 +465,12 @@ pub fn create_task(
         owner_name: None,
         blocked_by,
         write_scopes,
+        created_by: caller.name.clone(),
     };
     assert_task_graph(&state.tasks, &task).map_err(graph_error)?;
     state.next_task_number += 1;
     let view = project_task_view(state, &task);
     state.tasks.push(task);
-    let _ = caller;
     Ok(view)
 }
 
