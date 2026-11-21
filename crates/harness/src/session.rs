@@ -169,6 +169,13 @@ pub struct UsageTotals {
     pub turns: u64,
     pub steps: u64,
     pub wall_ms: u64,
+    /// 最近一次模型请求的上下文占用（system + tools + messages 的 token 估计）。
+    ///
+    /// 与 `input_tokens` 的语义不同：后者是整轮所有模型调用**累加**的计费量，
+    /// 一轮里十几次工具调用会把它堆到上下文窗口的数倍；这里只保留最后一次
+    /// 请求的真实大小，供上下文环/百分比使用。旧会话没有此字段，按 0 兼容。
+    #[serde(default)]
+    pub ctx_used: u64,
 }
 
 impl Default for SessionSummary {
@@ -710,7 +717,7 @@ impl SessionStore {
         Ok(())
     }
 
-    pub async fn add_usage(&self, id: &str, u: &crate::token::Usage, turns: u64, steps: u64, wall_ms: u64) {
+    pub async fn add_usage(&self, id: &str, u: &crate::token::Usage, turns: u64, steps: u64, wall_ms: u64, ctx_used: u64) {
         // cache 未命中先回源磁盘（照 update_meta 的兜底模式）。
         if !self.cache.lock().await.contains_key(id) {
             self.load(id).await;
@@ -724,6 +731,10 @@ impl SessionStore {
             s.usage.turns += turns;
             s.usage.steps += steps;
             s.usage.wall_ms += wall_ms;
+            // 只覆盖不累加：它表示「最近一次请求」的窗口占用。
+            if ctx_used > 0 {
+                s.usage.ctx_used = ctx_used;
+            }
             let snapshot = s.clone();
             drop(cache);
             if let Err(e) = self.persist(&snapshot).await {

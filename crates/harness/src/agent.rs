@@ -2296,8 +2296,17 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
         tools: &std::collections::BTreeMap<String, (u64, u64, u64)>,
     ) {
         let wall = t_start.elapsed().as_millis() as u64;
+        // 上下文占用取本轮最后一次请求的估计值（stats 里由 publish_status 前
+        // 的 estimate_request 写入）；不能拿 turn_usage 去算——那是整轮所有
+        // 模型调用的累加计费量，会超过窗口数倍。
+        let ctx_used = {
+            let st = self.stats.lock().await;
+            st.get(session_id)
+                .map(|s| s.ctx_system + s.ctx_tools + s.ctx_messages)
+                .unwrap_or(0)
+        };
         self.store
-            .add_usage(session_id, turn_usage, 1, steps, wall)
+            .add_usage(session_id, turn_usage, 1, steps, wall, ctx_used)
             .await;
         // 侧栏会话状态小球按最近一轮结局上色：失败红 / 完成蓝。
         {

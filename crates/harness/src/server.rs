@@ -3943,12 +3943,32 @@ fn real_hostname() -> String {
         .unwrap_or_else(|_| "unknown".to_string())
 }
 
+/// 粗略估算一段会话最近一次请求的上下文占用。
+///
+/// 只在「内存没有最近请求、落盘也没有 `ctx_used`」时兜底（旧会话 / 重启后）。
+/// 两条下界取大：① 消息正文估算（不含 system prompt / 工具 schema，只偏小）；
+/// ② 累计输入 token ÷ 模型调用次数（调用次数 ≈ steps + turns，含每轮首调）。
+/// 后者能补上体积很大的系统提示词与工具定义，但仍标注为估算。
+fn estimate_context_tokens(sess: &crate::session::Session) -> u64 {
+    fn walk(v: &Value) -> u64 {
+        match v {
+            Value::String(s) => crate::token::estimate(s) as u64,
+            Value::Array(a) => a.iter().map(walk).sum(),
+            Value::Object(o) => o.values().map(walk).sum(),
+            _ => 0,
+        }
+    }
+    let history: u64 = sess.messages.iter().map(|m| walk(&m.parts)).sum();
+    let calls = (sess.usage.steps + sess.usage.turns).max(1);
+    let avg = sess.usage.input_tokens / calls;
+    history.max(avg)
+}
+
 /// GET /api/environment —— Environment 面板的只读环境快照（契约 §2.1）。
 ///
 /// 全部取真实值：主机名 / 系统 / 架构 / 版本 / pid / workspace / home 都来自
-/// 运行时与 `Config`；`context.used` 取最近活动会话最后一次真实 usage 累计，
-/// 无会话为 0 且 `estimated:false`，不用字符估算冒充实测；`mcp.*` 与
-/// `GET /api/mcp` 同源（同一份 `list_status()`），不另建计数。
+/// 运行时与 `Config`；`context.used` 取最近活动会话**最后一次请求**的上下文
+/// 占用（不是会话累计计费 token），无会话为 0 且 `estimated:false`。
 async fn environment(
     State(state): State<SharedState>,
     headers: HeaderMap,
@@ -3992,13 +4012,30 @@ async fn environment(
         )
     };
 
-    // context.used：最近活动会话（list 已按置顶 + updated_at 倒序）的真实累计。
+    // context.used：最近活动会话（list 已按置顶 + updated_at 倒序）**最近一次
+    // 请求**的上下文占用。此前误用会话累计 input+output，一轮十几次工具调用会
+    // 堆到窗口的数倍（200K 窗口显示 197%）。内存 stats 有最近请求就优先用，
+    // 进程重启后回退到落盘的 `usage.ctx_used`。
     let recent = state.store.list("").await.into_iter().next();
     let used: u64 = match recent {
-        Some(s) => match state.store.load(&s.id).await {
-            Some(full) => full.usage.input_tokens + full.usage.output_tokens,
-            None => 0,
-        },
+        Some(s) => {
+            let live = state.agent.stats_snapshot(&s.id).await;
+            let live_used = live.ctx_system + live.ctx_tools + live.ctx_messages;
+            if live_used > 0 {
+                live_used
+            } else {
+                match state.store.load(&s.id).await {
+                    Some(full) => {
+                        if full.usage.ctx_used > 0 {
+                            full.usage.ctx_used
+                        } else {
+                            estimate_context_tokens(&full)
+                        }
+                    }
+                    None => 0,
+                }
+            }
+        }
         None => 0,
     };
     let pct = if ctx_limit > 0 {
@@ -4099,10 +4136,25 @@ async fn telemetry(
         .unwrap_or(0);
 
     let u = sess.as_ref().map(|s| &s.usage);
-    let prompt = u.map(|x| x.input_tokens).unwrap_or(0) + live.tokens.input_tokens;
-    let completion = u.map(|x| x.output_tokens).unwrap_or(0) + live.tokens.output_tokens;
-    let cache_read = u.map(|x| x.cache_read).unwrap_or(0) + live.tokens.cache_read_input_tokens;
-    let cache_write = u.map(|x| x.cache_write).unwrap_or(0) + live.tokens.cache_creation_input_tokens;
+    // 内存 stats 在进程启动时会用落盘 usage 回填（hydrate_stats），若直接相加，
+    // 重启后同一份历史会被算两遍（实测 192K 变 384K）。取两者较大值：重启后
+    // 两者相等；运行中 live 已含「历史 + 本轮新增」，也不会重复。
+    let prompt = u
+        .map(|x| x.input_tokens)
+        .unwrap_or(0)
+        .max(live.tokens.input_tokens);
+    let completion = u
+        .map(|x| x.output_tokens)
+        .unwrap_or(0)
+        .max(live.tokens.output_tokens);
+    let cache_read = u
+        .map(|x| x.cache_read)
+        .unwrap_or(0)
+        .max(live.tokens.cache_read_input_tokens);
+    let cache_write = u
+        .map(|x| x.cache_write)
+        .unwrap_or(0)
+        .max(live.tokens.cache_creation_input_tokens);
     let rounds = live.turns.max(u.map(|x| x.turns).unwrap_or(0));
     let steps = live.steps.max(u.map(|x| x.steps).unwrap_or(0));
     let elapsed_ms = if running {
@@ -4128,19 +4180,31 @@ async fn telemetry(
 
     let (ctx_limit, model_json) = {
         let cfg = state.config.read().await;
-        let limit = cfg.active_model().map(|(_, m)| m.context).unwrap_or(0);
         let sel = sess
             .as_ref()
             .map(|s| s.meta.model.as_str())
             .filter(|m| !m.is_empty())
             .unwrap_or(cfg.model.as_str());
-        let model_json = match cfg.resolve_model(sel) {
-            Some((p, m)) => json!({"provider": p.id, "model": m.id}),
-            None => json!({"provider": "", "model": ""}),
-        };
-        (limit, model_json)
+        match cfg.resolve_model(sel) {
+            Some((p, m)) => (m.context, json!({"provider": p.id, "model": m.id})),
+            None => (
+                cfg.active_model().map(|(_, m)| m.context).unwrap_or(0),
+                json!({"provider": "", "model": ""}),
+            ),
+        }
     };
-    let used = prompt + completion;
+    // 上下文占用 = 最近一次请求的 system + tools + messages 估计；取不到时
+    // 回退到落盘值。绝不能用 prompt+completion——那是整轮累加的计费 token。
+    let live_used = live.ctx_system + live.ctx_tools + live.ctx_messages;
+    let used = if live_used > 0 {
+        live_used
+    } else if let Some(x) = u.map(|x| x.ctx_used).filter(|x| *x > 0) {
+        x
+    } else {
+        sess.as_ref()
+            .map(estimate_context_tokens)
+            .unwrap_or(0)
+    };
     let pct = if ctx_limit > 0 {
         used as f64 / ctx_limit as f64
     } else {
