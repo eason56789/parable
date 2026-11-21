@@ -117,11 +117,13 @@ fn session() -> &'static Mutex<SessionMint> {
 }
 
 fn session_current() -> String {
-    session().lock().unwrap().current()
+    // 持锁线程 panic 后锁会中毒,unwrap 会把每一次后续调用都变成 panic;
+    // 中毒只是状态可能不一致,这里照 subscribe 侧的兜底写法恢复数据继续用。
+    session().lock().unwrap_or_else(|p| p.into_inner()).current()
 }
 
 fn session_remint() -> String {
-    session().lock().unwrap().mint()
+    session().lock().unwrap_or_else(|p| p.into_inner()).mint()
 }
 
 // ---------------------------------------------------------------- <env> 块
@@ -355,20 +357,30 @@ pub async fn list_free_models() -> Result<Vec<UpstreamModel>, HarnessError> {
 
 // ---------------------------------------------------------------- transport
 
-fn wreq_client() -> &'static wreq::Client {
+/// 指纹伪装客户端(OnceLock 缓存,构建只跑一次)。构建失败不再 expect
+/// panic——首次调用就崩整个进程;改为记日志降级,调用方拿到明确的通道错误。
+fn wreq_client() -> Option<&'static wreq::Client> {
     use wreq::tls::TlsOptions;
     use wreq::Emulation;
-    static CLIENT: OnceLock<wreq::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| {
-        wreq::Client::builder()
-            .emulation(
-                Emulation::builder()
-                    .tls_options(TlsOptions::builder().cipher_list(CIPHER_LIST).build())
-                    .build(Default::default()),
-            )
-            .build()
-            .expect("wreq client builds")
-    })
+    static CLIENT: OnceLock<Option<wreq::Client>> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            match wreq::Client::builder()
+                .emulation(
+                    Emulation::builder()
+                        .tls_options(TlsOptions::builder().cipher_list(CIPHER_LIST).build())
+                        .build(Default::default()),
+                )
+                .build()
+            {
+                Ok(c) => Some(c),
+                Err(e) => {
+                    tracing::warn!("opencode free: wreq client 构建失败,通道不可用: {e}");
+                    None
+                }
+            }
+        })
+        .as_ref()
 }
 
 // ---------------------------------------------------------------- provider
@@ -412,7 +424,10 @@ async fn send_once(
     body: &str,
     session: &str,
 ) -> Result<(u16, String, Option<wreq::Response>), HarnessError> {
-    let resp = wreq_client()
+    let client = wreq_client().ok_or_else(|| {
+        HarnessError::Provider("opencode free: TLS 指纹客户端不可用(构建失败)".into())
+    })?;
+    let resp = client
         .post(url)
         .header("Content-Type", "application/json")
         .header("Authorization", "Bearer public")

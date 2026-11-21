@@ -782,6 +782,14 @@ impl Registry {
                 }), &["path", "old_string", "new_string"]),
             },
             ToolSpec {
+                name: "git_commit".into(),
+                description: "Create a git commit in the workspace. With `add_all: true` every pending change is staged first (`git add -A`); with `add_all: false` only already-staged changes are committed. Use it ONLY when the user explicitly asked for a commit or clearly approved committing the set of changes you just finished — never commit on your own initiative. The message should be a concise summary in the user's language. Requires the workspace to be a git repository.".into(),
+                input_schema: obj(json!({
+                    "message": str_prop("Commit message (a concise summary of this group of changes)"),
+                    "add_all": bool_prop("Stage every pending change first (git add -A) before committing (default false)"),
+                }), &["message"]),
+            },
+            ToolSpec {
                 name: "list_dir".into(),
                 description: "List a directory (non-recursive) with file sizes and types.".into(),
                 input_schema: obj(json!({
@@ -1413,6 +1421,7 @@ skill matches the current request, then follow the steps it contains. Read-only.
             "read_file" => self.read_file(args, ctx).await,
             "write_file" => self.write_file(args, ctx).await,
             "edit_file" => self.edit_file(args, ctx).await,
+            "git_commit" => self.git_commit(args, ctx).await,
             "list_dir" => self.list_dir(args, ctx).await,
             "glob" => self.glob(args, ctx).await,
             "grep" => self.grep(args, ctx).await,
@@ -1593,6 +1602,35 @@ impl Registry {
             }
         }
         fs_impl::edit_file(&path, old, new, replace_all)
+    }
+
+    /// `git_commit` —— `git add -A`（可选）+ 提交。提交落库横跨整个工作区
+    /// 且不可逆，风险按 write_file 覆盖已有文件的口径归为 Destructive：
+    /// ws/ask 模式一律弹确认，full 模式直接过。
+    async fn git_commit(&self, a: &Value, ctx: &ToolCtx) -> Result<ToolOutcome, HarnessError> {
+        let message = a["message"].as_str().ok_or_else(|| {
+            HarnessError::Tool("`message` is required and must be a string".into())
+        })?;
+        let add_all = a["add_all"].as_bool().unwrap_or(false);
+        // 权限面板上展示提交消息——用户看到的就是将要落库的内容。
+        ctx.authorize("git_commit", message, Risk::Destructive)
+            .await?;
+        let r = crate::git::commit_all(&self.workspace, message, add_all)?;
+        Ok(ToolOutcome::text(
+            true,
+            format!("Commit {} on {}", r.commit, r.branch),
+            format!(
+                "Committed `{}` on branch `{}`.\nSubject: {}\n{}",
+                r.commit,
+                r.branch,
+                r.subject,
+                if add_all {
+                    "All pending changes were staged with `git add -A` first."
+                } else {
+                    "Nothing was staged; only previously staged changes were committed."
+                }
+            ),
+        ))
     }
 
     async fn list_dir(&self, a: &Value, ctx: &ToolCtx) -> Result<ToolOutcome, HarnessError> {
@@ -3248,6 +3286,7 @@ mod tests {
             "settings_set",
             "background_list",
             "background_kill",
+            "git_commit",
         ] {
             assert!(names.contains(&want), "{want} must be declared");
         }

@@ -277,6 +277,126 @@ pub fn status(workspace: &Path) -> Result<Status, HarnessError> {
     })
 }
 
+// ------------------------------------------------------------------ 提交与历史
+
+/// One commit in the history (`recent_commits` 的行)。
+#[derive(Debug, Clone, Serialize)]
+pub struct CommitInfo {
+    /// Full commit hash.
+    pub hash: String,
+    /// Author name.
+    pub author: String,
+    /// ISO-8601 author date.
+    pub date: String,
+    /// First line of the message.
+    pub subject: String,
+}
+
+/// 新提交的落点信息（`commit_all` 的返回）。
+#[derive(Debug, Clone, Serialize)]
+pub struct CommitResult {
+    /// Short hash of the new commit.
+    pub commit: String,
+    /// Branch the commit landed on.
+    pub branch: String,
+    /// The commit subject.
+    pub subject: String,
+}
+
+/// Current branch name (`HEAD` when detached). Requires a git repository.
+pub fn current_branch(workspace: &Path) -> Result<String, HarnessError> {
+    if !is_repo(workspace) {
+        return Err(HarnessError::Tool("not a git repository".into()));
+    }
+    Ok(git(workspace, &["rev-parse", "--abbrev-ref", "HEAD"])?
+        .trim()
+        .to_string())
+}
+
+/// `git add -A`（可选）+ `git commit`。
+///
+/// 消息直接作为 argv 传递、不经 shell，含引号/换行都安全；`-c user.name /
+/// user.email` 只在用户没配全局身份时兜底注入，避免无配置环境下提交失败，
+/// 也避免把已配置的提交人永久覆盖成内置身份。
+pub fn commit_all(
+    workspace: &Path,
+    message: &str,
+    add_all: bool,
+) -> Result<CommitResult, HarnessError> {
+    let message = message.trim();
+    if message.is_empty() {
+        return Err(HarnessError::Tool("commit message is required".into()));
+    }
+    if !is_repo(workspace) {
+        return Err(HarnessError::Tool("not a git repository".into()));
+    }
+    if add_all {
+        git(workspace, &["add", "-A"])?;
+    }
+    let mut args: Vec<String> = Vec::new();
+    for (key, fallback) in [("user.name", "Parable"), ("user.email", "parable@local")] {
+        let configured = git(workspace, &["config", "--get", key])
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+        if !configured {
+            args.push("-c".into());
+            args.push(format!("{key}={fallback}"));
+        }
+    }
+    args.push("commit".into());
+    args.push("-m".into());
+    args.push(message.to_string());
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    git(workspace, &refs)?;
+
+    let commit = git(workspace, &["rev-parse", "--short", "HEAD"])?
+        .trim()
+        .to_string();
+    let branch = current_branch(workspace)?;
+    Ok(CommitResult {
+        commit,
+        branch,
+        subject: message.lines().next().unwrap_or_default().to_string(),
+    })
+}
+
+/// 最近 `n` 条提交（时间倒序）。字段用单元分隔符 `\x1f` 切开，主题里出现
+/// `|` 之类的字符也不会切错。
+pub fn recent_commits(workspace: &Path, n: usize) -> Result<Vec<CommitInfo>, HarnessError> {
+    if !is_repo(workspace) {
+        return Err(HarnessError::Tool("not a git repository".into()));
+    }
+    let n = n.clamp(1, 100);
+    let raw = git(
+        workspace,
+        &[
+            "log",
+            "-n",
+            &n.to_string(),
+            "--pretty=format:%H%x1f%an%x1f%aI%x1f%s",
+        ],
+    )?;
+    let mut out = Vec::new();
+    for line in raw.lines() {
+        let mut f = line.split('\u{1f}');
+        let (Some(hash), Some(author), Some(date), Some(subject)) =
+            (f.next(), f.next(), f.next(), f.next())
+        else {
+            continue;
+        };
+        if hash.is_empty() {
+            continue;
+        }
+        out.push(CommitInfo {
+            hash: hash.to_string(),
+            author: author.to_string(),
+            date: date.to_string(),
+            subject: subject.to_string(),
+        });
+    }
+    Ok(out)
+}
+
 /// Read the diff for one file.
 ///
 /// Staged changes win: if the file has both staged and unstaged edits the

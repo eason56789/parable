@@ -68,7 +68,10 @@ impl EventHub {
         // B-41：序号分配与入队放在同一把锁内，保证 ring 内事件严格按 seq 升序，
         // 并发 publish 不会出现「高 seq 先入队、低 seq 后入队」的错位。
         let ev = {
-            let mut ring = self.ring.lock().unwrap();
+            // 持锁线程 panic 会毒化锁，unwrap 之后每次 publish 都跟着 panic；
+            // 中毒只代表状态可能残缺，照 subscribe_since 侧的兜底写法恢复
+            // 数据继续用，不让事件总线整体瘫痪。
+            let mut ring = self.ring.lock().unwrap_or_else(|p| p.into_inner());
             let ev = Event {
                 kind: kind.to_string(),
                 session_id: session_id.to_string(),

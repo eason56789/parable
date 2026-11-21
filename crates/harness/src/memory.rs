@@ -69,6 +69,9 @@ pub struct MemoryInput {
 pub struct MemoryStore {
     path: PathBuf,
     items: RwLock<Vec<Memory>>,
+    /// MEM-02：载入时 memory.json 超过字节上限。此时内存里是空表，任何写
+    /// 操作都会把原文件整份覆盖——写路径必须先检查这个标志并拒绝落盘。
+    oversize: RwLock<bool>,
 }
 
 impl MemoryStore {
@@ -78,10 +81,11 @@ impl MemoryStore {
     }
 
     pub fn with_path(path: PathBuf) -> Self {
-        let items = load(&path);
+        let (items, oversize) = load(&path);
         Self {
             path,
             items: RwLock::new(items),
+            oversize: RwLock::new(oversize),
         }
     }
 
@@ -96,8 +100,21 @@ impl MemoryStore {
         v
     }
 
+    /// oversize 文件载入为空表后，落盘会把原文件覆盖成空表——所有写操作
+    /// 先过这道闸，拒绝并提示手工清理。
+    async fn ensure_writable(&self) -> Result<(), HarnessError> {
+        if *self.oversize.read().await {
+            return Err(HarnessError::Config(format!(
+                "memory.json 超过 {MAX_MEMORY_FILE_BYTES} 字节，已拒绝写入以保护原文件；\
+                 请手工清理或删除该文件后重试"
+            )));
+        }
+        Ok(())
+    }
+
     /// Insert a new memory or replace an existing one; returns the stored item.
     pub async fn upsert(&self, input: MemoryInput) -> Result<Memory, HarnessError> {
+        self.ensure_writable().await?;
         let text = input.text.trim().to_string();
         if text.is_empty() {
             return Err(HarnessError::Config("memory text is empty".into()));
@@ -143,6 +160,7 @@ impl MemoryStore {
 
     /// Remove one memory. Missing ids are not an error (idempotent delete).
     pub async fn remove(&self, id: u64) -> Result<bool, HarnessError> {
+        self.ensure_writable().await?;
         let mut items = self.items.write().await;
         let before = items.len();
         items.retain(|m| m.id != id);
@@ -155,6 +173,7 @@ impl MemoryStore {
 
     /// Remove every memory.
     pub async fn clear(&self) -> Result<usize, HarnessError> {
+        self.ensure_writable().await?;
         let mut items = self.items.write().await;
         let n = items.len();
         items.clear();
@@ -197,28 +216,33 @@ impl MemoryStore {
     }
 }
 
-fn load(path: &Path) -> Vec<Memory> {
+/// 返回 (记忆列表, oversize 标志)。文件超上限时按空表处理但置位标志，
+/// 让写路径拒绝落盘覆盖原文件。
+fn load(path: &Path) -> (Vec<Memory>, bool) {
     // MEM-02：文件过大直接按空表处理，不读进内存。
     if let Ok(meta) = std::fs::metadata(path) {
         if meta.len() > MAX_MEMORY_FILE_BYTES {
             tracing::warn!("memory.json 超过 {MAX_MEMORY_FILE_BYTES} 字节，按空表加载");
-            return Vec::new();
+            return (Vec::new(), true);
         }
     }
     let Ok(text) = std::fs::read_to_string(path) else {
-        return Vec::new();
+        return (Vec::new(), false);
     };
     // Accept both a bare array and `{"memories":[...]}` so a hand-edited file
     // does not silently lose everything.
     if let Ok(v) = serde_json::from_str::<Vec<Memory>>(&text) {
-        return v;
+        return (v, false);
     }
     match serde_json::from_str::<serde_json::Value>(&text) {
-        Ok(v) => serde_json::from_value(v.get("memories").cloned().unwrap_or_default())
-            .unwrap_or_default(),
+        Ok(v) => (
+            serde_json::from_value(v.get("memories").cloned().unwrap_or_default())
+                .unwrap_or_default(),
+            false,
+        ),
         Err(e) => {
             tracing::warn!("memory.json: could not parse ({e}); starting empty");
-            Vec::new()
+            (Vec::new(), false)
         }
     }
 }

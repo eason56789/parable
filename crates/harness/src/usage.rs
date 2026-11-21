@@ -213,17 +213,32 @@ impl UsageJournal {
     /// Aggregate the journal into the snapshot the settings page renders.
     ///
     /// `summary` and `heatmap` are always all-time; `daily` and `models` are
-    /// scoped to `range` (`all`, `7d` or `30d`).
+    /// scoped to `range` (`all`, `7d` or `30d`). 每个 model 行附带按
+    /// `~/.parable/prices.toml` 估算的成本（未配置价格的模型按 0 计）。
     pub async fn snapshot(&self, range: &str, sessions_root: &Path) -> Value {
         self.backfill_legacy(sessions_root).await;
         let recs = self.records.lock().await.clone();
-        build_snapshot(&recs, range, crate::event::now_ms())
+        let prices = load_prices();
+        build_snapshot(&recs, range, crate::event::now_ms(), &prices)
+    }
+
+    /// 成本估算汇总：与 snapshot 相同的 range 语义（all / 7d / 30d），
+    /// 返回结构化明细供 server 的用量统计响应直接嵌入。
+    pub async fn cost_summary(&self, range: &str, sessions_root: &Path) -> CostSummary {
+        self.backfill_legacy(sessions_root).await;
+        let recs = self.records.lock().await.clone();
+        let prices = load_prices();
+        cost_summary_of(&recs, range, crate::event::now_ms(), &prices)
     }
 }
 
 /// Read a journal file into records. Corrupt lines are skipped.
 fn load_journal_file(path: &Path) -> Vec<UsageRecord> {
     let mut out = Vec::new();
+    // legacy 导入行按 session_id 幂等去重：导入 append 与 marker 写入不是
+    // 原子的，崩溃在两者之间会让下一次导入把同一会话的行再追加一遍。
+    // 加载时每个 legacy session 只保留第一条，重复行不再参与计数。
+    let mut seen_legacy: HashSet<String> = HashSet::new();
     let Ok(text) = std::fs::read_to_string(path) else {
         return out;
     };
@@ -233,7 +248,16 @@ fn load_journal_file(path: &Path) -> Vec<UsageRecord> {
             continue;
         }
         match serde_json::from_str::<UsageRecord>(line) {
-            Ok(r) => out.push(r),
+            Ok(r) => {
+                if r.model == LEGACY_MODEL && !seen_legacy.insert(r.session_id.clone()) {
+                    tracing::warn!(
+                        "usage journal: 重复的 legacy 导入行，跳过 session {}",
+                        r.session_id
+                    );
+                    continue;
+                }
+                out.push(r);
+            }
             // A partially written last line (power loss) is expected;
             // anything else is worth a warning but must not be fatal.
             Err(e) => tracing::warn!("usage journal: skipping unparseable line: {e}"),
@@ -327,6 +351,145 @@ pub fn today_key() -> String {
     day_key(crate::event::now_ms())
 }
 
+// ------------------------------------------------------------------ 成本估算
+
+/// 模型单价表：模型 id → (input, output)，单位 **$/Mtok**（与各家定价页
+/// 的口径一致）。来自 `~/.parable/prices.toml`：
+///
+/// ```toml
+/// [prices]
+/// "claude-sonnet-4-5" = { input = 3.0, output = 15.0 }
+/// ```
+///
+/// 表里没有的模型按 0 计（免费/未知），不报错。
+pub type Prices = HashMap<String, (f64, f64)>;
+
+/// 读取价格表。文件缺失或格式坏一律按空表处理——成本估算是展示性数据，
+/// 不能因为它让用量页挂掉。
+pub fn load_prices() -> Prices {
+    load_prices_from(&crate::config::Config::home_dir().join("prices.toml"))
+}
+
+/// `load_prices` 的可注入版本（测试 / 指定路径用）。
+pub fn load_prices_from(path: &Path) -> Prices {
+    match std::fs::read_to_string(path) {
+        Ok(text) => parse_prices(&text),
+        Err(_) => HashMap::new(),
+    }
+}
+
+/// 解析 prices.toml 的 `[prices]` 段。单档缺省 0，负值钳成 0。
+pub fn parse_prices(text: &str) -> Prices {
+    #[derive(serde::Deserialize, Default)]
+    struct PriceRow {
+        #[serde(default)]
+        input: f64,
+        #[serde(default)]
+        output: f64,
+    }
+    #[derive(serde::Deserialize, Default)]
+    struct PriceFile {
+        #[serde(default)]
+        prices: HashMap<String, PriceRow>,
+    }
+    let Ok(f) = toml::from_str::<PriceFile>(text) else {
+        tracing::warn!("prices.toml 解析失败，成本按 0 估算");
+        return HashMap::new();
+    };
+    f.prices
+        .into_iter()
+        .map(|(k, v)| (k, (v.input.max(0.0), v.output.max(0.0))))
+        .collect()
+}
+
+/// 按 input/output 单价估算一段用量（$）。cache_read / cache_write 不计价：
+/// 价格表只有 input/output 两档，把它们按 input 价折算会高估近 10 倍，
+/// 宁可低估并在字段名上写清口径。
+fn estimate_usd(input_tokens: u64, output_tokens: u64, price: (f64, f64)) -> (f64, f64) {
+    (
+        input_tokens as f64 / 1_000_000.0 * price.0,
+        output_tokens as f64 / 1_000_000.0 * price.1,
+    )
+}
+
+/// 单模型的成本估算行。
+#[derive(Debug, Clone, Serialize)]
+pub struct ModelCost {
+    pub model: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    /// 输入侧估算成本（$）。
+    pub input_usd: f64,
+    /// 输出侧估算成本（$）。
+    pub output_usd: f64,
+    /// input_usd + output_usd。
+    pub total_usd: f64,
+}
+
+/// 成本估算汇总（server 的用量统计响应直接消费）。
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct CostSummary {
+    /// 范围内估算总成本（$）；没有价格配置时为 0。
+    pub total_usd: f64,
+    /// prices.toml 是否提供了条目（false = 全按 0 计，提示用户可配置）。
+    pub priced: bool,
+    /// 按总成本倒序的单模型明细。
+    pub models: Vec<ModelCost>,
+}
+
+/// 对记录做范围过滤后的成本汇总（纯函数，供 snapshot 与 cost_summary 共用）。
+fn cost_summary_of(recs: &[UsageRecord], range: &str, now: u64, prices: &Prices) -> CostSummary {
+    // range 语义与 snapshot 相同：all / 7d / 30d。
+    let today = day_key(now);
+    let cutoff = match range {
+        "7d" | "30d" => {
+            let n = if range == "7d" { 7 } else { 30 };
+            chrono::NaiveDate::parse_from_str(&today, "%Y-%m-%d")
+                .ok()
+                .map(|d| (d - chrono::Duration::days(n - 1)).format("%Y-%m-%d").to_string())
+        }
+        _ => None,
+    };
+    let mut agg: BTreeMap<String, (u64, u64)> = BTreeMap::new();
+    for r in recs {
+        if let Some(c) = &cutoff {
+            if r.day.as_str() < c.as_str() {
+                continue;
+            }
+        }
+        let e = agg.entry(r.model.clone()).or_insert((0, 0));
+        e.0 += r.input_tokens;
+        e.1 += r.output_tokens;
+    }
+    let mut models: Vec<ModelCost> = agg
+        .into_iter()
+        .map(|(model, (input, output))| {
+            let price = prices.get(&model).copied().unwrap_or((0.0, 0.0));
+            let (input_usd, output_usd) = estimate_usd(input, output, price);
+            ModelCost {
+                model,
+                input_tokens: input,
+                output_tokens: output,
+                input_usd,
+                output_usd,
+                total_usd: input_usd + output_usd,
+            }
+        })
+        .collect();
+    // 总成本倒序；f64 不可序，NaN 钳 0 后比较。
+    models.sort_by(|a, b| {
+        b.total_usd
+            .partial_cmp(&a.total_usd)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.model.cmp(&b.model))
+    });
+    CostSummary {
+        total_usd: models.iter().map(|m| m.total_usd).sum(),
+        priced: !prices.is_empty(),
+        models,
+    }
+}
+
 /// Days between two `YYYY-MM-DD` keys (b - a).
 fn days_between(a: &str, b: &str) -> i64 {
     match (
@@ -393,7 +556,8 @@ impl Activity {
 }
 
 /// Build the full snapshot from the records. Pure function — unit tested.
-fn build_snapshot(recs: &[UsageRecord], range: &str, now: u64) -> Value {
+/// `prices` 是模型单价表（$/Mtok），models 行用它附带估算成本。
+fn build_snapshot(recs: &[UsageRecord], range: &str, now: u64, prices: &Prices) -> Value {
     let today = day_key(now);
     let today_date = chrono::NaiveDate::parse_from_str(&today, "%Y-%m-%d").ok();
 
@@ -537,6 +701,25 @@ fn build_snapshot(recs: &[UsageRecord], range: &str, now: u64) -> Value {
         *model_requests.entry(r.model.clone()).or_insert(0) += 1;
     }
     let range_total: u64 = model_totals.values().map(|v| v.0).sum();
+    // Favourite model: the model that consumed the most tokens in range.
+    // 按模型的总量取 max——旧写法沿记录顺序按「连续段」累计,同一模型被
+    // 其他模型隔开时会漏计,得出错误的偏好模型。
+    let favorite_model = model_totals
+        .iter()
+        .max_by(|a, b| {
+            b.1 .0
+                .cmp(&a.1 .0)
+                .then_with(|| b.0.cmp(a.0))
+        })
+        .map(|(m, v)| {
+            let share = if range_total == 0 {
+                0.0
+            } else {
+                v.0 as f64 / range_total as f64
+            };
+            serde_json::json!({"modelId": m, "totalTokens": v.0, "share": share})
+        })
+        .unwrap_or(Value::Null);
     let mut models: Vec<Value> = model_totals
         .into_iter()
         .map(|(m, v)| {
@@ -545,6 +728,9 @@ fn build_snapshot(recs: &[UsageRecord], range: &str, now: u64) -> Value {
             } else {
                 v.0 as f64 / range_total as f64
             };
+            // 成本估算：prices.toml 里有该模型的价才非 0；cache 档不计价。
+            let price = prices.get(&m).copied().unwrap_or((0.0, 0.0));
+            let (input_usd, output_usd) = estimate_usd(v.1, v.2, price);
             serde_json::json!({
                 "modelId": m,
                 "totalTokens": v.0,
@@ -552,6 +738,9 @@ fn build_snapshot(recs: &[UsageRecord], range: &str, now: u64) -> Value {
                 "outputTokens": v.2,
                 "requestCount": model_requests.get(&m).copied().unwrap_or(0),
                 "share": share,
+                "inputUsd": input_usd,
+                "outputUsd": output_usd,
+                "estimatedCostUsd": input_usd + output_usd,
             })
         })
         .collect();
@@ -664,44 +853,14 @@ fn build_snapshot(recs: &[UsageRecord], range: &str, now: u64) -> Value {
         serde_json::json!(peak_hour_idx)
     };
 
-    // Favourite model: the model that consumed the most tokens in range.
-    let favorite_model = {
-        let mut best: Option<(String, u64)> = None;
-        for r in recs {
-            if let Some(c) = &cutoff {
-                if r.day.as_str() < c.as_str() {
-                    continue;
-                }
-            }
-            let t = r.total();
-            match &mut best {
-                None => best = Some((r.model.clone(), t)),
-                Some((m, v)) => {
-                    if *m == r.model {
-                        *v += t;
-                    } else if t > *v {
-                        *m = r.model.clone();
-                        *v = t;
-                    }
-                }
-            }
-        }
-        match best {
-            Some((m, v)) => {
-                let share = if range_total == 0 {
-                    0.0
-                } else {
-                    v as f64 / range_total as f64
-                };
-                serde_json::json!({"modelId": m, "totalTokens": v, "share": share})
-            }
-            None => Value::Null,
-        }
-    };
+    // 成本汇总（与 models 行同一张价格表）：顶层 "cost" 一份，summary 里
+    // 附一个总额，前端不用再逐行求和。
+    let cost = cost_summary_of(recs, range, now, prices);
 
     serde_json::json!({
         "range": range,
         "generatedAt": now,
+        "cost": cost,
         "summary": {
             "totalTokens": total_tokens,
             "inputTokens": total_input,
@@ -716,6 +875,7 @@ fn build_snapshot(recs: &[UsageRecord], range: &str, now: u64) -> Value {
             "longestStreakDays": longest_streak,
             "longestSessionMs": longest_session_ms,
             "peakDayTokens": peak_day,
+            "estimatedCostUsd": cost.total_usd,
             "favoriteModel": favorite_model,
             "toolCalls": tool_calls_total,
             "toolErrorRate": pct(tool_errors_total, tool_calls_total),
@@ -962,7 +1122,7 @@ mod tests {
             rec("2026-11-01", "s1", "m1", 50, 500),
             rec("2026-11-02", "s2", "m2", 300, 2_000),
         ];
-        let v = build_snapshot(&recs, "all", 0);
+        let v = build_snapshot(&recs, "all", 0, &Prices::new());
         let s = summary_of(&v);
         assert_eq!(s["totalTokens"], 450u64);
         // The busiest day is 2026-11-02 with 300 tokens.
@@ -986,7 +1146,7 @@ mod tests {
             rec("2026-11-01", "s1", "m1", 100, 10),
             rec("2026-11-02", "s1", "m2", 300, 10),
         ];
-        let v = build_snapshot(&recs, "all", 0);
+        let v = build_snapshot(&recs, "all", 0, &Prices::new());
         let models = v["models"].as_array().unwrap();
         assert_eq!(models.len(), 2);
         let sum: f64 = models.iter().map(|m| m["share"].as_f64().unwrap()).sum();
@@ -1009,9 +1169,9 @@ mod tests {
             rec(&today, "s1", "m1", 100, 10),
             rec(&old.format("%Y-%m-%d").to_string(), "s2", "m2", 900, 10),
         ];
-        let all = build_snapshot(&recs, "all", now);
+        let all = build_snapshot(&recs, "all", now, &Prices::new());
         assert_eq!(all["daily"].as_array().unwrap().len(), 2);
-        let d7 = build_snapshot(&recs, "7d", now);
+        let d7 = build_snapshot(&recs, "7d", now, &Prices::new());
         assert_eq!(d7["daily"].as_array().unwrap().len(), 1);
         assert_eq!(d7["models"].as_array().unwrap().len(), 1);
         assert_eq!(d7["models"][0]["modelId"], "m1");
@@ -1022,7 +1182,7 @@ mod tests {
     #[test]
     fn heatmap_has_53_weeks_of_7_days() {
         let recs = vec![rec(&today_key(), "s1", "m1", 100, 10)];
-        let v = build_snapshot(&recs, "all", 0);
+        let v = build_snapshot(&recs, "all", 0, &Prices::new());
         let hm = &v["heatmap"];
         let weeks = hm["weeks"].as_array().unwrap();
         assert_eq!(weeks.len(), HEATMAP_WEEKS);
@@ -1177,7 +1337,7 @@ mod tests {
             rec_at(monday_10, "s1", "m1", 100),
             rec_at(tuesday_14, "s1", "m1", 250),
         ];
-        let v = build_snapshot(&recs, "all", tuesday_14);
+        let v = build_snapshot(&recs, "all", tuesday_14, &Prices::new());
         let act = &v["activity"];
         let hours = act["hours"].as_array().unwrap();
         assert_eq!(hours.len(), 24);
@@ -1207,7 +1367,7 @@ mod tests {
         for i in 0..12 {
             recs.push(rec(&today, &format!("s_extra{i}"), "m1", 50, 10));
         }
-        let v = build_snapshot(&recs, "all", now);
+        let v = build_snapshot(&recs, "all", now, &Prices::new());
         let top = v["topSessions"].as_array().unwrap();
         assert_eq!(top.len(), 10);
         // Sorted by tokens descending.
@@ -1232,9 +1392,9 @@ mod tests {
             rec(&old, "s_old", "m2", 900, 10),
         ];
         // "all" shows both, "7d" only the recent one.
-        let all = build_snapshot(&recs, "all", now);
+        let all = build_snapshot(&recs, "all", now, &Prices::new());
         assert_eq!(all["topSessions"].as_array().unwrap().len(), 2);
-        let d7 = build_snapshot(&recs, "7d", now);
+        let d7 = build_snapshot(&recs, "7d", now, &Prices::new());
         let top = d7["topSessions"].as_array().unwrap();
         assert_eq!(top.len(), 1);
         assert_eq!(top[0]["sessionId"], "s_new");

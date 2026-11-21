@@ -77,6 +77,8 @@ struct FileEntry {
 const MAX_FILES_PER_TURN: usize = 200;
 /// 单个旧内容快照的字节上限，超出不再落盘快照。
 const MAX_SNAP_BYTES: u64 = 8 * 1024 * 1024;
+/// 单会话最多保留多少个 turn 的检查点（B-36：record 时惰性清理，防磁盘无上限增长）。
+const MAX_TURNS_PER_SESSION: usize = 30;
 
 /// session/turn 用作目录名：拒绝会跑出根目录或为空的 id。
 fn safe_id(id: &str) -> Result<(), HarnessError> {
@@ -222,7 +224,17 @@ impl CheckpointStore {
             },
         };
         m.files.push(entry);
-        Self::write_manifest(&dir, &m)
+        Self::write_manifest(&dir, &m)?;
+        // B-36：惰性保留策略。新开一个 turn 后若本会话 turn 目录数超过
+        // 上限，删掉最旧的——此前 prune() 没有生产调用点，checkpoint 目录
+        // 会随会话长度无上限增长。清理失败不影响本次记录，只记警告。
+        if fresh {
+            if let Err(err) = Self::prune_locked(&self.session_dir(session), MAX_TURNS_PER_SESSION)
+            {
+                tracing::warn!("checkpoint: 惰性清理失败: {err}");
+            }
+        }
+        Ok(())
     }
 
     /// 某会话的全部检查点（按时间倒序）。manifest 缺失/损坏的目录跳过。
@@ -487,15 +499,36 @@ impl CheckpointStore {
     /// `keep == 0` 清空该会话。
     pub async fn prune(&self, session: &str, keep: usize) -> Result<(), HarnessError> {
         safe_id(session)?;
-        let session_dir = self.session_dir(session);
+        let _guard = self.io.lock().await;
+        Self::prune_locked(&self.session_dir(session), keep)
+    }
+
+    /// 启动时的全量清理入口：根目录下每个会话各保留 `keep_per_session` 个
+    /// 最近的 turn。与惰性清理互补，兜底处理进程终止前堆积的存量。
+    pub async fn prune_all(&self, keep_per_session: usize) {
+        let _guard = self.io.lock().await;
+        let Ok(rd) = std::fs::read_dir(&self.root) else {
+            return;
+        };
+        for e in rd.flatten() {
+            let dir = e.path();
+            if !dir.is_dir() {
+                continue;
+            }
+            if let Err(err) = Self::prune_locked(&dir, keep_per_session) {
+                tracing::warn!("checkpoint prune_all: {}: {err}", dir.display());
+            }
+        }
+    }
+
+    /// prune 的实现。调用方必须已持有 `self.io`（record 惰性触发与公开
+    /// prune 共用，避免在 record 内二次加锁死锁）。
+    fn prune_locked(session_dir: &Path, keep: usize) -> Result<(), HarnessError> {
         if !session_dir.is_dir() {
             return Ok(());
         }
-
-        let _guard = self.io.lock().await;
-
         let mut turns: Vec<(u64, PathBuf)> = Vec::new();
-        if let Ok(rd) = std::fs::read_dir(&session_dir) {
+        if let Ok(rd) = std::fs::read_dir(session_dir) {
             for e in rd.flatten() {
                 let dir = e.path();
                 if !dir.is_dir() {

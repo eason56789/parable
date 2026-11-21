@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 pub struct OpenAiBase {
     base_url: String,
@@ -273,9 +273,45 @@ fn truncate(s: &str, n: usize) -> String {
     }
 }
 
+// ---------------------------------------------------------------- 退避重试
+
+/// 首字节前失败的最大重试次数(429/5xx/网络错误)。
+const MAX_RETRIES: u32 = 3;
+
+/// 可重试状态码:429(限流)与 500/502/503/529(上游过载/网关故障);
+/// 其余 4xx 是请求本身的问题,重发也是同样结果,不重试。
+fn retryable_status(status: reqwest::StatusCode) -> bool {
+    matches!(status.as_u16(), 429 | 500 | 502 | 503 | 529)
+}
+
+/// 退避时长:800ms * 2^n 封顶 8s,再加 0~250ms 抖动(同 opencode_free 的
+/// 写法,用毫秒时钟低位当抖动源)。
+fn backoff_delay(retry: u32) -> std::time::Duration {
+    let base = (800u64 << retry.min(4)).min(8_000);
+    let jitter = crate::event::now_ms() % 250;
+    std::time::Duration::from_millis(base + jitter)
+}
+
+/// 解析 Retry-After 头(只认秒数形态;HTTP 日期形态回落到常规退避)。
+fn retry_after_ms(resp: &reqwest::Response) -> Option<std::time::Duration> {
+    let v = resp
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()?;
+    Some(std::time::Duration::from_millis(v.saturating_mul(1000)))
+}
+
 /// 解析工具调用参数;坏 JSON 不再静默成空对象,带回原因与原始串前 200 字节,
-/// 让模型看到真实问题并自行修正。
+/// 让模型看到真实问题并自行修正。空参数串是合法的「无参调用」,直接给空
+/// 对象,不注入错误。
 fn parse_args(raw: &str) -> Value {
+    if raw.trim().is_empty() {
+        return json!({});
+    }
     serde_json::from_str(raw).unwrap_or_else(|_| {
         json!({
             "__args_error": "arguments were not valid JSON",
@@ -284,24 +320,26 @@ fn parse_args(raw: &str) -> Value {
     })
 }
 
-/// 按 index 顺序取出累积的工具调用并解析参数(BTreeMap 保证升序,多调用
-/// 不会乱序);缺 id 的合成稳定的 `call_{index}`。
+/// 按 index 顺序取出尚未 flush 的工具调用并解析参数(BTreeMap 保证升序,
+/// 多调用不会乱序);缺 id 的合成稳定的 `call_{index}`。条目 flush 后留在
+/// map 里并记入 `flushed`:finish_reason 之后个别中转还会补发同调用的
+/// args delta,清空 map 会让它重新成条,再次 flush 就变成同 id 两条
+/// ToolUse——跳过已 flush 的 index 才不会重复收尾。
 fn flush_calls(
     calls: &mut BTreeMap<i64, (String, String, String)>,
+    flushed: &mut HashSet<i64>,
 ) -> Vec<(String, String, Value)> {
-    // BTreeMap 没有 drain();先摘走再清空,保序输出。
-    let taken: Vec<(i64, (String, String, String))> =
-        calls.iter().map(|(k, v)| (*k, v.clone())).collect();
-    calls.clear();
-    taken
-        .into_iter()
-        .map(|(idx, (mut id, name, args))| {
-            if id.is_empty() {
-                id = format!("call_{idx}");
-            }
-            (id, name, parse_args(&args))
-        })
-        .collect()
+    let mut out = Vec::new();
+    for (idx, entry) in calls.iter_mut() {
+        if !flushed.insert(*idx) {
+            continue;
+        }
+        if entry.0.is_empty() {
+            entry.0 = format!("call_{idx}");
+        }
+        out.push((entry.0.clone(), entry.1.clone(), parse_args(&entry.2)));
+    }
+    out
 }
 
 /// chat-completions 的 SSE 解析。错误流统一为 `HarnessError`，好让
@@ -318,6 +356,14 @@ where
         let mut usage = Usage::default();
         // index -> (id, name, args);BTreeMap 让多个调用按 index 顺序收尾
         let mut calls: BTreeMap<i64, (String, String, String)> = BTreeMap::new();
+        // 已 flush 过的 index:finish_reason 收尾后迟到的 args delta 不再
+        // 触发第二次 ToolCallDone(同 id 两条 ToolUse 的根源)。
+        let mut flushed: HashSet<i64> = HashSet::new();
+        // finish_reason 透传(stop/tool_calls/length/content_filter…),
+        // Done 时带上;没有 finish_reason 的中转缺省按 stop 处理。
+        let mut stop_reason: Option<String> = None;
+        // 多 choice 警告只记一次,免得每个 chunk 都刷日志。
+        let mut warned_multi_choice = false;
 
         while let Some(item) = byte_stream.next().await {
             let chunk = match item {
@@ -329,10 +375,13 @@ where
                 for data in sse_data_lines(&raw) {
                     if data == "[DONE]" {
                         // 收尾:把还没 flush 的工具调用合成完成事件再结束
-                        for (id, name, args) in flush_calls(&mut calls) {
+                        for (id, name, args) in flush_calls(&mut calls, &mut flushed) {
                             yield Ok(StreamChunk::ToolCallDone { id, name, args });
                         }
-                        yield Ok(StreamChunk::Done { usage, stop_reason: Some("stop".into()) });
+                        yield Ok(StreamChunk::Done {
+                            usage,
+                            stop_reason: Some(stop_reason.unwrap_or_else(|| "stop".into())),
+                        });
                         return;
                     }
                     let v: Value = match serde_json::from_str(&data) { Ok(v) => v, Err(_) => continue };
@@ -341,6 +390,17 @@ where
                         usage.output_tokens = u["completion_tokens"].as_u64().unwrap_or(0);
                         usage.cache_read_input_tokens =
                             u.pointer("/prompt_tokens_details/cached_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
+                    }
+                    if !warned_multi_choice {
+                        if let Some(choices) = v.get("choices").and_then(|c| c.as_array()) {
+                            if choices.len() > 1 {
+                                warned_multi_choice = true;
+                                tracing::warn!(
+                                    "chat-completions 流返回了 {} 个 choices,只解析第一个",
+                                    choices.len()
+                                );
+                            }
+                        }
                     }
                     let Some(choice) = v.pointer("/choices/0") else { continue };
                     if let Some(d) = choice.get("delta") {
@@ -388,19 +448,25 @@ where
                     }
                     if let Some(finish) = choice.get("finish_reason").and_then(|x| x.as_str()) {
                         if finish == "stop" || finish == "tool_calls" {
-                            for (id, name, args) in flush_calls(&mut calls) {
+                            for (id, name, args) in flush_calls(&mut calls, &mut flushed) {
                                 yield Ok(StreamChunk::ToolCallDone { id, name, args });
                             }
                         }
+                        // length / content_filter 等原样透传,上层据此判断轮次
+                        // 是被截断还是被拦,不再一律报 stop。
+                        stop_reason = Some(finish.to_string());
                     }
                 }
             }
         }
         // 流自然结束(没有 [DONE] / finish_reason 的中转):同样补齐工具调用
-        for (id, name, args) in flush_calls(&mut calls) {
+        for (id, name, args) in flush_calls(&mut calls, &mut flushed) {
             yield Ok(StreamChunk::ToolCallDone { id, name, args });
         }
-        yield Ok(StreamChunk::Done { usage, stop_reason: Some("stop".into()) });
+        yield Ok(StreamChunk::Done {
+            usage,
+            stop_reason: Some(stop_reason.unwrap_or_else(|| "stop".into())),
+        });
     }
 }
 
@@ -588,16 +654,53 @@ impl Provider for OpenAiBase {
         };
         // 代理感知共享 client（设置 → 网络与隐私 → HTTP 代理）
         let client = crate::config::http_client();
-        let resp = client.post(&url).headers(self.headers()).json(&body).send().await?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            // 直接按字节切片会在 UTF-8 边界上 panic,用边界安全截断
-            return Err(HarnessError::Provider(format!(
-                "HTTP {status}: {}",
-                truncate(&text, 1500)
-            )));
-        }
+        // 429/5xx/网络错误退避重试:此时尚未产生任何流输出、请求体固定,
+        // 重发是安全的;拿到成功响应(或不可重试的失败)后循环结束,流式
+        // 阶段不再重试。
+        let mut attempt = 0u32;
+        let resp = loop {
+            let sent = client
+                .post(&url)
+                .headers(self.headers())
+                .json(&body)
+                .send()
+                .await;
+            match sent {
+                Ok(r) => {
+                    let status = r.status();
+                    if !status.is_success() {
+                        let retry_after = retry_after_ms(&r);
+                        let text = r.text().await.unwrap_or_default();
+                        if retryable_status(status) && attempt < MAX_RETRIES {
+                            attempt += 1;
+                            let delay = retry_after.unwrap_or_else(|| backoff_delay(attempt - 1));
+                            tracing::warn!(
+                                "openai: HTTP {status}(第 {attempt}/{MAX_RETRIES} 次重试,{}ms 后)",
+                                delay.as_millis()
+                            );
+                            tokio::time::sleep(delay).await;
+                            continue;
+                        }
+                        // 直接按字节切片会在 UTF-8 边界上 panic,用边界安全截断
+                        return Err(HarnessError::Provider(format!(
+                            "HTTP {status}: {}",
+                            truncate(&text, 1500)
+                        )));
+                    }
+                    break r;
+                }
+                Err(e) if attempt < MAX_RETRIES => {
+                    attempt += 1;
+                    let delay = backoff_delay(attempt - 1);
+                    tracing::warn!(
+                        "openai: 网络错误 {e}(第 {attempt}/{MAX_RETRIES} 次重试,{}ms 后)",
+                        delay.as_millis()
+                    );
+                    tokio::time::sleep(delay).await;
+                }
+                Err(e) => return Err(HarnessError::Http(e)),
+            }
+        };
         let self_kind = self.kind;
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<StreamChunk, HarnessError>>(64);
         if self_kind == "responses" {

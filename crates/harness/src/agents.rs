@@ -217,6 +217,9 @@ fn scan(dir: &Path, scope: &str, disabled: &[String], out: &mut AgentListing) {
 
 /// Split `---` front matter from the body and interpret the fields.
 fn parse(id: &str, scope: &str, text: &str) -> Result<AgentDef, String> {
+    // CRLF 行尾时 `lines()` 每行比磁盘字节少算 1 个 `\r`,body_start 按行
+    // 累计会整体偏短,正文开头混进残留的 `--` 前缀;解析前统一归一为 `\n`。
+    let text = text.replace("\r\n", "\n");
     let mut lines = text.lines();
     let first = lines.next().unwrap_or("").trim();
     if first != "---" {

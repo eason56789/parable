@@ -226,19 +226,63 @@ impl Provider for AnthropicProvider {
         let body = build_body(&req, self.thinking_supported);
         // 代理感知共享 client（设置 → 网络与隐私 → HTTP 代理）
         let client = crate::config::http_client();
-        let resp = client
-            .post(self.url())
-            .headers(self.headers())
-            .json(&body)
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            let text = truncate(&text, 2000);
-            return Err(HarnessError::Provider(format!("HTTP {status}: {text}")));
-        }
+        // 429/5xx/网络错误退避重试:此时尚未产生任何流输出、请求体固定,
+        // 重发是安全的;拿到成功响应(或不可重试的失败)后循环结束,流式
+        // 阶段不再重试。
+        let mut attempt = 0u32;
+        let resp = loop {
+            let sent = client
+                .post(self.url())
+                .headers(self.headers())
+                .json(&body)
+                .send()
+                .await;
+            match sent {
+                Ok(r) => {
+                    let status = r.status();
+                    // 成功响应原样交给流式解析;错误体在这里读完,判重试。
+                    if status.is_success() {
+                        break r;
+                    }
+                    let retry_after = retry_after_ms(&r);
+                    let text = r.text().await.unwrap_or_default();
+                    // Anthropic 过载时错误体 type 是 overloaded_error,即使
+                    // 状态码不在常规列表里也值得退避重试。
+                    let overloaded = serde_json::from_str::<Value>(&text)
+                        .ok()
+                        .and_then(|v| {
+                            v.pointer("/error/type")
+                                .and_then(|t| t.as_str())
+                                .map(String::from)
+                        })
+                        .is_some_and(|t| t == "overloaded_error");
+                    if (retryable_status(status) || overloaded) && attempt < MAX_RETRIES {
+                        attempt += 1;
+                        let delay = retry_after.unwrap_or_else(|| backoff_delay(attempt - 1));
+                        tracing::warn!(
+                            "anthropic: HTTP {status}(第 {attempt}/{MAX_RETRIES} 次重试,{}ms 后)",
+                            delay.as_millis()
+                        );
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    return Err(HarnessError::Provider(format!(
+                        "HTTP {status}: {}",
+                        truncate(&text, 2000)
+                    )));
+                }
+                Err(e) if attempt < MAX_RETRIES => {
+                    attempt += 1;
+                    let delay = backoff_delay(attempt - 1);
+                    tracing::warn!(
+                        "anthropic: 网络错误 {e}(第 {attempt}/{MAX_RETRIES} 次重试,{}ms 后)",
+                        delay.as_millis()
+                    );
+                    tokio::time::sleep(delay).await;
+                }
+                Err(e) => return Err(HarnessError::Http(e)),
+            }
+        };
 
         let byte_stream = resp.bytes_stream();
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<StreamChunk, HarnessError>>(64);
@@ -323,6 +367,38 @@ fn truncate(s: &str, n: usize) -> String {
         }
         format!("{}…(truncated)", &s[..end])
     }
+}
+
+// ---------------------------------------------------------------- 退避重试
+
+/// 首字节前失败的最大重试次数(429/5xx/网络错误)。
+const MAX_RETRIES: u32 = 3;
+
+/// 可重试状态码:429(限流)与 500/502/503/529(上游过载/网关故障);
+/// 其余 4xx 是请求本身的问题,重发也是同样结果,不重试。
+fn retryable_status(status: reqwest::StatusCode) -> bool {
+    matches!(status.as_u16(), 429 | 500 | 502 | 503 | 529)
+}
+
+/// 退避时长:800ms * 2^n 封顶 8s,再加 0~250ms 抖动(同 opencode_free 的
+/// 写法,用毫秒时钟低位当抖动源)。
+fn backoff_delay(retry: u32) -> std::time::Duration {
+    let base = (800u64 << retry.min(4)).min(8_000);
+    let jitter = crate::event::now_ms() % 250;
+    std::time::Duration::from_millis(base + jitter)
+}
+
+/// 解析 Retry-After 头(只认秒数形态;HTTP 日期形态回落到常规退避)。
+fn retry_after_ms(resp: &reqwest::Response) -> Option<std::time::Duration> {
+    let v = resp
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()?;
+    Some(std::time::Duration::from_millis(v.saturating_mul(1000)))
 }
 
 fn stream_chunks<S>(byte_stream: S) -> impl Stream<Item = Result<StreamChunk, HarnessError>> + Send
@@ -443,14 +519,19 @@ where
                             let index = v["index"].as_i64().unwrap_or(0);
                             if let Some(b) = blocks.remove(&index) {
                                 if b.kind == "tool" {
-                                    // 参数 JSON 解析失败不再静默成空对象:带回
-                                    // 原因与原始串,让模型能看到真实问题。
-                                    let args: Value = serde_json::from_str(&b.args).unwrap_or_else(|_| {
-                                        json!({
-                                            "__args_error": "arguments were not valid JSON",
-                                            "raw": truncate(&b.args, 200),
+                                    // 空参数串是合法的「无参调用」,直接给空对象;
+                                    // 只有非空且解析失败才注入 __args_error,
+                                    // 带回原因与原始串,让模型看到真实问题。
+                                    let args: Value = if b.args.trim().is_empty() {
+                                        json!({})
+                                    } else {
+                                        serde_json::from_str(&b.args).unwrap_or_else(|_| {
+                                            json!({
+                                                "__args_error": "arguments were not valid JSON",
+                                                "raw": truncate(&b.args, 200),
+                                            })
                                         })
-                                    });
+                                    };
                                     yield Ok(StreamChunk::ToolCallDone {
                                         id: b.id,
                                         name: b.name,
@@ -506,22 +587,36 @@ where
     }
 }
 
-/// 在字节缓冲里定位下一个 SSE 帧的结束位置(空行分隔:`\n\n` / `\r\n\r\n`,
-/// 兼容混用行尾的 `\n\r\n`)。返回帧的总字节数(含分隔符);None 表示还没有
-/// 完整帧。只在字节层扫描,跨 chunk 被切断的 UTF-8 多字节字符不会造成丢帧。
+/// 在字节缓冲里定位下一个 SSE 帧的结束位置。SSE 以空行分帧:标准 `\n\n` /
+/// `\r\n\r\n`,个别中转只有 `\r\r`。返回帧总字节数(含分隔符);None 表示
+/// 还没有完整帧。只在字节层扫描,跨 chunk 被切断的 UTF-8 字符不会丢帧。
+/// (与 openai.rs 的实现保持一致。)
 fn find_frame_boundary(b: &[u8]) -> Option<usize> {
-    for i in 0..b.len() {
-        if b[i] == b'\n' {
-            if i + 1 < b.len() && b[i + 1] == b'\n' {
-                return Some(i + 2);
+    let n = b.len();
+    for i in 0..n {
+        match b[i] {
+            b'\n' => {
+                if i + 1 < n && b[i + 1] == b'\n' {
+                    return Some(i + 2);
+                }
+                if i + 1 < n && b[i + 1] == b'\r' && i + 2 < n && b[i + 2] == b'\n' {
+                    return Some(i + 3);
+                }
             }
-            if i + 3 < b.len() && b[i + 1] == b'\r' && b[i + 2] == b'\n' && b[i + 3] == b'\n' {
-                return Some(i + 4);
+            b'\r' => {
+                if i + 1 < n && b[i + 1] == b'\r' {
+                    return Some(i + 2);
+                }
+                if i + 1 < n && b[i + 1] == b'\n' {
+                    if i + 2 < n && b[i + 2] == b'\n' {
+                        return Some(i + 3);
+                    }
+                    if i + 3 < n && b[i + 2] == b'\r' && b[i + 3] == b'\n' {
+                        return Some(i + 4);
+                    }
+                }
             }
-            // `\n\r\n`
-            if i + 1 < b.len() && b[i + 1] == b'\r' && i + 2 < b.len() && b[i + 2] == b'\n' {
-                return Some(i + 3);
-            }
+            _ => {}
         }
     }
     None
