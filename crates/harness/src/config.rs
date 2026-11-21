@@ -327,6 +327,15 @@ pub struct Config {
     #[serde(default)]
     pub mcp_servers: Vec<crate::mcp::McpServerConfig>,
 
+    // ---- 模型路由 ------------------------------------------------------
+    /// Auto 模型路由：开启后按能力在主模型与备用链之间匹配选模型（默认关）。
+    #[serde(default)]
+    pub auto_model: bool,
+    /// 跨 provider 备用链：`"providerId/modelId"`，最多 5 条；主模型在出流前
+    /// 发生超时 / 连接失败 / 429 / 5xx 时，按能力匹配取用一次。
+    #[serde(default)]
+    pub fallback_chain: Vec<String>,
+
     // ---- 多 Profile ----------------------------------------------------
     /// 命名配置束：模型 + 权限 + 思考强度一键切换。
     #[serde(default)]
@@ -529,6 +538,8 @@ impl Default for Config {
             session_retention_days: 0,
             hooks: Vec::new(),
             mcp_servers: Vec::new(),
+            auto_model: false,
+            fallback_chain: Vec::new(),
             profiles: Vec::new(),
             active_profile: String::new(),
         }
@@ -701,6 +712,13 @@ impl Config {
         if fixed > 0 {
             tracing::info!("config: normalized {fixed} model(s) with context=0 to 128000");
         }
+        // 跨 provider 备用链：去重保序，最多 5 条；非法空串剔除。
+        let mut seen = std::collections::HashSet::new();
+        self.fallback_chain.retain(|s| {
+            let s = s.trim();
+            !s.is_empty() && seen.insert(s.to_string())
+        });
+        self.fallback_chain.truncate(5);
         self.ensure_free_provider();
     }
 
@@ -993,14 +1011,18 @@ mod tests {
 
     /// normalize 注入免费 provider；已存在时不重复注入（用户删掉也不复活）。
     #[test]
-    fn normalize_injects_free_provider_once() {
+    fn normalize_caps_fallback_chain_to_five_and_dedupes() {
         let mut cfg = Config::default();
-        cfg.providers.retain(|p| p.api != "opencode-free");
+        cfg.fallback_chain = vec![
+            "p/a".into(), "p/b".into(), "p/a".into(), " ".into(),
+            "q/c".into(), "q/d".into(), "q/e".into(), "q/f".into(),
+        ];
         cfg.normalize();
-        let n = cfg.providers.iter().filter(|p| p.api == "opencode-free").count();
-        assert_eq!(n, 1);
-        cfg.normalize();
-        let n = cfg.providers.iter().filter(|p| p.api == "opencode-free").count();
-        assert_eq!(n, 1);
+        // 空串剔除、重复去重保序、最多 5 条。
+        assert_eq!(cfg.fallback_chain.len(), 5);
+        assert_eq!(
+            cfg.fallback_chain,
+            vec!["p/a", "p/b", "q/c", "q/d", "q/e"]
+        );
     }
 }

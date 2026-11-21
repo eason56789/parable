@@ -63,6 +63,36 @@ impl HarnessError {
             other => format!("Error: {other}"),
         }
     }
+
+    /// fallback 事件的标准化原因标签：`timeout` | `connect` | `429` | `5xx`。
+    /// 不可降级的故障（4xx 鉴权/参数、工具错误等）返回 `"error"`。
+    pub fn fallback_reason(&self) -> &'static str {        match self {
+            HarnessError::Http(e) if e.is_timeout() => "timeout",
+            HarnessError::Http(e) if e.is_connect() => "connect",
+            HarnessError::Provider(msg) => {
+                let rest = msg.strip_prefix("HTTP ").unwrap_or(msg);
+                let code: u16 = rest
+                    .split(|c: char| !c.is_ascii_digit())
+                    .next()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                match code {
+                    429 => "429",
+                    500..=599 => "5xx",
+                    _ => "error",
+                }
+            }
+            _ => "error",
+        }
+    }
+}
+
+/// 是否允许在出流前切换备用模型：**尚未出流** + 错误可重试 + 还有下一条候选。
+///
+/// 一旦已有 token 产出（`streamed = true`），不再降级——避免两段半截内容混拼，
+/// 后续错误走正常错误路径。
+pub fn may_fallback(streamed: bool, err: &HarnessError, has_next: bool) -> bool {
+    !streamed && has_next && err.is_retryable()
 }
 
 #[cfg(test)]
@@ -89,5 +119,44 @@ mod tests {
         assert!(!HarnessError::Provider("model said something".into()).is_retryable());
         assert!(!HarnessError::Other("io-ish".into()).is_retryable());
         assert!(!HarnessError::Tool("bash failed".into()).is_retryable());
+    }
+
+    #[test]
+    fn fallback_reason_classifies_standard_labels() {
+        assert_eq!(
+            HarnessError::Provider("HTTP 429: rate limited".into()).fallback_reason(),
+            "429"
+        );
+        assert_eq!(
+            HarnessError::Provider("HTTP 503: overloaded".into()).fallback_reason(),
+            "5xx"
+        );
+        assert_eq!(
+            HarnessError::Provider("HTTP 500: boom".into()).fallback_reason(),
+            "5xx"
+        );
+        // 4xx 与无状态码 / 其它类型归为 error，不进 fallback 原因标签。
+        assert_eq!(
+            HarnessError::Provider("HTTP 401: unauthorized".into()).fallback_reason(),
+            "error"
+        );
+        assert_eq!(
+            HarnessError::Provider("model said something".into()).fallback_reason(),
+            "error"
+        );
+        assert_eq!(HarnessError::Tool("bash failed".into()).fallback_reason(), "error");
+    }
+
+    #[test]
+    fn may_fallback_guards_post_stream_downgrade() {
+        let retryable = HarnessError::Provider("HTTP 503: overloaded".into());
+        let terminal = HarnessError::Provider("HTTP 401: unauthorized".into());
+        // 未出流 + 可重试 + 有候选 → 允许降级。
+        assert!(may_fallback(false, &retryable, true));
+        // 出流后即便可重试、有候选，也不再降级。
+        assert!(!may_fallback(true, &retryable, true));
+        // 无可选候选 / 终态错误不降级。
+        assert!(!may_fallback(false, &retryable, false));
+        assert!(!may_fallback(false, &terminal, true));
     }
 }

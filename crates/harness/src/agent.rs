@@ -1,8 +1,8 @@
 //! The agent loop: stream from a provider, run tool calls, repeat until the model
 //! is done. Also owns the question broker (`ask_user`) and per-session turn control.
 
-use crate::config::Config;
-use crate::error::HarnessError;
+use crate::config::{Config, ModelConfig, ProviderConfig};
+use crate::error::{may_fallback, HarnessError};
 use crate::event::EventHub;
 use crate::permission::PermissionBroker;
 use crate::provider::{self, AsstPart, ChatRequest, ChunkStream, Msg, StreamChunk, ToolSpec, UserPart};
@@ -872,7 +872,7 @@ impl AgentRuntime {
                 p.name
             )));
         }
-        let primary = (build_bound(p, &m.id, m.thinking), m.id.clone());
+        let primary = build_candidate(p, m);
         // 阶段四·fallback 链：同 provider 内按 fallbacks 列表解析备用模型；
         // 未配置或备用模型被禁用/不存在则跳过，不启用降级。
         let fallbacks = m
@@ -880,10 +880,30 @@ impl AgentRuntime {
             .iter()
             .filter_map(|fb| {
                 let fm = p.models.iter().find(|x| x.id == *fb && x.enabled)?;
-                Some((build_bound(p, &fm.id, fm.thinking), fm.id.clone()))
+                Some(build_candidate(p, fm))
             })
             .collect();
-        Ok(ProviderChain { primary, fallbacks })
+        // 跨 provider 备用：按 fallback_chain 选择串解析，能力匹配主模型；
+        // 缺 key（非免费通道）、禁用、不存在、能力不达标或与主模型重复则跳过。
+        let mut cross: Vec<ChainCandidate> = Vec::new();
+        for sel in &cfg.fallback_chain {
+            let Some((pid, mid)) = parse_selector(sel) else { continue };
+            let Some(cp) = cfg.providers.iter().find(|x| x.id == pid && x.enabled) else { continue };
+            if cp.key.is_empty() && cp.api != "opencode-free" {
+                continue;
+            }
+            let Some(cm) = cp.models.iter().find(|x| x.id == mid && x.enabled) else { continue };
+            if cp.id == primary.desc.provider_id && cm.id == primary.desc.model_id {
+                continue;
+            }
+            let cand = build_candidate(cp, cm);
+            if !capabilities_match(&primary.desc, &cand.desc) {
+                continue;
+            }
+            cross.push(cand);
+        }
+        cross.truncate(5);
+        Ok(ProviderChain { primary, fallbacks, cross })
     }
 
     /// Fail fast when the selected/fallback model has no usable provider or key.
@@ -927,7 +947,7 @@ impl AgentRuntime {
             render_for_summary(&history[..split])
         );
         let chain = self.resolve_provider(model_sel).await?;
-        let provider = chain.primary.0;
+        let provider = chain.primary.provider;
         let summary = summarize(
             provider.as_ref(),
             COMPACTION_PROMPT,
@@ -1074,7 +1094,7 @@ impl AgentRuntime {
             Ok(p) => p,
             Err(e) => return ("paused".into(), format!("无法调用模型进行判定：{e}")),
         };
-        let provider = chain.primary.0;
+        let provider = chain.primary.provider;
         // Show the judge the tail of the conversation, not the whole thing.
         let msgs = self.store.messages(session_id).await;
         let mut tail = String::new();
@@ -1417,8 +1437,26 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
                 return Err(e);
             }
         };
-        let (mut provider, mut model_id) = chain.primary;
+        let mut current: ModelCandidate = chain.primary.desc;
+        let mut provider = chain.primary.provider;
         let mut fallbacks = chain.fallbacks;
+        let mut cross = chain.cross;
+        // Auto 路由开启：从跨 provider 备用链里挑第一个能力匹配的作为起始模型；
+        // 否则走配置主模型。该选择只影响起始点，不改变失败时的降级顺序。
+        let auto_model = self.config.read().await.auto_model;
+        let mut auto_reason = "primary";
+        if auto_model {
+            if let Some(idx) = cross
+                .iter()
+                .position(|c| capabilities_match(&current, &c.desc))
+            {
+                let cand = cross.remove(idx);
+                auto_reason = "capability";
+                provider = cand.provider;
+                current = cand.desc;
+            }
+        }
+        let mut model_id = current.model_id.clone();
 
         // 每轮一个 Registry（带 search 配置），specs() 与工具执行共用同一实例，
         // 修复搜索配置到不了执行现场的问题。
@@ -1628,19 +1666,32 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
 
             let model_t0 = std::time::Instant::now();
 
+            // 起始模型路由结果：primary（配置主模型）/ capability（auto 按能力挑中）。
+            self.hub.publish(
+                session_id,
+                "model.auto",
+                json!({
+                    "provider": current.provider_id,
+                    "model": current.model_id,
+                    "reason": auto_reason,
+                }),
+            );
+
             // 阶段四·fallback 链：仅在「连接建立前」的瞬时故障（连接失败 / 5xx /
             // 429 / 超时）切换备用模型；流一旦开始产出 chunk，后续错误不再降级，
             // 避免两段半截内容混拼。主 provider 不被 move，避免与压缩协程的借用冲突。
-            let mut fallback_active: Option<(Box<dyn provider::Provider>, String)> = None;
+            let mut fallback_active: Option<ChainCandidate> = None;
+            // 跨 provider 备用只取一次；同 provider 备用仍按列表逐条尝试。
+            let mut cross_used = false;
             let mut stream: Option<ChunkStream> = None;
             let mut final_err: Option<HarnessError> = None;
             loop {
-                let (prov, mid, is_fallback) = match &fallback_active {
-                    Some((p, m)) => (p.as_ref(), m.clone(), true),
-                    None => (provider.as_ref(), model_id.clone(), false),
+                let (prov, desc, is_fallback) = match &fallback_active {
+                    Some(c) => (c.provider.as_ref(), &c.desc, true),
+                    None => (provider.as_ref(), &current, false),
                 };
                 let mut req_attempt = req.clone();
-                req_attempt.model = mid.clone();
+                req_attempt.model = desc.model_id.clone();
                 let attempt_result = tokio::select! {
                     biased;
                     _ = cancel.cancelled() => break 'turn Ok("cancelled".to_string()),
@@ -1650,26 +1701,48 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
                     Ok(s) => {
                         // 命中备用：把生效的 provider/model 写回，供后续压缩与审计使用。
                         if is_fallback {
-                            if let Some((p, m)) = fallback_active.take() {
-                                provider = p;
-                                model_id = m;
+                            if let Some(c) = fallback_active.take() {
+                                provider = c.provider;
+                                model_id = c.desc.model_id.clone();
+                                current = c.desc;
                             }
                         }
                         stream = Some(s);
                         break;
                     }
                     Err(e) => {
-                        let has_next = !fallbacks.is_empty();
-                        if e.is_retryable() && has_next {
-                            let from = mid.clone();
-                            let next = fallbacks[0].1.clone();
-                            self.hub.publish(
-                                session_id,
-                                "model.fallback",
-                                json!({"turnId": turn_id, "from": from, "to": next, "reason": e.to_string()}),
-                            );
-                            fallback_active = Some(fallbacks.remove(0));
-                            continue;
+                        // 下一条候选：先同 provider 备用，再跨 provider（仅一次）。
+                        let next: Option<ChainCandidate> = if !fallbacks.is_empty() {
+                            Some(fallbacks.remove(0))
+                        } else if !cross_used && !cross.is_empty() {
+                            cross_used = true;
+                            Some(cross.remove(0))
+                        } else {
+                            None
+                        };
+                        if may_fallback(false, &e, next.is_some()) {
+                            if let Some(cand) = next {
+                                self.hub.publish(
+                                    session_id,
+                                    "model.fallback",
+                                    json!({
+                                        "from": {"provider": current.provider_id, "model": current.model_id},
+                                        "to": {"provider": cand.desc.provider_id, "model": cand.desc.model_id},
+                                        "reason": e.fallback_reason(),
+                                    }),
+                                );
+                                self.hub.publish(
+                                    session_id,
+                                    "model.auto",
+                                    json!({
+                                        "provider": cand.desc.provider_id,
+                                        "model": cand.desc.model_id,
+                                        "reason": "fallback",
+                                    }),
+                                );
+                                fallback_active = Some(cand);
+                                continue;
+                            }
                         }
                         final_err = Some(e);
                         break;
@@ -2678,14 +2751,85 @@ fn spawn_goal_run(
     });
 }
 
-/// 阶段四·模型 fallback 链：主模型 + 同 provider 备用模型列表。
+/// 链上候选的纯数据快照（可克隆、可单测）：定位标识 + 能力维度。
+#[derive(Debug, Clone)]
+pub struct ModelCandidate {
+    pub provider_id: String,
+    pub provider_name: String,
+    pub model_id: String,
+    pub vision: bool,
+    pub tools: bool,
+    pub thinking: bool,
+    pub context: u64,
+}
+
+/// 链上一条可调用模型：绑定好的 provider 实例 + 数据快照。
+pub struct ChainCandidate {
+    pub provider: Box<dyn provider::Provider>,
+    pub desc: ModelCandidate,
+}
+
+/// 阶段四·模型 fallback 链：主模型 + 同 provider 备用 + 跨 provider 备用。
 pub struct ProviderChain {
-    pub primary: (Box<dyn provider::Provider>, String),
-    pub fallbacks: Vec<(Box<dyn provider::Provider>, String)>,
+    pub primary: ChainCandidate,
+    /// 同 provider 内备用（既有行为，`ModelConfig.fallbacks`）。
+    pub fallbacks: Vec<ChainCandidate>,
+    /// 跨 provider 备用（`Config.fallback_chain`，能力匹配后保留）。
+    pub cross: Vec<ChainCandidate>,
+}
+
+/// 解析 `"providerId/modelId"` 选择串；空段或缺 `/` 返回 None。
+pub fn parse_selector(sel: &str) -> Option<(&str, &str)> {
+    let (p, m) = sel.split_once('/')?;
+    if p.is_empty() || m.is_empty() {
+        None
+    } else {
+        Some((p, m))
+    }
+}
+
+/// 能力匹配：主模型要求的 vision/thinking/tools 候选不能缺；候选上下文窗口
+/// 不得小于主模型。主模型不要求的维度不约束候选。
+pub fn capabilities_match(primary: &ModelCandidate, cand: &ModelCandidate) -> bool {
+    (!primary.vision || cand.vision)
+        && (!primary.thinking || cand.thinking)
+        && (!primary.tools || cand.tools)
+        && cand.context >= primary.context
+}
+
+/// 从候选描述里挑出满足主模型能力要求的，保持原序，最多 `limit` 条。
+pub fn select_capable(
+    primary: &ModelCandidate,
+    descs: &[ModelCandidate],
+    limit: usize,
+) -> Vec<ModelCandidate> {
+    descs
+        .iter()
+        .filter(|c| capabilities_match(primary, c))
+        .take(limit)
+        .cloned()
+        .collect()
+}
+
+/// Construct a bound candidate from provider + model config.
+fn build_candidate(p: &ProviderConfig, m: &ModelConfig) -> ChainCandidate {
+    let desc = ModelCandidate {
+        provider_id: p.id.clone(),
+        provider_name: p.name.clone(),
+        model_id: m.id.clone(),
+        vision: m.vision,
+        tools: m.tools,
+        thinking: m.thinking,
+        context: m.context,
+    };
+    ChainCandidate {
+        provider: build_bound(p, &m.id, m.thinking),
+        desc,
+    }
 }
 
 /// Construct a provider bound to a concrete model id.
-fn build_bound(cfg: &crate::config::ProviderConfig, model_id: &str, thinking: bool) -> Box<dyn provider::Provider> {
+fn build_bound(cfg: &ProviderConfig, model_id: &str, thinking: bool) -> Box<dyn provider::Provider> {
     match cfg.api.as_str() {
         "anthropic" => Box::new(
             provider::anthropic::AnthropicProvider::new(cfg).with_model(model_id, thinking),
@@ -3109,6 +3253,66 @@ mod tests {
         // 全是 tool_result 顶到 0 时返回 0（调用方按"无处可切"处理）。
         let only_results = vec![msgs[2].clone()];
         assert_eq!(align_compact_split(&only_results, 1), 0);
+    }
+
+    fn capability_cand(
+        provider_id: &str,
+        model_id: &str,
+        vision: bool,
+        tools: bool,
+        thinking: bool,
+        context: u64,
+    ) -> ModelCandidate {
+        ModelCandidate {
+            provider_id: provider_id.to_string(),
+            provider_name: String::new(),
+            model_id: model_id.to_string(),
+            vision,
+            tools,
+            thinking,
+            context,
+        }
+    }
+
+    #[test]
+    fn capability_match_filters_missing_features_and_smaller_context() {
+        let primary = capability_cand("p1", "m1", true, true, true, 100_000);
+        // 全满足。
+        let ok = capability_cand("p2", "m2", true, true, true, 120_000);
+        assert!(capabilities_match(&primary, &ok));
+        // 缺 vision / tools / thinking，或上下文更小，均淘汰。
+        assert!(!capabilities_match(&primary, &capability_cand("p2", "m3", false, true, true, 120_000)));
+        assert!(!capabilities_match(&primary, &capability_cand("p2", "m4", true, false, true, 120_000)));
+        assert!(!capabilities_match(&primary, &capability_cand("p2", "m5", true, true, false, 120_000)));
+        assert!(!capabilities_match(&primary, &capability_cand("p2", "m6", true, true, true, 80_000)));
+        // 主模型不要求的维度不约束候选。
+        let plain_primary = capability_cand("p1", "m0", false, true, false, 100_000);
+        let plain = capability_cand("p2", "m7", false, true, false, 100_000);
+        assert!(capabilities_match(&plain_primary, &plain));
+    }
+
+    #[test]
+    fn select_capable_keeps_order_and_respects_limit() {
+        let primary = capability_cand("p1", "m1", false, true, false, 100_000);
+        let descs = vec![
+            capability_cand("p2", "a", false, true, false, 120_000),
+            capability_cand("p3", "b", false, false, false, 120_000), // 缺 tools，淘汰
+            capability_cand("p4", "c", false, true, false, 110_000),
+        ];
+        let picked = select_capable(&primary, &descs, 5);
+        assert_eq!(
+            picked.iter().map(|c| c.model_id.clone()).collect::<Vec<_>>(),
+            vec!["a", "c"]
+        );
+        assert_eq!(select_capable(&primary, &descs, 1).len(), 1);
+    }
+
+    #[test]
+    fn parse_selector_rejects_empty_and_malformed() {
+        assert_eq!(parse_selector("p/m"), Some(("p", "m")));
+        assert_eq!(parse_selector("/m"), None);
+        assert_eq!(parse_selector("p/"), None);
+        assert_eq!(parse_selector("plain"), None);
     }
 
     #[allow(dead_code)]

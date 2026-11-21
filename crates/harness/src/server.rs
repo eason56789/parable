@@ -1269,6 +1269,23 @@ fn merge_config(cfg: &mut Config, v: &Value) {
                         cfg.mcp_servers = ms;
                     }
                 }
+                // ---- 模型路由 ----
+                "autoModel" | "auto_model" => {
+                    cfg.auto_model = val.as_bool().unwrap_or(false);
+                }
+                "fallbackChain" | "fallback_chain" => {
+                    let chain: Vec<String> = val
+                        .as_array()
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    cfg.fallback_chain = chain;
+                    // 去重 + 截断到 5 条在 normalize 里收口。
+                    cfg.normalize();
+                }
                 // ---- profiles ----
                 "profiles" => {
                     if let Ok(ps) = serde_json::from_value(val.clone()) {
@@ -3932,7 +3949,7 @@ async fn environment(
     if !check_auth(&headers, q.token.as_deref(), &state) {
         return unauthorized();
     }
-    let (model_json, ctx_limit, workspace, permission_mode, sandbox_mode) = {
+    let (model_json, ctx_limit, workspace, permission_mode, sandbox_mode, auto_model, fallback_chain) = {
         let cfg = state.config.read().await;
         let (model_json, limit) = match cfg.active_model() {
             Some((p, m)) => (
@@ -3962,6 +3979,8 @@ async fn environment(
             cfg.workspace.clone(),
             cfg.permission_mode.clone(),
             cfg.sandbox.mode.clone(),
+            cfg.auto_model,
+            cfg.fallback_chain.clone(),
         )
     };
 
@@ -4038,8 +4057,8 @@ async fn environment(
         },
         "permissionMode": permission_mode,
         "sandbox": {"mode": sandbox_mode, "policy": "v1"},
-        // Auto 路由开关与备用链在 Phase 2 接入 config；此处先按契约默认值输出。
-        "auto": {"enabled": false, "fallbackChain": json!([])},
+        // Auto 路由开关与备用链来自 config（PATCH /api/config 可写）。
+        "auto": {"enabled": auto_model, "fallbackChain": fallback_chain},
     }))
     .into_response()
 }
@@ -5099,5 +5118,41 @@ mod regression {
         let v: Value = res.json().await.unwrap();
         assert_eq!(v["tokens"]["total"].as_u64(), Some(0));
         assert!(v["tps"]["value"].is_null());
+    }
+
+    #[tokio::test]
+    async fn patch_config_writes_auto_model_and_caps_fallback_chain() {
+        let (base, token) = spawn_server("autocfg").await;
+        let cli = reqwest::Client::new();
+        // 7 条备用链：归一化去重 + 截断到 5。
+        let body = json!({
+            "autoModel": true,
+            "fallbackChain": ["p/a", "p/b", "p/a", "q/c", "q/d", "q/e", "q/f"]
+        });
+        let res = cli
+            .patch(format!("{base}/api/config"))
+            .header("x-parable-token", &token)
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+
+        let cfg: Value = cli
+            .get(format!("{base}/api/config"))
+            .header("x-parable-token", &token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(cfg["auto_model"], true);
+        let chain = cfg["fallback_chain"].as_array().unwrap();
+        assert_eq!(chain.len(), 5);
+        assert_eq!(
+            chain.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>(),
+            vec!["p/a", "p/b", "q/c", "q/d", "q/e"]
+        );
     }
 }
