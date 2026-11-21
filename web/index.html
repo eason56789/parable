@@ -1785,11 +1785,6 @@ body.r2-ws-drag #r2-ws{transition:none}
 .pkauto:hover{background:none}
 .pkauto div b{font:var(--fs-body) var(--sans);color:var(--fg)}
 
-/* —— 底部遥测条（高频数字 aria-live=off，视觉更新即可） —— */
-#r2-tel{display:flex;justify-content:center;gap:14px;flex-wrap:wrap;margin-top:6px;font:11px var(--sans);color:var(--fg2)}
-.r2-tel-i{display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
-.r2-tel-i b{color:var(--fg);font-weight:600}
-
 /* —— 文件树右键菜单（自绘，不用系统菜单） —— */
 #r2-ctx-menu{position:fixed;z-index:90;min-width:208px;padding:6px;border-radius:11px;
   background:color-mix(in srgb,var(--bg) 94%,transparent);backdrop-filter:blur(12px);
@@ -1978,13 +1973,6 @@ body.r2-ws-drag #r2-ws{transition:none}
               <div class="spr"><span><i class="dot b3"></i><span data-i="cx_msgs">对话消息</span></span><span id="p-msgs">~0</span></div>
             </div>
           </button>
-        </div>
-        <div id="r2-tel" aria-live="off">
-          <span class="r2-tel-i" id="r2-tel-turns" title="轮数 / 步数">—</span>
-          <span class="r2-tel-i" id="r2-tel-tps" title="输出速度（最近 10s 滑动窗口）">—</span>
-          <span class="r2-tel-i" id="r2-tel-cache" title="缓存命中率">—</span>
-          <span class="r2-tel-i" id="r2-tel-ctx" title="上下文占用">—</span>
-          <span class="r2-tel-i" id="r2-tel-elapsed" title="本轮耗时">—</span>
         </div>
         <div class="disc" data-i="disc"></div>
       </div>
@@ -8987,6 +8975,9 @@ async function openSession(id, focusMsg) {
     // 从搜索结果跳进来：滚动到命中的那条消息并高亮一下。
     // restamp 是异步的（下标回填要拉一次存储），所以等它跑完再定位。
     await restamp();
+    // 历史会话没有实时 status 事件：用遥测把底部状态栏的轮/步/速度/Token/上下文补上，
+    // 否则只有顶部胶囊是 0，看着像统计失效。
+    r2SyncStatusBar(id);
     // 长会话折叠：只保留最近 N 个用户轮次的 DOM，early 轮次收进一行
     // 「展开更早的 N 轮」。每轮助手气泡里的思考块、工具卡与 Markdown
     // 都是重对象——几百条消息的会话原先会堆出上万节点，滚动与内存都受
@@ -15555,7 +15546,6 @@ const R2 = {
   tabs: [],
   active: null,
   env: null,
-  telSid: null,
   popLast: null
 };
 
@@ -16067,34 +16057,43 @@ function r2PaintMcp(mcp) {
   });
 }
 
-/* ---------- 底部遥测条（2s 轮询，会话切换自动重置） ---------- */
-function r2TelReset() {
-  ['turns', 'tps', 'cache', 'ctx', 'elapsed'].forEach(k => {
-    const el = $('#r2-tel-' + k);
-    if (el) el.textContent = '—';
-  });
-}
-
-async function r2TelPoll() {
-  const sid = (conv && conv.id) || null;
-  if (sid !== R2.telSid) { R2.telSid = sid; r2TelReset(); }
+/* ---------- 底部状态栏补数：打开历史会话时用遥测数据回填 ----------
+   状态栏原本只由实时 SSE status 事件更新，进历史会话会停在 0；
+   顶部遥测条已按验收删除，这里把同一份数据回填到状态栏胶囊与弹层。 */
+async function r2SyncStatusBar(sid) {
   if (!sid) return;
   let d;
   try { d = await api('/telemetry?session=' + encodeURIComponent(sid)); }
-  catch (e) { r2TelReset(); return; }
-  // 路由未上线时回退 SPA HTML（{raw}）：按无数据处理，全部显 —。
-  if (!d || typeof d !== 'object' || 'raw' in d) { r2TelReset(); return; }
-  r2PaintTel(d);
-}
-
-function r2PaintTel(d) {
-  const set = (id, html) => { const el = $('#r2-tel-' + id); if (el) el.innerHTML = html; };
-  const t = d.turn || {}, tp = d.tps || {}, ca = d.cache || {}, cx = d.context || {};
-  set('turns', (t.rounds || 0) + ' 轮 · ' + (t.steps || 0) + ' 步');
-  set('tps', tp.value != null ? '<b>' + Number(tp.value).toFixed(1) + '</b> tok/s' : '—');
-  set('cache', ca.supported && ca.hitRate != null ? '<b>' + Math.round(ca.hitRate * 100) + '%</b>' : '—');
-  set('ctx', cx.limit ? '<b>' + Math.round((cx.pct != null ? cx.pct : (cx.used || 0) / cx.limit) * 100) + '%</b>' : '—');
-  set('elapsed', t.elapsedMs != null ? fmtMs(t.elapsedMs) : '—');
+  catch (e) { return; }
+  if (!d || typeof d !== 'object' || 'raw' in d) return;
+  if (!conv || conv.id !== sid) return;
+  const tn = d.turn || {}, tp = d.tps || {}, tk = d.tokens || {}, ca = d.cache || {}, cx = d.context || {};
+  const set = (id, v) => { const el = $('#' + id); if (el) el.textContent = v; };
+  const rounds = tn.rounds || 0, steps = tn.steps || 0;
+  const tpsTx = tp.value != null ? Number(tp.value).toFixed(1) : '0';
+  set('sb-stats-tx', rounds + ' ' + t('u_turns') + ' ' + steps + ' ' + t('u_steps') + ' · ' + tpsTx + ' tok/s');
+  set('p-stats-top', rounds + ' ' + t('u_turns') + ' ' + steps + ' ' + t('u_steps'));
+  set('p-tps', tpsTx + ' tok/s');
+  const total = tk.total || 0;
+  const hit = ca.supported && ca.hitRate != null ? Math.round(ca.hitRate * 100) : 0;
+  set('sb-token-tx', kfmt(total) + ' tok · ' + t('cache_hit') + ' ' + hit + '%');
+  set('p-token-top', total.toLocaleString() + ' tok');
+  set('p-cache-hit', hit + '%');
+  set('p-cache-read', (ca.read || 0).toLocaleString() + ' tok');
+  set('p-uncached', Math.max(0, (tk.prompt || 0) - (ca.read || 0)).toLocaleString() + ' tok');
+  set('p-output', (tk.completion || 0).toLocaleString() + ' tok');
+  const used = cx.used || 0, limit = cx.limit || 0;
+  if (limit) {
+    const pct = Math.round((used / limit) * 100);
+    set('sb-ctx-tx', pct + '%');
+    set('p-ctx-pct', pct + '%');
+    set('p-ctx-val', '~' + kfmt(used) + ' / ' + kfmt(limit));
+    const el = $('#sb-ctx-tx');
+    if (el) {
+      const warn = S.ctxWarnPct || 80;
+      el.style.color = pct >= warn + 10 ? '#d4574c' : pct >= warn ? '#e0a03c' : '';
+    }
+  }
 }
 
 /* ---------- 初始化 ---------- */
@@ -16108,8 +16107,6 @@ function r2Init() {
   // 拉一次数据。原先只有点击开关（r2Toggle）才会 fetch，重开页面后整栏
   // 停在占位文案，看上去像「数据全空」。
   if (R2.envOpen) r2LoadEnv();
-  setInterval(r2TelPoll, 2000);
-  r2TelPoll();
 }
 
 /* 面板宽度拖拽：280→380，松手持久化；双击复位；键盘 ←/→ 微调 8px。 */
