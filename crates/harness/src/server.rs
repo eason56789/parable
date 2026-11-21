@@ -301,7 +301,13 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/git/status", get(git_status))
         .route("/git/diff", get(git_diff))
         .route("/browser/state", get(browser_state))
+        .route("/browser/meta", get(browser_meta))
+        .route("/browser/text", get(browser_text))
         .route("/browser/navigate", post(browser_navigate))
+        .route("/browser/scroll", post(browser_scroll))
+        .route("/browser/input", post(browser_input))
+        .route("/browser/viewport", post(browser_viewport))
+        .route("/browser/stop", post(browser_stop))
         // 内置浏览器操作：后退 / 前进 / 刷新 / 侧栏点击穿透
         .route("/browser/back", post(browser_history_go::<-1>))
         .route("/browser/forward", post(browser_history_go::<1>))
@@ -3532,11 +3538,34 @@ async fn browser_history_go<const DELTA: i32>(
     }
 }
 
-async fn browser_reload(State(state): State<SharedState>, headers: HeaderMap) -> Response {
+#[derive(Debug, Deserialize, Default)]
+struct BrowserReloadQuery {
+    /// 接受 `?hard=1` 与 `?hard=true` 两种写法；bool 反序列化只认 true/false，
+    /// 侧栏 JS 用的是 1。
+    #[serde(default)]
+    hard: Option<String>,
+}
+
+async fn browser_reload(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(q): Query<BrowserReloadQuery>,
+) -> Response {
     if !check_auth(&headers, None, &state) {
         return unauthorized();
     }
-    match state.agent.computer.reload().await {
+    let hard = q
+        .hard
+        .as_deref()
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false);
+    let bridge = state.agent.computer.clone();
+    let res = if hard {
+        bridge.reload_hard().await
+    } else {
+        bridge.reload().await
+    };
+    match res {
         Ok(()) => Json(json!({"ok": true})).into_response(),
         Err(e) => server_error(e),
     }
@@ -3562,7 +3591,116 @@ async fn browser_click(
     }
 }
 
-/// GET /browser-boot — 内置浏览器 app 窗口的引导页：--app= 需要真实 URL，
+#[derive(Debug, Deserialize)]
+struct BrowserScrollReq {
+    x: f64,
+    y: f64,
+    #[serde(default)]
+    dx: f64,
+    #[serde(default)]
+    dy: f64,
+}
+
+async fn browser_scroll(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(r): Json<BrowserScrollReq>,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    // 页面坐标防越界：侧栏换算后可能因图片取整多出 0.5px。
+    let x = r.x.clamp(0.0, 100_000.0);
+    let y = r.y.clamp(0.0, 100_000.0);
+    let dx = r.dx.clamp(-5000.0, 5000.0);
+    let dy = r.dy.clamp(-5000.0, 5000.0);
+    if dx == 0.0 && dy == 0.0 {
+        return Json(json!({"ok": true})).into_response();
+    }
+    match state.agent.computer.scroll_at(x, y, dx, dy).await {
+        Ok(()) => Json(json!({"ok": true})).into_response(),
+        Err(e) => server_error(e),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct BrowserInputReq {
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    key: Option<String>,
+}
+
+async fn browser_input(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(r): Json<BrowserInputReq>,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    let bridge = state.agent.computer.clone();
+    let res = if let Some(key) = r.key.as_deref().filter(|k| !k.is_empty()) {
+        bridge.press_key_combo(key).await
+    } else if let Some(text) = r.text.as_deref() {
+        if text.chars().count() > 4096 {
+            return bad_request("一次输入的文本过长");
+        }
+        bridge.insert_text(text).await
+    } else {
+        return bad_request("text 或 key 必填");
+    };
+    match res {
+        Ok(()) => Json(json!({"ok": true})).into_response(),
+        Err(e) => server_error(e),
+    }
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct BrowserViewportReq {
+    #[serde(default)]
+    width: Option<u32>,
+    #[serde(default)]
+    height: Option<u32>,
+}
+
+async fn browser_viewport(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(r): Json<BrowserViewportReq>,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    let bridge = state.agent.computer.clone();
+    let (w, h) = match (r.width, r.height) {
+        (Some(w), Some(h)) if w > 0 && h > 0 => (w, h),
+        _ => {
+            return match bridge.clear_viewport().await {
+                Ok(()) => Json(json!({"ok": true, "viewport": null})).into_response(),
+                Err(e) => server_error(e),
+            };
+        }
+    };
+    if !(320..=3840).contains(&w) || !(240..=2160).contains(&h) {
+        return bad_request("视口尺寸需在 320–3840 × 240–2160 之间");
+    }
+    match bridge.set_viewport(w, h).await {
+        Ok(()) => Json(json!({"ok": true, "viewport": {"width": w, "height": h}}))
+            .into_response(),
+        Err(e) => server_error(e),
+    }
+}
+
+async fn browser_stop(State(state): State<SharedState>, headers: HeaderMap) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    match state.agent.computer.stop_loading().await {
+        Ok(()) => Json(json!({"ok": true})).into_response(),
+        Err(e) => server_error(e),
+    }
+}
 /// about:blank 会被 Chromium 无视而回退普通窗口。页面本身是惰性占位。
 /// C-16：必须携带有效 token；此页禁止注入凭据/状态数据。
 async fn browser_boot(
@@ -3579,22 +3717,51 @@ async fn browser_boot(
     .into_response()
 }
 
+/// Browser 侧栏的公共元信息（不含截图，1s 轮询很轻）。
+fn browser_meta_json(m: &crate::computer::BrowserUiMeta) -> Value {
+    json!({
+        "url": m.url,
+        "title": m.title,
+        "ready": m.ready,
+        "canBack": m.can_back,
+        "canForward": m.can_forward,
+        "viewport": {"width": m.width, "height": m.height},
+        "viewportLocked": m.viewport_locked,
+    })
+}
+
+/// GET /api/browser/meta — URL / 标题 / 加载状态 / 历史按钮 / 视口。
+async fn browser_meta(State(state): State<SharedState>, headers: HeaderMap) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    let bridge = state.agent.computer.clone();
+    Json(browser_meta_json(&bridge.ui_meta().await)).into_response()
+}
+
+/// GET /api/browser/state — 元信息 + 当前画面。
 async fn browser_state(State(state): State<SharedState>, headers: HeaderMap) -> Response {
     if !check_auth(&headers, None, &state) {
         return unauthorized();
     }
     let bridge = state.agent.computer.clone();
-    let url = bridge.current_url().await;
-    // A screenshot failure (no browser yet) must not fail the whole request:
-    // the panel shows the URL and text even when the capture is unavailable.
-    let screenshot = bridge.screenshot_png().await.ok();
-    let text = bridge.page_text().await.unwrap_or_default();
-    Json(json!({
-        "url": url,
-        "screenshot": screenshot,
-        "text": text,
-    }))
-    .into_response()
+    let meta = bridge.ui_meta().await;
+    // 截图失败（浏览器还没起来）不拖垮整个请求：侧栏仍能显示 URL 与标题。
+    let screenshot = bridge.ui_screenshot_png().await.ok();
+    let mut v = browser_meta_json(&meta);
+    v["screenshot"] = json!(screenshot);
+    Json(v).into_response()
+}
+
+/// GET /api/browser/text — 页面可见文本，只在用户展开「页面文本」时取。
+async fn browser_text(State(state): State<SharedState>, headers: HeaderMap) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    match state.agent.computer.page_text().await {
+        Ok(text) => Json(json!({"text": text})).into_response(),
+        Err(e) => server_error(e),
+    }
 }
 
 #[derive(Debug, Deserialize)]

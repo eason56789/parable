@@ -32,6 +32,23 @@ pub struct PendingImage {
     pub data: String,
 }
 
+/// Sidebar browser surface metadata. Kept separate from the model-facing
+/// `page_meta` so UI-only fields (readyState / history flags / viewport) do
+/// not leak into the tool protocol.
+#[derive(Debug, Clone, Default)]
+pub struct BrowserUiMeta {
+    pub url: String,
+    pub title: String,
+    pub ready: bool,
+    pub can_back: bool,
+    pub can_forward: bool,
+    pub width: u32,
+    pub height: u32,
+    /// 当前页面是否被 `Emulation.setDeviceMetricsOverride` 锁定在某个
+    /// 响应式尺寸（侧栏「手机 / 平板 / 桌面」预设）。重启浏览器后清空。
+    pub viewport_locked: bool,
+}
+
 struct Cdp {
     ws: WebSocketStream<MaybeTlsStream<TcpStream>>,
     next_id: u64,
@@ -132,6 +149,8 @@ pub struct ComputerBridge {
     /// 而回退普通窗口）。由 serve_in 注入 harness 自身的 /browser-boot 页。
     boot_url: std::sync::RwLock<String>,
     pending: Mutex<Option<PendingImage>>,
+    /// 响应式预览是否处于 Emulation override 状态（UI 用来还原预设按钮）。
+    viewport_locked: std::sync::atomic::AtomicBool,
     /// cookie jar 是否已注入当前浏览器（每次启动注入一次；导入时置位）。
     jar_injected: std::sync::atomic::AtomicBool,
 }
@@ -194,6 +213,7 @@ impl ComputerBridge {
             headless: std::sync::RwLock::new(true),
             boot_url: std::sync::RwLock::new(String::new()),
             pending: Mutex::new(None),
+            viewport_locked: std::sync::atomic::AtomicBool::new(false),
             jar_injected: std::sync::atomic::AtomicBool::new(false),
             ensure_lock: tokio::sync::Mutex::new(()),
         }
@@ -284,6 +304,179 @@ impl ComputerBridge {
             .to_string())
     }
 
+    /// 侧栏浏览器面板需要的页面元信息：URL / 标题 / 加载状态 / 前进后退 /
+    /// 当前视口。与模型工具用的 `page_meta` 分开，避免把 readyState 等 UI
+    /// 字段塞进工具协议。
+    pub async fn ui_meta(&self) -> BrowserUiMeta {
+        let mut meta = BrowserUiMeta::default();
+        if let Ok(r) = self
+            .cmd(
+                "Runtime.evaluate",
+                json!({
+                    "expression": "JSON.stringify({u: location.href, t: document.title, r: document.readyState})",
+                    "returnByValue": true,
+                }),
+            )
+            .await
+        {
+            if let Some(v) = r.pointer("/result/value").and_then(|v| v.as_str()) {
+                if let Ok(v) = serde_json::from_str::<Value>(v) {
+                    meta.url = v.get("u").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                    meta.title = v.get("t").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                    meta.ready = v.get("r").and_then(|x| x.as_str()) == Some("complete");
+                }
+            }
+        }
+        if let Ok(r) = self.cmd("Page.getNavigationHistory", json!({})).await {
+            let idx = r.get("currentIndex").and_then(|v| v.as_i64()).unwrap_or(0);
+            let len = r
+                .get("entries")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len() as i64)
+                .unwrap_or(0);
+            meta.can_back = idx > 0;
+            meta.can_forward = idx >= 0 && idx + 1 < len;
+        }
+        if let Ok(r) = self.cmd("Page.getLayoutMetrics", json!({})).await {
+            let vp = r
+                .get("cssLayoutViewport")
+                .or_else(|| r.get("cssVisualViewport"))
+                .cloned()
+                .unwrap_or(Value::Null);
+            meta.width = vp.get("clientWidth").and_then(|v| v.as_f64()).unwrap_or(0.0) as u32;
+            meta.height = vp.get("clientHeight").and_then(|v| v.as_f64()).unwrap_or(0.0) as u32;
+        }
+        meta.viewport_locked = self
+            .viewport_locked
+            .load(std::sync::atomic::Ordering::Relaxed);
+        meta
+    }
+
+    /// 侧栏截图：和模型工具共用同一个浏览器，但**不能**把截图塞进
+    /// `pending`——否则面板轮询会覆盖模型刚拍的那张，computer 工具拿到的
+    /// 就是旧画面。这里直接返回 base64，不落 pending。
+    pub async fn ui_screenshot_png(&self) -> Result<String, HarnessError> {
+        let r = self
+            .cmd("Page.captureScreenshot", json!({"format": "png"}))
+            .await?;
+        r.get("data")
+            .and_then(|d| d.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| HarnessError::Tool("截图响应缺少 data".into()))
+    }
+
+    /// 侧栏滚轮穿透：坐标是页面视口 CSS 像素。
+    pub async fn scroll_at(&self, x: f64, y: f64, dx: f64, dy: f64) -> Result<(), HarnessError> {
+        self.cmd(
+            "Input.dispatchMouseEvent",
+            json!({"type": "mouseWheel", "x": x, "y": y, "deltaX": dx, "deltaY": dy}),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// 侧栏键盘穿透：普通文本走 insertText（尊重页面当前焦点 / 输入法）。
+    pub async fn insert_text(&self, text: &str) -> Result<(), HarnessError> {
+        if text.is_empty() {
+            return Ok(());
+        }
+        self.cmd("Input.insertText", json!({"text": text}))
+            .await?;
+        Ok(())
+    }
+
+    /// 侧栏特殊键穿透（Enter / Tab / Backspace / 方向键 / Ctrl+A 等）。
+    /// 复用 computer_key 的键名表和修饰键码，避免出现“工具能按、面板按不了”
+    /// 的两套语义。
+    pub async fn press_key_combo(&self, combo: &str) -> Result<(), HarnessError> {
+        let parts: Vec<&str> = combo.split('+').map(|s| s.trim()).collect();
+        let (mods, main) = parts.split_at(parts.len().saturating_sub(1));
+        let main = main.first().copied().unwrap_or("");
+        let Some((k, code, vk)) = key_map(main) else {
+            return Err(HarnessError::Tool(format!("未知按键 `{main}`")));
+        };
+        let mut mask = 0i64;
+        for m in mods {
+            mask |= match m.to_ascii_lowercase().as_str() {
+                "control" | "ctrl" => 2,
+                "alt" => 1,
+                "shift" => 8,
+                "meta" | "win" | "cmd" => 4,
+                other => return Err(HarnessError::Tool(format!("未知修饰键 `{other}`"))),
+            };
+        }
+        for m in mods {
+            let (mk, mcode, mvk) = key_map(m.trim()).unwrap_or((m.to_string(), m.to_string(), 0));
+            self.cmd(
+                "Input.dispatchKeyEvent",
+                json!({"type": "rawKeyDown", "key": mk, "code": mcode,
+                       "windowsVirtualKeyCode": mvk, "modifiers": mask}),
+            )
+            .await?;
+        }
+        self.cmd(
+            "Input.dispatchKeyEvent",
+            json!({"type": "keyDown", "key": k, "code": code,
+                   "windowsVirtualKeyCode": vk, "modifiers": mask}),
+        )
+        .await?;
+        self.cmd(
+            "Input.dispatchKeyEvent",
+            json!({"type": "keyUp", "key": k, "code": code,
+                   "windowsVirtualKeyCode": vk, "modifiers": mask}),
+        )
+        .await?;
+        for m in mods.iter().rev() {
+            let (mk, mcode, mvk) = key_map(m.trim()).unwrap_or((m.to_string(), m.to_string(), 0));
+            self.cmd(
+                "Input.dispatchKeyEvent",
+                json!({"type": "keyUp", "key": mk, "code": mcode,
+                       "windowsVirtualKeyCode": mvk, "modifiers": mask}),
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// 响应式视口：用 Emulation override 改页面布局尺寸，截图和点击坐标
+    /// 仍然一一对应（DPR=1）。
+    pub async fn set_viewport(&self, width: u32, height: u32) -> Result<(), HarnessError> {
+        self.cmd(
+            "Emulation.setDeviceMetricsOverride",
+            json!({
+                "width": width,
+                "height": height,
+                "deviceScaleFactor": 1,
+                "mobile": false,
+                "screenWidth": width,
+                "screenHeight": height,
+            }),
+        )
+        .await?;
+        self.viewport_locked
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
+    pub async fn clear_viewport(&self) -> Result<(), HarnessError> {
+        self.cmd("Emulation.clearDeviceMetricsOverride", json!({}))
+            .await?;
+        self.viewport_locked
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
+    pub async fn reload_hard(&self) -> Result<(), HarnessError> {
+        self.cmd("Page.reload", json!({"ignoreCache": true}))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn stop_loading(&self) -> Result<(), HarnessError> {
+        self.cmd("Page.stopLoading", json!({})).await?;
+        Ok(())
+    }
+
     /// Navigate the controlled browser to `url`.
     ///
     /// Only `http://` and `https://` are allowed — `file://` would let a
@@ -292,7 +485,12 @@ impl ComputerBridge {
     /// is no SSRF surface beyond what the user typed.
     pub async fn navigate_to(&self, url: &str) -> Result<(), HarnessError> {
         let url = normalize_url(url)?;
-        self.cmd("Page.navigate", json!({ "url": url })).await?;
+        let r = self.cmd("Page.navigate", json!({ "url": url })).await?;
+        if let Some(err) = r.get("errorText").and_then(|v| v.as_str()) {
+            if !err.trim().is_empty() {
+                return Err(HarnessError::Tool(format!("打开页面失败: {err}")));
+            }
+        }
         Ok(())
     }
 
@@ -373,6 +571,8 @@ impl ComputerBridge {
         }
         // 浏览器重启后 cookie 全空，下次 ensure 重新注入 jar。
         self.jar_injected
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.viewport_locked
             .store(false, std::sync::atomic::Ordering::Relaxed);
     }
 

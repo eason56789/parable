@@ -1131,6 +1131,86 @@ body.spmax #sdp{position:fixed;inset:46px 0 0 0;width:100vw;max-width:none;z-ind
 .spbrow{padding:10px 12px;display:flex;flex-direction:column;gap:8px}
 .spbrow img{width:100%;border-radius:9px;border:.5px solid var(--line);display:block;background:var(--hov)}
 .spbrow pre{margin:0;padding:10px;border-radius:9px;background:var(--hov);font:12px/1.6 var(--mono);white-space:pre-wrap;word-break:break-word;max-height:320px;overflow:auto}
+/* —— 侧栏浏览器 v2：紧凑工具栏 + 响应式视口 + 可点击/滚动/输入的实况画面 —— */
+.spbnav2{display:flex;align-items:center;gap:3px;padding:6px 8px;border-bottom:.5px solid var(--line);
+  position:sticky;top:0;background:var(--side);z-index:3}
+.spbnav2 .spnav{width:28px;height:28px;padding:0;border-color:transparent;background:transparent}
+.spbnav2 .spnav:hover:not(:disabled){background:var(--hov);border-color:transparent}
+.spbnav2 .spnav.on{color:var(--accent);background:var(--hov)}
+.spbnav2 .spnav:disabled{opacity:.28}
+.spbaddr{flex:1;min-width:0;display:flex;align-items:center;gap:4px;height:30px;padding:0 5px 0 8px;
+  border:1px solid var(--line);border-radius:9px;background:var(--bg);transition:border-color .15s}
+.spbaddr:focus-within{border-color:var(--accent)}
+.spbsec{flex:none;display:grid;place-items:center;width:18px;height:18px;color:var(--fg2)}
+.spbsec svg{width:13px;height:13px}
+.spbsec.warn{color:var(--danger-text)}
+#spb-url{flex:1;min-width:0;height:26px;padding:0;border:0;background:none;color:var(--fg);
+  font:12px var(--mono);outline:0}
+#spb-url::placeholder{color:var(--fg2);font-family:var(--sans)}
+.spbico{flex:none;width:22px;height:22px;display:grid;place-items:center;border:0;border-radius:6px;
+  background:none;color:var(--fg2);cursor:pointer}
+.spbico:hover{background:var(--hov);color:var(--fg)}
+.spbico svg{width:12px;height:12px}
+.spbload{flex:none;width:12px;height:12px;border-radius:50%;border:1.5px solid color-mix(in srgb,var(--fg2) 40%,transparent);
+  border-top-color:var(--accent);animation:spbspin .7s linear infinite}
+.spbload[hidden]{display:none!important}
+.spbmenu{position:absolute;right:8px;top:calc(100% + 5px);z-index:30;min-width:186px;padding:5px;
+  border-radius:11px;border:.5px solid var(--line);background:color-mix(in srgb,var(--bg) 92%,transparent);
+  backdrop-filter:blur(14px);box-shadow:0 12px 36px rgba(0,0,0,.24)}
+.spbmenu[hidden]{display:none}
+.spbmi{width:100%;display:flex;align-items:center;gap:9px;padding:7px 9px;border:0;border-radius:8px;
+  background:none;color:var(--fg);font:12px var(--sans);text-align:left;cursor:pointer}
+.spbmi:hover{background:var(--hov)}
+.spbmi svg{width:14px;height:14px;color:var(--fg2);flex:none}
+.spbmi .kbd{margin-left:auto;color:var(--fg2);font:10.5px var(--mono);opacity:.7}
+.spbresp{display:flex;align-items:center;gap:5px;padding:6px 8px;border-bottom:.5px solid var(--line);
+  background:var(--side);position:sticky;top:41px;z-index:2;overflow-x:auto;scrollbar-width:none}
+.spbresp::-webkit-scrollbar{display:none}
+.spbresp[hidden]{display:none}
+.spbchip{flex:none;height:23px;padding:0 9px;border:.5px solid var(--line);border-radius:999px;
+  background:var(--bg);color:var(--fg2);font:11px var(--sans);cursor:pointer}
+.spbchip:hover{color:var(--fg);border-color:var(--fg2)}
+.spbchip.on{color:var(--accent);border-color:var(--accent);background:color-mix(in srgb,var(--accent) 10%,transparent)}
+.spbdim{flex:none;color:var(--fg2);font:10.5px var(--mono);padding-left:2px}
+.spbzoom{margin-left:auto;flex:none;display:flex;align-items:center;gap:3px;color:var(--fg2);font:11px var(--sans)}
+.spbzoom select{height:23px;border:.5px solid var(--line);border-radius:7px;background:var(--bg);color:var(--fg);
+  font:11px var(--sans);padding:0 3px;outline:0}
+.spbview{padding:0;position:relative}
+.spbview:focus-within{box-shadow:inset 0 0 0 1.5px color-mix(in srgb,var(--accent) 45%,transparent)}
+.spbcanvas{position:relative;display:inline-block;min-width:100%;vertical-align:top}
+.spbimg{display:block;width:100%;max-width:none;border-radius:0;border:0;
+  background:var(--bg);cursor:crosshair;outline:0;user-select:none;margin:0 auto}
+.spbimg:focus-visible{box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 45%,transparent)}
+.spbview.spbbusy .spbimg{opacity:.84;transition:opacity .15s}
+.spbview.spbbusy::after{content:'';position:absolute;right:18px;top:18px;width:16px;height:16px;border-radius:50%;
+  border:2px solid color-mix(in srgb,var(--fg2) 45%,transparent);border-top-color:var(--accent);
+  animation:spbspin .7s linear infinite;pointer-events:none}
+@keyframes spbspin{to{transform:rotate(360deg)}}
+.spbempty[hidden],.spbimg[hidden],.spbtxt[hidden],.spbresp[hidden]{display:none!important}
+.spbempty{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;
+  min-height:300px;padding:28px 18px;text-align:center;color:var(--fg2)}
+.spbempty .globe{width:56px;height:56px;display:grid;place-items:center;border-radius:18px;
+  background:var(--hov);border:.5px solid var(--line);color:var(--fg2)}
+.spbempty .globe svg{width:28px;height:28px}
+.spbempty h4{margin:4px 0 0;font:500 14px var(--sans);color:var(--fg)}
+.spbempty p{margin:0;max-width:300px;font:11.5px/1.65 var(--sans);color:var(--fg2)}
+.spbrip{position:absolute;width:10px;height:10px;margin:-5px 0 0 -5px;border-radius:50%;
+  background:color-mix(in srgb,var(--accent) 55%,transparent);pointer-events:none;
+  animation:spbrip .5s ease-out forwards}
+@keyframes spbrip{0%{transform:scale(.5);opacity:.9}100%{transform:scale(2.2);opacity:0}}
+.spbime{position:fixed;left:-9999px;top:0;width:2px;height:2px;opacity:0;pointer-events:none}
+.spbtxt{margin:0;padding:4px 10px 0}
+.spbtxt summary{cursor:pointer;color:var(--fg2);font:11px var(--sans);padding:5px 2px;user-select:none}
+.spbtxt summary:hover{color:var(--fg)}
+.spbtxt pre{margin:4px 0 0;padding:9px 10px;border-radius:8px;background:var(--hov);
+  font:11.5px/1.6 var(--mono);white-space:pre-wrap;word-break:break-word;max-height:260px;overflow:auto}
+.spbhint{padding:6px 10px;color:var(--danger-text);font-size:10.5px;
+  position:sticky;bottom:0;background:var(--bg);border-top:.5px solid var(--line);z-index:1}
+.spbhint[hidden]{display:none!important}
+.spbstate{display:inline-flex;align-items:center;gap:4px}
+.spbstate i{width:5px;height:5px;border-radius:50%;background:var(--accent);display:inline-block}
+.spbstate.load i{background:var(--fg2);animation:spbblink 1s ease-in-out infinite}
+@keyframes spbblink{50%{opacity:.25}}
 /* 辅助对话面板 */
 .spsc{padding:0;display:flex;flex-direction:column;height:100%}
 .spsc .msgs{flex:1;min-height:0;overflow:auto;padding:12px 12px 4px;font:13px/1.6 var(--sans);display:flex;flex-direction:column}
@@ -2092,6 +2172,8 @@ const IC = {
   refresh:'<path d="M16 10a6 6 0 11-2-4.5M16 3v3h-3"/>',
   dots:'<circle cx="4.5" cy="10" r=".8"/><circle cx="10" cy="10" r=".8"/><circle cx="15.5" cy="10" r=".8"/>',
   lock:'<rect x="5" y="9" width="10" height="7" rx="1.5"/><path d="M7.5 9V7a2.5 2.5 0 015 0v2"/>',
+  link:'<path d="M8.2 11.8a3 3 0 004.2 0l2.4-2.4a3 3 0 00-4.2-4.2l-1.2 1.2"/><path d="M11.8 8.2a3 3 0 00-4.2 0l-2.4 2.4a3 3 0 004.2 4.2l1.2-1.2"/>',
+  ext:'<path d="M12 4h4v4M16 4l-6.5 6.5"/><path d="M15 11v5H4V4h5"/>',
   // 品牌图标：GitHub 官方 mark（实心）与 Bilibili 电视机标（描边 + 两根天线），
   // 都是矢量路径，不依赖外部字体或图片资源。
   gh:'<path fill="currentColor" stroke="none" d="M10 .9a9.1 9.1 0 00-2.88 17.73c.46.08.62-.2.62-.44v-1.55c-2.54.55-3.08-1.22-3.08-1.22-.42-1.06-1.02-1.34-1.02-1.34-.83-.57.06-.56.06-.56.92.07 1.4.95 1.4.95.82 1.4 2.15 1 2.67.76.08-.6.32-1 .58-1.23-2.03-.23-4.16-1.02-4.16-4.52 0-1 .36-1.82.94-2.46-.1-.23-.41-1.16.09-2.42 0 0 .77-.25 2.52.94a8.7 8.7 0 014.6 0c1.75-1.19 2.52-.94 2.52-.94.5 1.26.19 2.19.09 2.42.59.64.94 1.46.94 2.46 0 3.51-2.13 4.29-4.17 4.52.33.28.62.84.62 1.69v2.5c0 .25.16.53.63.44A9.1 9.1 0 0010 .9z"/>',
@@ -2428,7 +2510,14 @@ const L = {
     sp_open:'打开', sp_close:'关闭', sp_max:'全屏', sp_unmax:'退出全屏',
     sp_empty_fs:'选择一个文件查看内容。', sp_empty_git:'没有需要审查的变更。',
     sp_empty_browser:'还没有打开页面。', spb_ph:'输入网址，如 example.com', spb_back:'后退', spb_fwd:'前进', spb_rl:'刷新',
-    spb_hint:'点击截图可直接操作页面；agent 的操作会实时反映在这里。', spb_text:'页面文本', sp_empty_term:'在下方输入命令。',
+    spb_hint:'点击、滚轮、键盘可直接操作页面；agent 的操作会实时反映在这里。', spb_text:'页面文本', sp_empty_term:'在下方输入命令。',
+    spb_ext:'在系统浏览器打开', spb_copy:'复制链接', spb_copied:'已复制链接', spb_hard:'强制刷新', spb_stop:'停止加载',
+    spb_resp:'响应式预览', spb_fill:'铺满侧栏', spb_default:'默认', spb_pane:'铺满', spb_desktop:'桌面', spb_tablet:'平板', spb_phone:'手机', spb_zoom:'缩放', spb_fit:'适应宽度',
+    spb_pane_small:'侧栏太窄，无法按面板尺寸重排。',
+    spb_loading:'加载中…', spb_ready:'已加载', spb_empty_title:'在侧栏浏览网页',
+    spb_empty_hint:'输入网址，或从对话里点链接；页面会在这里实时显示，也能直接点击、滚动和输入。',
+    spb_secure:'HTTPS 安全连接', spb_insecure:'HTTP 非加密连接', spb_menu:'更多', spb_click_hint:'点击 · 滚轮 · 键盘可直接操作',
+    spb_text_load:'加载页面文本…', spb_retry:'重试', spb_shot_fail:'暂时无法获取页面截图',
     spb_ck:'导入登录状态', spb_ck_h:'一键把常见浏览器的 Cookie 与登录状态搬进内置浏览器', spb_ck_title:'导入登录状态（Cookie）',
     spb_ck_intro:'把下面浏览器里已登录的 Cookie 搬进内置浏览器。导入结果持久保存，内置浏览器每次启动自动带上。',
     spb_ck_none:'没有检测到可导入的浏览器。', spb_ck_go:'开始导入', spb_ck_clear:'清除已导入',
@@ -2696,7 +2785,14 @@ const L = {
     sp_open:'Open', sp_close:'Close', sp_max:'Expand', sp_unmax:'Exit full screen',
     sp_empty_fs:'Pick a file to see its contents.', sp_empty_git:'No changes to review.',
     sp_empty_browser:'No page open yet.', spb_ph:'Enter a URL, e.g. example.com', spb_back:'Back', spb_fwd:'Forward', spb_rl:'Reload',
-    spb_hint:'Click the screenshot to interact with the page; agent actions show up here live.', spb_text:'Page text', sp_empty_term:'Type a command below.',
+    spb_hint:'Click, scroll or type directly on the page; agent actions show up here live.', spb_text:'Page text', sp_empty_term:'Type a command below.',
+    spb_ext:'Open in system browser', spb_copy:'Copy link', spb_copied:'Link copied', spb_hard:'Hard reload', spb_stop:'Stop loading',
+    spb_resp:'Responsive preview', spb_fill:'Fill sidebar', spb_default:'Default', spb_pane:'Fill', spb_desktop:'Desktop', spb_tablet:'Tablet', spb_phone:'Phone', spb_zoom:'Zoom', spb_fit:'Fit width',
+    spb_pane_small:'The sidebar is too narrow to reflow the page.',
+    spb_loading:'Loading…', spb_ready:'Loaded', spb_empty_title:'Browse in the sidebar',
+    spb_empty_hint:'Enter a URL, or open a link from chat. The page appears here live and accepts clicks, scrolling and typing.',
+    spb_secure:'HTTPS secure connection', spb_insecure:'HTTP unencrypted connection', spb_menu:'More', spb_click_hint:'Click · scroll · type to interact',
+    spb_text_load:'Loading page text…', spb_retry:'Retry', spb_shot_fail:'Page screenshot is temporarily unavailable',
     spb_ck:'Import logins', spb_ck_h:'One-click import of browser cookies and login state into the built-in browser', spb_ck_title:'Import login state (cookies)',
     spb_ck_intro:'Bring the logged-in cookies of the browsers below into the built-in browser. Imports persist and are re-applied on every browser start.',
     spb_ck_none:'No importable browsers detected.', spb_ck_go:'Import', spb_ck_clear:'Clear imported',
@@ -13257,12 +13353,15 @@ async function openLink(url, opts) {
       let tab = SP.tabs.find(x => x.kind === 'browser');
       if (!tab) tab = spOpen('browser', { url });
       tab.st.url = url;
+      tab.st.shotSig = null;
+      tab.st.shotB64 = null;
+      tab.st.textLoaded = false;
       document.body.classList.remove('sp0');
       SP.open = true;
       SP.active = tab.id;
       spRender();
       await api('/browser/navigate', { method: 'POST', body: { url } });
-      setTimeout(() => { try { spBrowserState(tab); } catch (e) {} }, 900);
+      setTimeout(() => { if (SP.active === tab.id) spbKick(tab, 300, 900); }, 900);
       return;
     }
     // window：显式按可见窗口模式打开（后端会无视无头设置重建实例），
@@ -13292,6 +13391,23 @@ function openExternal(url) {
 function spOpen(kind, opts) {
   document.body.classList.remove('sp0');
   SP.open = true;
+  // 内置浏览器是「同一个受控页面」的镜像，开多个 browser 标签只会让
+  // 两路轮询抢同一张截图。已有浏览器标签时直接聚焦复用它。
+  if (kind === 'browser') {
+    const ex = SP.tabs.find(x => x.kind === 'browser');
+    if (ex) {
+      if (opts && opts.url) {
+        ex.st = ex.st || {};
+        ex.st.url = opts.url;
+        ex.st.shotSig = null;
+        ex.st.shotB64 = null;
+        ex.st.textLoaded = false;
+      }
+      SP.active = ex.id;
+      spRender();
+      return ex;
+    }
+  }
   const tab = { id: 't' + (++SP.seq), kind: kind, title: t(SP_KIND[kind].t), st: opts || {} };
   SP.tabs.push(tab);
   SP.active = tab.id;
@@ -13329,6 +13445,13 @@ function spClose(id) {
     // 内置浏览器的 3s 实况轮询同样要注销：标签关掉后没人再把它清掉，
     // 残留至多一个周期空转（B-06）。
     if (tab.st.poll) { clearInterval(tab.st.poll); tab.st.poll = 0; }
+    // 浏览器面板的两路轮询、滚轮合并定时器与菜单外点监听都要一起清掉，
+    // 否则关标签后还会继续打 /browser/state 或在别处误关菜单。
+    if (tab.st.metaT) { clearTimeout(tab.st.metaT); tab.st.metaT = 0; }
+    if (tab.st.shotT) { clearTimeout(tab.st.shotT); tab.st.shotT = 0; }
+    if (tab.st.wheapT) { clearTimeout(tab.st.wheapT); tab.st.wheapT = 0; }
+    if (tab.st.wheelT) { clearTimeout(tab.st.wheelT); tab.st.wheelT = 0; }
+    if (tab.st.menuDoc) { document.removeEventListener('pointerdown', tab.st.menuDoc, true); tab.st.menuDoc = 0; }
   }
   if (tab.kind === 'sidechat' && tab.st) {
     if (tab.st.streaming && tab.st.sid) {
@@ -13403,6 +13526,17 @@ function spRenderLauncher(host) {
       const k = b.dataset.spo;
       // 从启动器打开面板：把启动器标签换成该面板（而不是堆一个新标签）。
       const tab = SP.tabs.find(x => x.id === SP.active);
+      if (k === 'browser') {
+        const ex = SP.tabs.find(x => x.kind === 'browser' && x.id !== (tab && tab.id));
+        if (ex) {
+          if (tab && tab.kind === 'launcher') spClose(tab.id);
+          document.body.classList.remove('sp0');
+          SP.open = true;
+          SP.active = ex.id;
+          spRender();
+          return;
+        }
+      }
       if (tab && tab.kind === 'launcher') {
         tab.kind = k;
         tab.title = t(SP_KIND[k].t);
@@ -13790,97 +13924,594 @@ async function spGitDiff(tab, path) {
 }
 
 /* ------------------------------------------------------------ 浏览器面板 */
+/* 侧栏内置浏览器 = agent 共用同一个受控页面的「实况视口」：
+   截图只是画面，交互全部转成 CDP 事件；工具栏/地址栏/响应式/更多菜单
+   对标 DSH 的 Browser 标签与 ZCode 的 UnifiedBrowserView。 */
+
+const SPB_PRESETS = {
+  desktop: { width: 1280, height: 800 },
+  tablet: { width: 834, height: 1112 },
+  phone: { width: 390, height: 844 },
+};
+
+const spbEl = q => { const h = $('#spbody'); return h ? h.querySelector(q) : null; };
+
+function spbHost(u) {
+  try { return new URL(u).host || u; } catch (e) { return u || ''; }
+}
+
+/** 侧栏可视区尺寸——「铺满」预设按这个尺寸重排页面，截图正好填满面板。 */
+function spbPaneSize() {
+  const body = $('#spbody'), nav = spbEl('#spb-nav');
+  if (!body || !nav) return { width: 0, height: 0 };
+  // 截图高度刚好等于面板时会出现竖向滚动条；预留 10px 给它，否则
+  // 视口会比内容宽 10px，图片再缩一次就填不满高度。
+  const width = Math.round(body.clientWidth - 10);
+  const height = Math.round(body.clientHeight - nav.offsetHeight);
+  return { width: Math.max(320, width), height: Math.max(240, height) };
+}
+
+function spbPaneMatch(w, h) {
+  const p = spbPaneSize();
+  return !!p.width && Math.abs(p.width - w) <= 2 && Math.abs(p.height - h) <= 2;
+}
+
+/** 后端视口尺寸 → 预设名；不属于任何预设返回 ''。 */
+function spbPresetBySize(w, h) {
+  if (spbPaneMatch(w, h)) return 'pane';
+  const hit = Object.keys(SPB_PRESETS).find(k =>
+    SPB_PRESETS[k].width === w && SPB_PRESETS[k].height === h);
+  return hit || '';
+}
+
+/** 标签标题跟着页面标题走（只改那一个 tab 的文字，不重渲染侧栏）。 */
+function spbTitle(tab, meta) {
+  const raw = (meta && meta.title ? meta.title : '').trim();
+  const host = meta && meta.url ? spbHost(meta.url) : '';
+  let label = raw || host || t('sp_browser');
+  if (label.length > 28) label = label.slice(0, 27) + '…';
+  tab.title = label;
+  const el = document.querySelector('#sptl .sptab[data-sp="' + tab.id + '"] .t');
+  if (el && el.textContent !== label) el.textContent = label;
+}
+
+function spbHint(tab, msg, isErr) {
+  const h = spbEl('#spb-hint');
+  if (!h) return;
+  if (isErr) {
+    h.hidden = false;
+    h.classList.add('err');
+    if (msg != null) h.innerHTML = msg;
+    return;
+  }
+  if (msg) {
+    h.hidden = false;
+    h.classList.remove('err');
+    h.innerHTML = msg;
+    return;
+  }
+  // 正常状态不占底部一行：DSH / ZCode 的浏览器面板都把页面铺满，
+  // 状态只在加载中（地址栏 spinner）或出错（底部错误条）时出现。
+  h.hidden = true;
+  h.innerHTML = '';
+  h.classList.remove('err');
+}
+
+/** 把 /browser/meta 的结果贴到工具栏上；不碰截图与 DOM 结构。 */
+function spbPaintMeta(tab, m) {
+  const st = tab.st;
+  if (!m) return;
+  const prev = st.url || '';
+  const url = m.url || '';
+  st.url = url;
+  st.title = m.title || '';
+  st.canBack = !!m.canBack;
+  st.canForward = !!m.canForward;
+  st.ready = !!m.ready;
+  if (m.viewport && m.viewport.width) st.viewport = m.viewport;
+  // 后端 Emulation override 是进程级状态：刷新页面后仍然生效，所以预设
+  // 按钮要按后端回报还原，而不是永远回到「默认」。刚点过的 1.2s 内不覆盖，
+  // 避免 POST 还没往返时被旧 meta 抢回去。
+  if (typeof m.viewportLocked === 'boolean' && Date.now() - (st.vpUserAt || 0) > 1200) {
+    if (m.viewportLocked && st.vpSel === 'pane') {
+      // 「铺满」测的是侧栏宽度，面板被拖动后矩形容差会让按钮跳回默认；
+      // 这是用户显式选中的模式，保持选中，页面仍按原视口截图。
+    } else {
+      const hit = m.viewportLocked
+        ? spbPresetBySize(m.viewport && m.viewport.width, m.viewport && m.viewport.height)
+        : 'default';
+      st.vpSel = hit || 'custom';
+    }
+  }
+  const loading = !!url && !st.ready;
+  const spin = spbEl('#spb-load');
+  if (spin) spin.hidden = !loading;
+
+  const back = spbEl('#spb-back'), fwd = spbEl('#spb-fwd'), rl = spbEl('#spb-rl');
+  if (back) back.disabled = !st.canBack;
+  if (fwd) fwd.disabled = !st.canForward;
+  if (rl) {
+    rl.innerHTML = loading ? ic('x') : ic('refresh');
+    rl.title = loading ? t('spb_stop') : t('spb_rl');
+  }
+  const inp = spbEl('#spb-url');
+  if (inp && inp !== document.activeElement && inp.value !== url) inp.value = url;
+  const sec = spbEl('#spb-sec');
+  if (sec) {
+    const https = /^https:/i.test(url);
+    sec.innerHTML = ic(url ? (https ? 'lock' : 'globe') : 'globe');
+    sec.classList.toggle('warn', !!url && !https);
+    sec.title = url ? (https ? t('spb_secure') : t('spb_insecure')) : '';
+  }
+  // 换页：收起页面文本，避免把上一页的正文挂在下一页下面
+  const txt = spbEl('#spb-text');
+  if (txt) {
+    if (prev !== url) {
+      txt.open = false;
+      txt.hidden = true;
+      const pre = txt.querySelector('pre');
+      if (pre) pre.textContent = '';
+      st.textLoaded = false;
+    }
+  }
+  const vp = st.viewport || {};
+  const dim = spbEl('#spb-dim');
+  if (dim) dim.textContent = vp.width ? vp.width + '×' + vp.height : '';
+  const preset = st.vpSel || 'default';
+  $$('.spbchip').forEach(b => b.classList.toggle('on', b.dataset.vp === preset));
+
+  spbTitle(tab, m);
+  spbHint(tab, null);
+}
+
+/** 设置缩放（适应宽度 / 固定百分比）；截图沿用原始像素尺寸。 */
+function spbZoomApply(tab) {
+  const img = spbEl('#spb-img');
+  if (!img || img.hidden) return;
+  const z = tab.st.zoom || 'fit';
+  if (z === 'fit') {
+    img.style.cursor = 'crosshair';
+    // 「铺满」的截图尺寸已经等于面板，直接 100% 宽高贴合，不能再按
+    // maxH 留边，否则上下会多出白边。
+    if (tab.st.vpSel === 'pane') {
+      img.style.width = '100%';
+      img.style.height = 'auto';
+      img.style.maxWidth = '100%';
+      return;
+    }
+    const nw = img.naturalWidth || (tab.st.viewport && tab.st.viewport.width) || 1280;
+    const nh = img.naturalHeight || (tab.st.viewport && tab.st.viewport.height) || 800;
+    const box = $('#spbody');
+    const maxW = Math.max(240, (box ? box.clientWidth : 460) - 22);
+    const maxH = Math.max(320, (box ? box.clientHeight : 700) - 170);
+    // 竖屏（手机/平板）优先整页可见；横屏宽图按宽度铺满。这样「适应宽度」
+    // 在手机上不会变成一张要滚三屏的长图，和 ZCode 的 Fit 行为一致。
+    if (nh >= nw) {
+      const h = Math.min(nh, maxH, Math.round(maxW * nh / nw));
+      img.style.width = Math.round(h * nw / nh) + 'px';
+      img.style.height = h + 'px';
+      img.style.maxWidth = '100%';
+      return;
+    }
+    img.style.height = 'auto';
+    img.style.maxWidth = 'none';
+    img.style.width = '100%';
+    return;
+  }
+  const nat = img.naturalWidth || (tab.st.viewport && tab.st.viewport.width) || 1280;
+  img.style.height = 'auto';
+  img.style.maxWidth = 'none';
+  img.style.width = Math.round(nat * Number(z) / 100) + 'px';
+}
+
+/** 换截图：签名去重 + 保留滚动位置 + 不重排整块面板。 */
+function spbShot(tab, b64) {
+  const img = spbEl('#spb-img'), empty = spbEl('#spb-empty'), box = $('#spbody');
+  if (!img) return;
+  if (!b64) {
+    if (tab.st.url && !img.src) spbHint(tab, esc(t('spb_shot_fail')), true);
+    return;
+  }
+  const sig = b64.length + ':' + b64.slice(-48);
+  if (sig === tab.st.shotSig) return;
+  tab.st.shotSig = sig;
+  tab.st.shotB64 = b64;
+  const keep = box ? box.scrollTop : 0;
+  img.onload = () => {
+    tab.st.natural = { w: img.naturalWidth, h: img.naturalHeight };
+    spbZoomApply(tab);
+    if (box) box.scrollTop = keep;
+  };
+  img.src = 'data:image/png;base64,' + b64;
+  img.hidden = false;
+  if (empty) empty.hidden = true;
+}
+
+/** 截图坐标 → 页面 CSS 像素坐标。 */
+function spbPoint(img, e) {
+  const r = img.getBoundingClientRect();
+  if (!r.width || !r.height || !img.naturalWidth) return null;
+  return {
+    x: Math.max(0, Math.min(img.naturalWidth - 1, (e.clientX - r.left) / r.width * img.naturalWidth)),
+    y: Math.max(0, Math.min(img.naturalHeight - 1, (e.clientY - r.top) / r.height * img.naturalHeight)),
+  };
+}
+
+/** 串行发送键盘输入，避免逐字请求乱序。 */
+function spbType(tab, body) {
+  tab.st.typeQ = (tab.st.typeQ || Promise.resolve())
+    .then(() => api('/browser/input', { method: 'POST', body }))
+    .catch(e => { spbHint(tab, esc(e.message), true); });
+  return tab.st.typeQ;
+}
+
+function spbKick(tab, metaMs, shotMs) {
+  const st = tab.st;
+  st.metaGen = (st.metaGen || 0) + 1;
+  st.shotGen = (st.shotGen || 0) + 1;
+  clearTimeout(st.metaT); clearTimeout(st.shotT);
+  st.metaT = setTimeout(() => spBrowserMeta(tab), metaMs == null ? 250 : metaMs);
+  st.shotT = setTimeout(() => spBrowserShot(tab), shotMs == null ? 700 : shotMs);
+}
+
+async function spBrowserMeta(tab) {
+  const st = tab.st;
+  if (!st || SP.active !== tab.id) return;
+  const gen = (st.metaGen = (st.metaGen || 0) + 1);
+  clearTimeout(st.metaT);
+  let m = null;
+  try { m = await api('/browser/meta', { timeout: 9000 }); }
+  catch (e) { spbHint(tab, esc(e.message), true); }
+  if (gen !== st.metaGen || SP.active !== tab.id) return;
+  if (m) { st.metaErr = 0; spbPaintMeta(tab, m); }
+  else st.metaErr = (st.metaErr || 0) + 1;
+  st.metaT = setTimeout(() => spBrowserMeta(tab), st.metaErr ? Math.min(6000, 1400 * st.metaErr) : 1200);
+}
+
+async function spBrowserShot(tab) {
+  const st = tab.st;
+  if (!st || SP.active !== tab.id) return;
+  const gen = (st.shotGen = (st.shotGen || 0) + 1);
+  clearTimeout(st.shotT);
+  if (st.busy) {
+    st.shotT = setTimeout(() => spBrowserShot(tab), 1400);
+    return;
+  }
+  st.busy = true;
+  $('#spb-body') && $('#spb-body').classList.add('spbbusy');
+  let res = null;
+  try { res = await api('/browser/state', { timeout: 15000 }); }
+  catch (e) { spbHint(tab, esc(e.message), true); }
+  st.busy = false;
+  $('#spb-body') && $('#spb-body').classList.remove('spbbusy');
+  if (gen !== st.shotGen || SP.active !== tab.id) return;
+  if (res) {
+    st.shotErr = 0;
+    spbPaintMeta(tab, res);
+    spbShot(tab, res.screenshot);
+  } else {
+    st.shotErr = (st.shotErr || 0) + 1;
+  }
+  const wait = res && res.ready ? 2600 : st.shotErr ? Math.min(8000, 1500 * st.shotErr) : 1400;
+  st.shotT = setTimeout(() => spBrowserShot(tab), wait);
+}
+
+/** 统一发 POST，然后让两路轮询尽快回神。 */
+async function spbAct(tab, path, body) {
+  try {
+    await api(path, { method: 'POST', body: body || {} });
+    spbKick(tab, 250, 600);
+    return true;
+  } catch (e) {
+    spbHint(tab, esc(e.message), true);
+    return false;
+  }
+}
 
 function spRenderBrowser(host, tab) {
-  // 工具栏：后退 / 前进 / 刷新 + 药丸地址栏 + 前往
-  host.innerHTML = '<div class="spbnav">' +
-    '<button class="spnav" id="spb-back" title="' + esc(t('spb_back')) + '">' + ic('back') + '</button>' +
-    '<button class="spnav" id="spb-fwd" title="' + esc(t('spb_fwd')) + '">' + ic('fwd') + '</button>' +
-    '<button class="spnav" id="spb-rl" title="' + esc(t('spb_rl')) + '">' + ic('refresh') + '</button>' +
-    '<input id="spb-url" placeholder="' + esc(t('spb_ph')) + '" spellcheck="false" autocomplete="off">' +
-    '<button class="spnav pri" id="spb-go" title="' + esc(t('sp_run')) + '">' + ic('fwd') + '</button>' +
-    '<button class="spnav" id="spb-ck" title="' + esc(t('spb_ck_h')) + '">' + ic('lock') + '</button>' +
+  const st = tab.st || (tab.st = {});
+  if (!st.zoom) {
+    let z = null;
+    try { z = localStorage.getItem('parable.spb.zoom'); } catch (e) {}
+    st.zoom = z || 'fit';
+  }
+  const preset = st.vpSel || 'default';
+  const chips = [
+    ['default', t('spb_default')],
+    ['pane', t('spb_pane')],
+    ['desktop', t('spb_desktop')],
+    ['tablet', t('spb_tablet')],
+    ['phone', t('spb_phone')],
+  ].map(([k, label]) => '<button class="spbchip' + (preset === k ? ' on' : '') +
+    '" data-vp="' + k + '">' + esc(label) + '</button>').join('');
+
+  host.innerHTML =
+    '<div class="spbnav2" id="spb-nav">' +
+      '<button class="spnav" id="spb-back" title="' + esc(t('spb_back')) + '">' + ic('back') + '</button>' +
+      '<button class="spnav" id="spb-fwd" title="' + esc(t('spb_fwd')) + '">' + ic('fwd') + '</button>' +
+      '<button class="spnav" id="spb-rl" title="' + esc(t('spb_rl')) + '">' + ic('refresh') + '</button>' +
+      '<div class="spbaddr">' +
+        '<span class="spbsec" id="spb-sec">' + ic('globe') + '</span>' +
+        '<input id="spb-url" placeholder="' + esc(t('spb_ph')) + '" spellcheck="false" autocomplete="off">' +
+        '<span class="spbload" id="spb-load" hidden></span>' +
+        '<button class="spbico" id="spb-copy" title="' + esc(t('spb_copy')) + '">' + ic('link') + '</button>' +
+      '</div>' +
+      '<button class="spnav" id="spb-ext" title="' + esc(t('spb_ext')) + '">' + ic('ext') + '</button>' +
+      '<button class="spnav" id="spb-more" title="' + esc(t('spb_menu')) + '">' + ic('more') + '</button>' +
+      '<div class="spbmenu" id="spb-menu" hidden>' +
+        '<button class="spbmi" data-spbmi="pane">' + ic('monitor') + esc(t('spb_fill')) + '</button>' +
+        '<button class="spbmi" data-spbmi="resp">' + ic('monitor') + esc(t('spb_resp')) + '</button>' +
+        '<button class="spbmi" data-spbmi="ext">' + ic('ext') + esc(t('spb_ext')) + '</button>' +
+        '<button class="spbmi" data-spbmi="copy">' + ic('copy') + esc(t('spb_copy')) + '</button>' +
+        '<button class="spbmi" data-spbmi="hard">' + ic('refresh') + esc(t('spb_hard')) + '</button>' +
+        '<button class="spbmi" data-spbmi="ck">' + ic('lock') + esc(t('spb_ck')) + '</button>' +
+        '<button class="spbmi" data-spbmi="text">' + ic('file') + esc(t('spb_text')) + '</button>' +
+      '</div>' +
     '</div>' +
-    '<div class="spbrow" id="spb-body"><div class="spempty">' + esc(t('sp_empty_browser')) + '</div></div>' +
-    '<div class="spbhint">' + esc(t('spb_hint')) + '</div>';
-  const url = host.querySelector('#spb-url');
-  url.value = tab.st.url || '';
-  const nav = async (path, body) => {
-    try {
-      await api(path, { method: 'POST', body: body || {} });
-      setTimeout(() => spBrowserState(tab), 900);
-    } catch (e) { toast(e.message); }
-  };
-  host.querySelector('#spb-back').onclick = () => nav('/browser/back');
-  host.querySelector('#spb-fwd').onclick = () => nav('/browser/forward');
-  host.querySelector('#spb-rl').onclick = () => nav('/browser/reload');
-  const go = host.querySelector('#spb-go');
+    '<div class="spbresp" id="spb-respbar"' + (st.respOpen === true ? '' : ' hidden') + '>' +
+      chips +
+      '<span class="spbdim" id="spb-dim"></span>' +
+      '<label class="spbzoom">' + esc(t('spb_zoom')) +
+        '<select id="spb-zoom">' +
+          ['fit', '50', '75', '100', '125', '150'].map(z =>
+            '<option value="' + z + '"' + (st.zoom === z ? ' selected' : '') + '>' +
+            (z === 'fit' ? esc(t('spb_fit')) : z + '%') + '</option>').join('') +
+        '</select>' +
+      '</label>' +
+    '</div>' +
+    '<div class="spbview" id="spb-body">' +
+      '<div class="spbcanvas" id="spb-canvas">' +
+        '<div class="spbempty" id="spb-empty">' +
+          '<span class="globe">' + ic('globe') + '</span>' +
+          '<h4>' + esc(t('spb_empty_title')) + '</h4>' +
+          '<p>' + esc(t('spb_empty_hint')) + '</p>' +
+        '</div>' +
+        '<img class="spbimg" id="spb-img" alt="" tabindex="0" hidden>' +
+      '</div>' +
+      '<details class="spbtxt" id="spb-text" hidden>' +
+        '<summary>' + esc(t('spb_text')) + '</summary><pre></pre>' +
+      '</details>' +
+      '<textarea class="spbime" id="spb-ime" aria-hidden="true" tabindex="-1"></textarea>' +
+    '</div>' +
+    '<div class="spbhint" id="spb-hint" hidden></div>';
+
+  const url = spbEl('#spb-url'), img = spbEl('#spb-img'), ime = spbEl('#spb-ime');
+  url.value = st.url || '';
+  if (st.zoom && st.zoom !== 'fit') setTimeout(() => spbZoomApply(tab), 0);
+
   const doGo = async () => {
     let u = url.value.trim();
     if (!u) return;
-    // 补协议：用户习惯裸域名
-    if (!/^https?:\/\//i.test(u)) u = 'https://' + u;
-    go.disabled = true;
-    try {
-      await api('/browser/navigate', { method: 'POST', body: { url: u } });
-      tab.st.url = u;
-      setTimeout(() => spBrowserState(tab), 1200);
-    } catch (e) {
-      toast(e.message);
-    }
-    go.disabled = false;
+    if (!/^(https?:\/\/|about:|chrome:)/i.test(u)) u = 'https://' + u;
+    st.url = u; st.ready = false; st.title = '';
+    url.blur();
+    await spbAct(tab, '/browser/navigate', { url: u });
   };
-  go.onclick = doGo;
-  url.onkeydown = e => { if (e.key === 'Enter') doGo(); };
-  host.querySelector('#spb-ck').onclick = () => spCookieImport();
-  if (tab.st.url) spBrowserState(tab);
-  // 实况轮询：内置浏览器是 agent 与用户共用的视图，agent 操作期间面板
-  // 跟随刷新。3s 一次（BitBlt + PNG ~100ms，常驻开销可接受）。
-  if (tab.st.poll) clearInterval(tab.st.poll);
-  tab.st.poll = setInterval(() => {
-    if (SP.active !== tab.id || !SP.tabs.some(x => x.id === tab.id)) {
-      clearInterval(tab.st.poll);
-      tab.st.poll = 0;
-      return;
+  url.onkeydown = e => {
+    if (e.key === 'Enter') { e.preventDefault(); doGo(); }
+    if (e.key === 'Escape') { url.value = st.url || ''; url.blur(); }
+  };
+
+  spbEl('#spb-back').onclick = () => spbAct(tab, '/browser/back');
+  spbEl('#spb-fwd').onclick = () => spbAct(tab, '/browser/forward');
+  spbEl('#spb-rl').onclick = () => {
+    if (st.url && !st.ready) spbAct(tab, '/browser/stop');
+    else spbAct(tab, '/browser/reload');
+  };
+  spbEl('#spb-copy').onclick = () => {
+    if (!st.url) return;
+    copyText(st.url);
+    toast(t('spb_copied'));
+  };
+  spbEl('#spb-ext').onclick = () => { if (st.url) openExternal(st.url); };
+  const toggleResp = () => {
+    st.respOpen = st.respOpen !== true;
+    const bar = spbEl('#spb-respbar');
+    if (bar) bar.hidden = !st.respOpen;
+  };
+
+  // 响应式预设 + 缩放
+  $$('.spbchip', spbEl('#spb-respbar')).forEach(b => {
+    b.onclick = async () => {
+      const k = b.dataset.vp;
+      let body;
+      if (k === 'pane') {
+        // 侧栏宽度有过渡动画，等它稳定再量，否则会按旧宽度拍下视口。
+        await new Promise(r => setTimeout(r, 320));
+        body = spbPaneSize();
+      } else {
+        body = k === 'default' ? {} : SPB_PRESETS[k];
+      }
+      if (k === 'pane' && (body.width < 320 || body.height < 240)) {
+        spbHint(tab, esc(t('spb_pane_small')), true);
+        return;
+      }
+      st.vpSel = k;
+      st.vpUserAt = Date.now();
+      st.viewport = k === 'default' ? { width: 0, height: 0 } : { width: body.width, height: body.height };
+      $$('.spbchip').forEach(x => x.classList.toggle('on', x === b));
+      const dim = spbEl('#spb-dim');
+      if (dim) dim.textContent = body.width ? body.width + '×' + body.height : '';
+      await spbAct(tab, '/browser/viewport', body);
+    };
+  });
+  const zoom = spbEl('#spb-zoom');
+  zoom.onchange = () => {
+    st.zoom = zoom.value;
+    try { localStorage.setItem('parable.spb.zoom', st.zoom); } catch (e) {}
+    spbZoomApply(tab);
+  };
+
+  // 更多菜单
+  const menu = spbEl('#spb-menu');
+  const closeMenu = () => {
+    if (menu) menu.hidden = true;
+    if (st.menuDoc) { document.removeEventListener('pointerdown', st.menuDoc, true); st.menuDoc = 0; }
+  };
+  spbEl('#spb-more').onclick = e => {
+    e.stopPropagation();
+    const open = menu.hidden;
+    menu.hidden = !open;
+    if (open) {
+      st.menuDoc = ev => { if (!menu.contains(ev.target)) closeMenu(); };
+      document.addEventListener('pointerdown', st.menuDoc, true);
+    } else closeMenu();
+  };
+  $$('.spbmi', menu).forEach(b => {
+    b.onclick = async () => {
+      const kind = b.dataset.spbmi;
+      closeMenu();
+      if (kind === 'pane') {
+        const chip = spbEl('#spb-respbar .spbchip[data-vp=pane]');
+        if (chip) chip.click();
+      } else if (kind === 'resp') {
+        toggleResp();
+      } else if (kind === 'ext') {
+        if (!st.url) return;
+        openExternal(st.url);
+      } else if (kind === 'copy') {
+        if (!st.url) return;
+        copyText(st.url);
+        toast(t('spb_copied'));
+      } else if (kind === 'hard') {
+        spbAct(tab, '/browser/reload?hard=1');
+      } else if (kind === 'ck') {
+        spCookieImport();
+      } else if (kind === 'text') {
+        const txt = spbEl('#spb-text');
+        if (txt) {
+          const open = txt.hidden || !txt.open;
+          txt.hidden = false;
+          txt.open = open;
+          if (open) spbLoadText(tab);
+        }
+      }
+    };
+  });
+
+  // 截图交互：点击 / 滚轮
+  img.onpointerdown = () => { try { ime.focus({ preventScroll: true }); } catch (e) {} };
+  img.onclick = async e => {
+    try { ime.focus({ preventScroll: true }); } catch (e0) {}
+    const p = spbPoint(img, e);
+    if (!p) return;
+    const rip = document.createElement('span');
+    rip.className = 'spbrip';
+    const cr = img.parentElement.getBoundingClientRect();
+    rip.style.left = (e.clientX - cr.left) + 'px';
+    rip.style.top = (e.clientY - cr.top) + 'px';
+    img.parentElement.appendChild(rip);
+    setTimeout(() => rip.remove(), 520);
+    try {
+      await api('/browser/click', { method: 'POST', body: { x: p.x, y: p.y } });
+      spbKick(tab, 600, 900);
+    } catch (e2) { spbHint(tab, esc(e2.message), true); }
+  };
+  img.onwheel = e => {
+    e.preventDefault();
+    const p = spbPoint(img, e) || { x: 1, y: 1 };
+    const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 800 : 1;
+    st.wheel = st.wheel || { x: 0, y: 0, px: 0, py: 0 };
+    st.wheel.x += e.deltaX * unit; st.wheel.y += e.deltaY * unit;
+    st.wheel.px = p.x; st.wheel.py = p.y;
+    if (st.wheelT) return;
+    st.wheelT = setTimeout(async () => {
+      const w = st.wheel; st.wheelT = 0;
+      if (!w || (!w.x && !w.y)) return;
+      st.wheel = { x: 0, y: 0, px: w.px, py: w.py };
+      try {
+        await api('/browser/scroll', { method: 'POST', body: { x: w.px, y: w.py, dx: w.x, dy: w.y } });
+        spbKick(tab, 700, 900);
+      } catch (e2) { spbHint(tab, esc(e2.message), true); }
+    }, 80);
+  };
+
+  // 键盘：特殊键走 key，普通字符走 IME 隐藏输入框（支持中文与输入法）
+  const NAV_KEYS = /^(Enter|Return|Tab|Escape|Esc|Backspace|Delete|Del|Space|PageUp|PageDown|Home|End|ArrowLeft|ArrowUp|ArrowRight|ArrowDown)$/;
+  const keyName = k => k === ' ' ? 'Space' : k === 'Esc' ? 'Esc' : k;
+  img.onkeydown = e => {
+    if (e.isComposing || e.keyCode === 229) return;
+    if (NAV_KEYS.test(e.key) && !e.ctrlKey && !e.metaKey) {
+      e.preventDefault();
+      spbType(tab, { key: keyName(e.key) });
+      spbKick(tab, 600, 800);
+    } else if (e.key && e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      spbType(tab, { text: e.key });
+      spbKick(tab, 600, 800);
     }
-    spBrowserState(tab);
-  }, 3000);
+  };
+  ime.onkeydown = e => {
+    if (e.isComposing || e.keyCode === 229) return;
+    if (NAV_KEYS.test(e.key) && !e.ctrlKey && !e.metaKey) {
+      e.preventDefault();
+      spbType(tab, { key: keyName(e.key) });
+      spbKick(tab, 600, 800);
+    }
+  };
+  ime.oninput = e => {
+    if (e.isComposing) return;
+    if (!ime.value) return;
+    if (ime.value.length > 4096) ime.value = ime.value.slice(-4096);
+    spbType(tab, { text: ime.value });
+    ime.value = '';
+    spbKick(tab, 600, 800);
+  };
+  ime.oncompositionend = () => {
+    if (!ime.value) return;
+    spbType(tab, { text: ime.value });
+    ime.value = '';
+    spbKick(tab, 600, 800);
+  };
+  ime.onpaste = e => {
+    const text = (e.clipboardData || window.clipboardData).getData('text');
+    if (text) {
+      e.preventDefault();
+      spbType(tab, { text });
+      spbKick(tab, 600, 800);
+    }
+  };
+
+  // 页面文本：按需加载，不参与轮询；默认收起，避免页脚多一行。
+  const txt = spbEl('#spb-text');
+  txt.ontoggle = () => {
+    if (txt.open) spbLoadText(tab);
+    else setTimeout(() => { txt.hidden = true; }, 0);
+  };
+
+  spbPaintMeta(tab, {
+    url: st.url, title: st.title, ready: st.ready,
+    canBack: st.canBack, canForward: st.canForward, viewport: st.viewport,
+  });
+  if (st.url) {
+    if (st.shotB64 && img) {
+      // 切回该标签：沿用上一帧，避免白屏等下一次轮询
+      img.src = 'data:image/png;base64,' + st.shotB64;
+      img.hidden = false;
+      const empty = spbEl('#spb-empty');
+      if (empty) empty.hidden = true;
+    }
+    spbKick(tab, 0, 0);
+  } else {
+    spbKick(tab, 300, 900);
+  }
 }
 
-async function spBrowserState(tab) {
-  const host = $('#spbody');
-  const box = host && host.querySelector('#spb-body');
-  if (!box) return;
-  let res;
+/** 页面文本（用户展开时才拉，避免每 2.6s 传一整页正文）。 */
+async function spbLoadText(tab) {
+  const txt = spbEl('#spb-text');
+  const pre = txt && txt.querySelector('pre');
+  if (!pre || tab.st.textLoaded || tab.st.textBusy) return;
+  tab.st.textBusy = true;
+  pre.textContent = t('spb_text_load');
   try {
-    res = await api('/browser/state');
+    const res = await api('/browser/text', { timeout: 12000 });
+    pre.textContent = res.text || '—';
+    tab.st.textLoaded = true;
   } catch (e) {
-    box.innerHTML = '<div class="spempty">' + esc(e.message) + '</div>';
-    return;
+    pre.textContent = e.message;
   }
-  if (SP.active !== tab.id) return;
-  const url = res.url || '';
-  if (url) {
-    const inp = host.querySelector('#spb-url');
-    if (inp && !inp.value) inp.value = url;
-  }
-  const img = res.screenshot
-    ? '<img src="data:image/png;base64,' + esc(res.screenshot) + '" alt="">'
-    : '';
-  box.innerHTML = img + (res.text ? '<details class="spbtxt"><summary>' + esc(t('spb_text')) + '</summary><pre>' + esc(res.text) + '</pre></details>' : '');
-  // 点击穿透：截图坐标 → 视口物理坐标（缩放截图按显示尺寸换算）
-  const im = box.querySelector('img');
-  if (im) im.onclick = async e => {
-    const r = im.getBoundingClientRect();
-    const x = (e.clientX - r.left) / r.width * im.naturalWidth;
-    const y = (e.clientY - r.top) / r.height * im.naturalHeight;
-    im.style.opacity = '.6';
-    try {
-      await api('/browser/click', { method: 'POST', body: { x, y } });
-      setTimeout(() => spBrowserState(tab), 900);
-    } catch (e2) { toast(e2.message); }
-    im.style.opacity = '';
-  };
+  tab.st.textBusy = false;
 }
 
 /* -------------------- 一键导入浏览器 Cookie/登录状态 --------------------
