@@ -335,6 +335,9 @@ pub struct Config {
     /// 发生超时 / 连接失败 / 429 / 5xx 时，按能力匹配取用一次。
     #[serde(default)]
     pub fallback_chain: Vec<String>,
+    /// 工作区之外追加的可访问目录（CLI `--add-dir` 可重复并入）。
+    #[serde(default)]
+    pub extra_dirs: Vec<String>,
 
     // ---- 多 Profile ----------------------------------------------------
     /// 命名配置束：模型 + 权限 + 思考强度一键切换。
@@ -540,6 +543,7 @@ impl Default for Config {
             mcp_servers: Vec::new(),
             auto_model: false,
             fallback_chain: Vec::new(),
+            extra_dirs: Vec::new(),
             profiles: Vec::new(),
             active_profile: String::new(),
         }
@@ -719,6 +723,12 @@ impl Config {
             !s.is_empty() && seen.insert(s.to_string())
         });
         self.fallback_chain.truncate(5);
+        // 追加可访问目录：去重保序，空串剔除（不设条数上限）。
+        let mut seen_dirs = std::collections::HashSet::new();
+        self.extra_dirs.retain(|s| {
+            let s = s.trim();
+            !s.is_empty() && seen_dirs.insert(s.to_string())
+        });
         self.ensure_free_provider();
     }
 
@@ -1024,5 +1034,19 @@ mod tests {
             cfg.fallback_chain,
             vec!["p/a", "p/b", "q/c", "q/d", "q/e"]
         );
+    }
+
+    #[test]
+    fn normalize_dedupes_extra_dirs_and_drops_blanks() {
+        let mut cfg = Config::default();
+        cfg.extra_dirs = vec![
+            "C:/data/a".into(),
+            "  C:/data/a  ".into(),
+            "".into(),
+            "   ".into(),
+            "C:/data/b".into(),
+        ];
+        cfg.normalize();
+        assert_eq!(cfg.extra_dirs, vec!["C:/data/a", "C:/data/b"]);
     }
 }

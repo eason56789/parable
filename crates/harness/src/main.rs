@@ -38,6 +38,36 @@ struct Args {
     /// Headless (-p) overall timeout in seconds, guarding against hangs.
     #[arg(long, default_value_t = 1800)]
     headless_timeout_secs: u64,
+
+    /// Resume an existing session by id. Exits non-zero if it does not exist;
+    /// never silently creates a new session.
+    #[arg(long = "session-id")]
+    session_id: Option<String>,
+
+    /// Repeatable: extra directories the agent may access outside the workspace.
+    #[arg(long = "add-dir")]
+    add_dir: Vec<String>,
+
+    /// Emit NDJSON events on stdout (`{"kind","session","ts","payload"}`) and
+    /// suppress all human-readable decorative output.
+    #[arg(long)]
+    json: bool,
+
+    /// Permission mode: `ask` | `ws` | `full`. An invalid value exits non-zero.
+    #[arg(long = "permission-mode")]
+    permission_mode: Option<String>,
+}
+
+/// Validate a `--permission-mode` value against the known modes.
+fn validate_permission_mode(mode: &str) -> Result<(), String> {
+    if harness::config::PERMISSION_MODES.contains(&mode) {
+        Ok(())
+    } else {
+        Err(format!(
+            "invalid permission-mode `{mode}`; expected one of: {}",
+            harness::config::PERMISSION_MODES.join(", ")
+        ))
+    }
 }
 
 #[tokio::main]
@@ -56,6 +86,15 @@ async fn main() -> anyhow::Result<()> {
     if let Some(ws) = &args.workspace {
         cfg.workspace = ws.clone();
     }
+    if let Some(pm) = &args.permission_mode {
+        validate_permission_mode(pm)
+            .map_err(|e| anyhow::anyhow!(e))?;
+        cfg.permission_mode = pm.clone();
+    }
+    for d in &args.add_dir {
+        cfg.extra_dirs.push(d.clone());
+    }
+    cfg.normalize();
     if cfg.workspace.is_empty() {
         cfg.workspace = std::env::current_dir()
             .unwrap_or_default()
@@ -72,10 +111,13 @@ async fn main() -> anyhow::Result<()> {
         let _ = std::fs::write(pf, format!("{port}\n{token}\n"));
     }
 
-    println!("Parable harness listening on {url}");
+    // --json 模式下不打印人类可读的监听横幅，stdout 只留给 NDJSON 事件。
+    if !args.json {
+        println!("Parable harness listening on {url}");
+    }
 
     if let Some(prompt) = args.prompt {
-        run_headless(&state, &prompt, args.headless_timeout_secs).await?;
+        run_headless(&state, &prompt, args.headless_timeout_secs, args.session_id, args.json).await?;
         return Ok(());
     }
 
@@ -89,12 +131,23 @@ async fn run_headless(
     state: &server::SharedState,
     prompt: &str,
     timeout_secs: u64,
+    session_id: Option<String>,
+    json: bool,
 ) -> anyhow::Result<()> {
     use harness::agent::TurnOptions;
-    let sid = {
-        let cfg = state.config.read().await;
-        let ws = cfg.workspace.clone();
-        state.store.create(&ws, "headless").await.meta.id
+    let sid = match session_id {
+        Some(id) => {
+            // 续跑：会话必须已存在；不存在直接报错退出，不静默新建。
+            if !state.store.exists(&id).await {
+                anyhow::bail!("session `{id}` does not exist; refusing to create a new one");
+            }
+            id
+        }
+        None => {
+            let cfg = state.config.read().await;
+            let ws = cfg.workspace.clone();
+            state.store.create(&ws, "headless").await.meta.id
+        }
     };
     // 先订阅、后 start_turn：反过来会在 turn 启动瞬间丢掉最早的事件
     // （text.delta 竞态，输出缺开头）。
@@ -111,17 +164,35 @@ async fn run_headless(
     loop {
         match tokio::time::timeout_at(deadline, rx.recv()).await {
             Err(_) => {
-                eprintln!("\n[timeout] headless run exceeded {timeout_secs}s; giving up");
+                if !json {
+                    eprintln!("\n[timeout] headless run exceeded {timeout_secs}s; giving up");
+                }
                 break;
             }
             Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(n))) => {
                 // 消费端一时跟不上：跳过缺失继续，不能直接退出。
-                eprintln!("\n[warn] event bus lagged, skipped {n} events");
+                if !json {
+                    eprintln!("\n[warn] event bus lagged, skipped {n} events");
+                }
                 continue;
             }
             Ok(Err(_)) => break, // channel closed
             Ok(Ok(ev)) => {
                 if ev.session_id != sid {
+                    continue;
+                }
+                if json {
+                    // NDJSON：一行一个事件对象，payload 原样内嵌；不做人类装饰。
+                    let line = serde_json::json!({
+                        "kind": ev.kind,
+                        "session": ev.session_id,
+                        "ts": ev.ts,
+                        "payload": ev.payload,
+                    });
+                    println!("{line}");
+                    if ev.kind == "turn.end" {
+                        break;
+                    }
                     continue;
                 }
                 match ev.kind.as_str() {
@@ -170,4 +241,53 @@ fn generate_token() -> String {
         format!("{:016x}", h.finish())
     };
     format!("{hash}{}", &uuid::Uuid::new_v4().simple().to_string()[..12])
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+
+    #[test]
+    fn parse_defaults() {
+        let args = Args::try_parse_from(["parable"]).expect("parse defaults");
+        assert!(args.session_id.is_none());
+        assert!(args.add_dir.is_empty());
+        assert!(!args.json);
+        assert!(args.permission_mode.is_none());
+    }
+
+    #[test]
+    fn parse_session_json_mode_and_repeatable_add_dir() {
+        let args = Args::try_parse_from([
+            "parable",
+            "--session-id",
+            "sess-123",
+            "--json",
+            "--permission-mode",
+            "ws",
+            "--add-dir",
+            "C:/data/a",
+            "--add-dir",
+            "C:/data/b",
+        ])
+        .expect("parse flags");
+        assert_eq!(args.session_id.as_deref(), Some("sess-123"));
+        assert!(args.json);
+        assert_eq!(args.permission_mode.as_deref(), Some("ws"));
+        assert_eq!(args.add_dir, vec!["C:/data/a", "C:/data/b"]);
+    }
+
+    #[test]
+    fn permission_mode_validation() {
+        for m in ["ask", "ws", "full"] {
+            assert!(validate_permission_mode(m).is_ok(), "mode {m} should be valid");
+        }
+        assert!(validate_permission_mode("yolo").is_err());
+        assert!(validate_permission_mode("").is_err());
+    }
+
+    #[test]
+    fn clap_rejects_unknown_flag() {
+        assert!(Args::try_parse_from(["parable", "--no-such-flag"]).is_err());
+    }
 }

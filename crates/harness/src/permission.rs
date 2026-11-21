@@ -287,6 +287,12 @@ pub fn inside_workspace(workspace: &Path, path: &Path) -> bool {
     )
 }
 
+/// Is `path` inside the workspace or one of the extra allowed roots
+/// (CLI `--add-dir`)?
+pub fn inside_any(workspace: &Path, roots: &[PathBuf], path: &Path) -> bool {
+    inside_workspace(workspace, path) || roots.iter().any(|r| inside_workspace(r, path))
+}
+
 /// C-12：组件级前缀比较（不做 canonicalize），供 fs 层与网关共用同一套
 /// Windows 大小写不敏感口径，避免两边对 `Foo`/`foo` 判定分叉。
 pub fn lexical_inside(parent: &Path, child: &Path) -> bool {
@@ -345,13 +351,13 @@ impl SandboxPolicy {
         !matches!(self.mode.as_str(), "warn" | "enforce")
     }
 
-    /// 写目标边界检查：命令前置声明的 cwd 必须落在 workspace 根内。
+    /// 写目标边界检查：命令前置声明的 cwd 必须落在 workspace 根或追加目录内。
     /// 用「解析绝对路径 + canonicalize 后组件前缀比较」，不靠正则拆命令。
-    pub fn check_cwd(&self, workspace: &Path, cwd: &Path) -> SandboxVerdict {
+    pub fn check_cwd(&self, workspace: &Path, roots: &[PathBuf], cwd: &Path) -> SandboxVerdict {
         if self.is_off() {
             return SandboxVerdict::Allow;
         }
-        if inside_workspace(workspace, cwd) {
+        if inside_any(workspace, roots, cwd) {
             return SandboxVerdict::Allow;
         }
         let message = format!(
@@ -367,14 +373,14 @@ impl SandboxPolicy {
     }
 
     /// 命令内显式写出的绝对路径（保守抽取，仅做边界比对；拆不出的命令不臆测）。
-    pub fn check_command_paths(&self, workspace: &Path, command: &str) -> SandboxVerdict {
+    pub fn check_command_paths(&self, workspace: &Path, roots: &[PathBuf], command: &str) -> SandboxVerdict {
         if self.is_off() {
             return SandboxVerdict::Allow;
         }
         let mut notes = Vec::new();
         for token in shell_tokens(command) {
             let Some(p) = abs_path_token(&token) else { continue };
-            if !inside_workspace(workspace, &p) {
+            if !inside_any(workspace, roots, &p) {
                 notes.push(format!(
                     "命令引用的路径 `{}` 越出工作区根 `{}`",
                     p.display(),
@@ -956,6 +962,21 @@ mod tests {
         std::fs::remove_dir_all(&base).ok();
     }
 
+    #[test]
+    fn inside_any_admits_workspace_and_extra_roots_only() {
+        let base = std::env::temp_dir().join(format!("parable-any-test-{}", std::process::id()));
+        std::fs::create_dir_all(&base).ok();
+        let base = base.canonicalize().unwrap_or(base);
+        let w = base.join("ws");
+        let extra = base.join("extra");
+        let other = base.join("other");
+        let roots = vec![extra.clone()];
+        assert!(inside_any(&w, &roots, &w.join("f.txt")));
+        assert!(inside_any(&w, &roots, &extra.join("sub/f.txt")));
+        assert!(!inside_any(&w, &roots, &other.join("f.txt")));
+        std::fs::remove_dir_all(&base).ok();
+    }
+
     #[cfg(windows)]
     #[test]
     fn inside_ws_windows_case_insensitive() {
@@ -985,14 +1006,14 @@ mod tests {
         let (ws, outside) = scratch_pair("off");
         let policy = SandboxPolicy { mode: "off".into(), network_allow: Vec::new() };
         // off：既有行为完全不变，越界也放行。
-        assert!(matches!(policy.check_cwd(&ws, &outside), SandboxVerdict::Allow));
+        assert!(matches!(policy.check_cwd(&ws, &[], &outside), SandboxVerdict::Allow));
     }
 
     #[test]
     fn sandbox_enforce_denies_write_escape_with_structured_error() {
         let (ws, outside) = scratch_pair("deny");
         let policy = SandboxPolicy { mode: "enforce".into(), network_allow: Vec::new() };
-        match policy.check_cwd(&ws, &outside) {
+        match policy.check_cwd(&ws, &[], &outside) {
             SandboxVerdict::Deny { code, message, suggestion } => {
                 assert_eq!(code, "sandbox:write-escape");
                 assert!(!message.is_empty());
@@ -1006,7 +1027,7 @@ mod tests {
     fn sandbox_warn_marks_but_does_not_block() {
         let (ws, outside) = scratch_pair("warn");
         let policy = SandboxPolicy { mode: "warn".into(), network_allow: Vec::new() };
-        match policy.check_cwd(&ws, &outside) {
+        match policy.check_cwd(&ws, &[], &outside) {
             SandboxVerdict::Warn { notes } => assert!(!notes.is_empty()),
             other => panic!("expected Warn, got {other:?}"),
         }

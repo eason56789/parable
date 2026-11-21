@@ -78,6 +78,64 @@ pub fn resolve_within(workspace: &Path, raw: &str) -> Result<PathBuf, HarnessErr
     Ok(normalized)
 }
 
+/// Resolve a caller-supplied path, admitting it when it sits inside the
+/// workspace **or** inside one of the extra allowed roots (CLI `--add-dir`).
+/// Relative paths are still anchored to the workspace; only absolute paths may
+/// land in an extra root. `..` escapes and symlink escapes are rejected the
+/// same way as [`resolve_within`].
+pub fn resolve_within_roots(
+    workspace: &Path,
+    roots: &[PathBuf],
+    raw: &str,
+) -> Result<PathBuf, HarnessError> {
+    match resolve_within(workspace, raw) {
+        Ok(p) => Ok(p),
+        Err(ws_err) => {
+            let raw = raw.trim();
+            if !Path::new(raw).is_absolute() || roots.is_empty() {
+                return Err(ws_err);
+            }
+            let normalized = normalize(&PathBuf::from(raw));
+            for root in roots {
+                let root_norm = normalize(root);
+                if !crate::permission::lexical_inside(&root_norm, &normalized) {
+                    continue;
+                }
+                let root_real = root.canonicalize().ok();
+                if let Some(root_r) = &root_real {
+                    let mut probe = normalized.clone();
+                    loop {
+                        match std::fs::symlink_metadata(&probe) {
+                            Ok(_) => match probe.canonicalize() {
+                                Ok(real) => {
+                                    if !real.starts_with(root_r) {
+                                        return Err(HarnessError::Tool(format!(
+                                            "path {raw} escapes an added directory through a symlink or junction"
+                                        )));
+                                    }
+                                    break;
+                                }
+                                Err(_) => {
+                                    return Err(HarnessError::Tool(format!(
+                                        "path {raw} contains an unresolvable symlink escaping an added directory"
+                                    )));
+                                }
+                            },
+                            Err(_) => {
+                                if !probe.pop() {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                return Ok(normalized);
+            }
+            Err(ws_err)
+        }
+    }
+}
+
 fn normalize(p: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for comp in p.components() {
@@ -528,6 +586,27 @@ mod tests {
         assert!(resolve_within(&ws, "../outside.txt").is_err());
         assert!(resolve_within(&ws, "ok.txt").is_ok());
         assert!(resolve_within(&ws, "a/../b.txt").is_ok());
+    }
+
+    #[test]
+    fn roots_admit_extra_dir_and_reject_other_outside() {
+        let ws = std::env::temp_dir().join("parable-test-roots-ws");
+        let extra = std::env::temp_dir().join("parable-test-roots-extra");
+        let other = std::env::temp_dir().join("parable-test-roots-other");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::create_dir_all(&extra).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let roots = vec![extra.clone()];
+        // 工作区内照常放行。
+        assert!(resolve_within_roots(&ws, &roots, "ok.txt").is_ok());
+        // 追加目录内的绝对路径放行。
+        let in_extra = extra.join("sub/f.txt");
+        assert!(resolve_within_roots(&ws, &roots, &in_extra.to_string_lossy()).is_ok());
+        // 既不在工作区、也不在追加目录内的绝对路径拒绝。
+        let in_other = other.join("f.txt");
+        assert!(resolve_within_roots(&ws, &roots, &in_other.to_string_lossy()).is_err());
+        // 相对路径仍锚定工作区，不能借追加目录逃逸。
+        assert!(resolve_within_roots(&ws, &roots, "../escape.txt").is_err());
     }
 
     #[test]

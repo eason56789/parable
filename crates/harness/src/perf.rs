@@ -381,8 +381,8 @@ fn perf_sandbox_gate_overhead() {
         for _ in 0..n {
             let t0 = Instant::now();
             for verdict in [
-                policy.check_cwd(&ws, dir),
-                policy.check_command_paths(&ws, cmd),
+                policy.check_cwd(&ws, &[], dir),
+                policy.check_command_paths(&ws, &[], cmd),
                 policy.check_network_command(cmd),
             ] {
                 use crate::permission::SandboxVerdict;

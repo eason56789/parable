@@ -1288,7 +1288,7 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
         );
 
         // ---- resolve model + workspace + turn 级行为开关
-        let (workspace, model_sel, ctx_limit, search_key, search_pref, anysearch_key, tcfg, opts) = {
+        let (workspace, model_sel, ctx_limit, search_key, search_pref, anysearch_key, extra_dirs, tcfg, opts) = {
             let cfg = self.config.read().await;
             let ws = if cfg.workspace.is_empty() {
                 std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
@@ -1347,7 +1347,8 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
             if let Some(plan) = overlay.as_ref().and_then(|v| v.get("plan_mode")).and_then(|x| x.as_bool()) {
                 o.plan_mode = plan;
             }
-            (ws, sel, limit, cfg.search_key.clone(), cfg.search_pref.clone(), cfg.anysearch_key.clone(), tcfg, o)
+            (ws, sel, limit, cfg.search_key.clone(), cfg.search_pref.clone(), cfg.anysearch_key.clone(),
+                cfg.extra_dirs.iter().map(PathBuf::from).collect(), tcfg, o)
         };
 
         // 防休眠看门狗：独立线程周期性持锁，turn 结束即归还
@@ -1460,7 +1461,11 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
 
         // 每轮一个 Registry（带 search 配置），specs() 与工具执行共用同一实例，
         // 修复搜索配置到不了执行现场的问题。
-        let registry = Arc::new(Registry::new(workspace.clone()).with_search(&search_pref, &search_key, &anysearch_key));
+        let registry = Arc::new(
+            Registry::new(workspace.clone())
+                .with_search(&search_pref, &search_key, &anysearch_key)
+                .with_extra_dirs(extra_dirs),
+        );
         // MCP 工具清单刷新（≤8s）：写入共享缓存供 specs() 同步读取；
         // 没配 MCP 时 all_tools 立即返回空。
         {

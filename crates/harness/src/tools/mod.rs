@@ -644,6 +644,8 @@ fn mcp_gen() -> u64 {
 
 pub struct Registry {
     pub workspace: PathBuf,
+    /// 工作区之外追加的可访问目录（CLI `--add-dir` 并入配置）。
+    pub extra_dirs: Vec<PathBuf>,
     /// External-command tools contributed by enabled plugins. Interior mutability
     /// lets a `plugin_create` in the middle of a turn reload them immediately.
     pub plugin_tools: std::sync::RwLock<Vec<crate::plugin::PluginTool>>,
@@ -662,11 +664,18 @@ impl Registry {
         let plugin_tools = crate::plugin::PluginStore::new().runnable_tools();
         Self {
             workspace,
+            extra_dirs: Vec::new(),
             plugin_tools: std::sync::RwLock::new(plugin_tools),
             search_pref: String::new(),
             search_key: String::new(),
             anysearch_key: String::new(),
         }
+    }
+
+    /// Attach the extra allowed directories from configuration / `--add-dir`.
+    pub fn with_extra_dirs(mut self, dirs: Vec<PathBuf>) -> Self {
+        self.extra_dirs = dirs;
+        self
     }
 
     /// Re-read enabled plugins from disk and drop the schema memo. Called after
@@ -1493,9 +1502,10 @@ skill matches the current request, then follow the steps it contains. Read-only.
 
     // ---------------------------------------------------------------- fs helpers
 
-    /// Resolve a caller-supplied path against the workspace and reject escapes.
+    /// Resolve a caller-supplied path against the workspace (and extra allowed
+    /// roots) and reject escapes.
     pub fn resolve(&self, raw: &str) -> Result<PathBuf, HarnessError> {
-        fs::resolve_within(&self.workspace, raw)
+        fs::resolve_within_roots(&self.workspace, &self.extra_dirs, raw)
     }
 }
 
@@ -1651,8 +1661,8 @@ impl Registry {
         };
         let mut sandbox_notes: Vec<String> = Vec::new();
         for verdict in [
-            policy.check_cwd(&self.workspace, &cwd),
-            policy.check_command_paths(&self.workspace, command),
+            policy.check_cwd(&self.workspace, &self.extra_dirs, &cwd),
+            policy.check_command_paths(&self.workspace, &self.extra_dirs, command),
             policy.check_network_command(command),
         ] {
             match verdict {
