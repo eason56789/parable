@@ -454,9 +454,11 @@ textarea::placeholder{color:var(--fg2)}
 .pklt{display:flex;align-items:center;gap:8px;font:12.5px var(--sans);color:var(--fg2);margin-bottom:9px}
 .pklt b{color:var(--fg);font-size:14px;font-weight:600}
 .pkrange{-webkit-appearance:none;appearance:none;width:100%;height:9px;border-radius:99px;outline:0;cursor:pointer;
-    background:linear-gradient(90deg,#2fbf8f,#22c8d6,#3b82f6)}
-.pkrange::-webkit-slider-thumb{-webkit-appearance:none;width:22px;height:22px;border-radius:50%;background:#fff;border:0;box-shadow:0 1px 6px rgba(0,0,0,.4)}
-.pkrange::-moz-range-thumb{width:22px;height:22px;border-radius:50%;background:#fff;border:0;box-shadow:0 1px 6px rgba(0,0,0,.4)}
+    background:var(--hov)}
+.pkrange::-webkit-slider-thumb{-webkit-appearance:none;width:18px;height:18px;border-radius:50%;background:var(--accent);border:2px solid #fff;box-shadow:0 1px 5px rgba(0,0,0,.35)}
+.pkrange::-moz-range-thumb{width:18px;height:18px;border-radius:50%;background:var(--accent);border:2px solid #fff;box-shadow:0 1px 5px rgba(0,0,0,.35)}
+.pkrange::-moz-range-track{background:var(--hov);border-radius:99px}
+.pkrange::-moz-range-progress{background:var(--accent);border-radius:99px}
 .pkempty{padding:22px 16px;font:13px var(--sans);color:var(--fg2)}
 .tools{min-width:0}
 /* 计划模式开启时的可见标识 */
@@ -1691,18 +1693,21 @@ body.dragging #main{outline:2px dashed var(--accent);outline-offset:-8px}
 
 /* ---- round2 ui ---- */
 #body{position:relative}
-/* 左工作区面板 / 右 Environment 面板：默认折叠，展开宽度由契约冻结（280 / 300px）。 */
-#r2-ws,#r2-env{flex:none;min-height:0;overflow:hidden;background:var(--side);display:flex;flex-direction:column;
+/* 左工作区面板 / 右 Environment 面板：默认折叠，展开宽度由契约冻结（280 / 300px）。
+   底色向 fg 混 6%：暗色下比主区浅一档，亮色下比主区深一档；分区只靠 1px 边线，不堆阴影。 */
+#r2-ws,#r2-env{position:relative;flex:none;min-height:0;overflow:hidden;background:color-mix(in srgb,var(--bg) 94%,var(--fg));display:flex;flex-direction:column;
   width:0;opacity:0;border:0;transition:width calc(.45s * var(--animd)) cubic-bezier(.32,.72,0,1),opacity calc(.3s * var(--animd))}
-body.r2-ws-open #r2-ws{width:280px;opacity:1;border-right:.5px solid var(--line)}
-body.r2-env-open #r2-env{width:300px;opacity:1;border-left:.5px solid var(--line)}
+body.r2-ws-open #r2-ws{width:var(--r2w,280px);opacity:1;border-right:1px solid var(--line)}
+body.r2-env-open #r2-env{width:300px;opacity:1;border-left:1px solid var(--line)}
 .r2-title{font:600 var(--fs-secondary) var(--sans);letter-spacing:.04em;text-transform:uppercase;color:var(--fg2)}
 .r2-meta{font:var(--fs-caption) var(--sans);color:var(--fg2)}
 
 /* —— 左：工作区文件树 + 预览 —— */
 .r2-ws-head{flex:none;display:flex;align-items:center;gap:8px;padding:10px 12px 8px}
-.r2-ws-head .r2-root{flex:1;min-width:0;font:11px var(--mono);color:var(--fg2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-#r2-ws-ref{width:26px;height:26px}
+.r2-ws-head .r2-root{flex:1;min-width:0;font:11px var(--mono);color:var(--fg2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  background:none;border:0;border-radius:6px;padding:3px 6px;cursor:pointer;text-align:left}
+.r2-ws-head .r2-root:hover{background:var(--hov);color:var(--fg)}
+#r2-ws-ref,#r2-ws-expand{width:26px;height:26px;flex:none}
 .r2-ws-tabs{flex:none;display:flex;gap:2px;padding:0 8px;overflow-x:auto;scrollbar-width:none}
 .r2-ws-tabs::-webkit-scrollbar{display:none}
 .r2-ws-tab{display:flex;align-items:center;gap:6px;max-width:132px;border:0;background:none;color:var(--fg2);font:12px var(--sans);padding:5px 7px;border-radius:8px;cursor:pointer;white-space:nowrap}
@@ -1732,6 +1737,21 @@ body.r2-ws-file .r2-ws-view{flex:1 1 62%}
 .r2-tree-row.dir.closed .r2-tw svg{transform:rotate(-90deg)}
 .r2-children{margin-left:14px}
 .r2-empty{padding:18px 12px;color:var(--fg2);font:12px var(--sans);text-align:center}
+/* 面板宽度拖拽抓手：4px 命中区，hover/拖拽时显 accent 细线；键盘 ←/→ 微调。 */
+#r2-ws-drag{position:absolute;top:0;bottom:0;right:0;width:6px;z-index:6;border:0;padding:0;background:none;cursor:col-resize}
+#r2-ws-drag::after{content:'';position:absolute;right:2px;top:0;bottom:0;width:2px;background:transparent;transition:background-color .18s}
+#r2-ws-drag:hover::after,body.r2-ws-drag #r2-ws-drag::after{background:var(--accent)}
+body.r2-ws-drag{cursor:col-resize;user-select:none}
+body.r2-ws-drag #r2-ws{transition:none}
+/* 代码全宽浮层：遮罩 + 居中卡片，代码可横向滚动不再裁切。 */
+#r2-pop{position:fixed;inset:0;z-index:50;display:flex}
+#r2-pop[hidden]{display:none}
+.r2-pop-scr{position:absolute;inset:0;background:rgba(0,0,0,.45)}
+.r2-pop-card{position:relative;margin:auto;width:min(1080px,92vw);height:min(760px,86vh);display:flex;flex-direction:column;
+  background:var(--bg);border:1px solid var(--line);border-radius:12px;overflow:hidden;box-shadow:0 18px 52px rgba(0,0,0,.3)}
+.r2-pop-head{flex:none;display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--line)}
+.r2-pop-head .r2-meta{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.r2-pop-code{flex:1;min-height:0}
 /* 极简语法高亮：关键字 / 字符串 / 注释 / 数字四类，颜色全部取自现有主题变量。 */
 .r2-ws-code .tk-kw{color:var(--uch1)}
 .r2-ws-code .tk-str{color:var(--diff-add)}
@@ -1771,6 +1791,8 @@ body.r2-ws-file .r2-ws-view{flex:1 1 62%}
 .r2-tel-i b{color:var(--fg);font-weight:600}
 
 #tb .ib.on{background:var(--hov);color:var(--fg)}
+#tb #r2-ws-btn,#tb #r2-env-btn{border:1px solid transparent}
+#tb #r2-ws-btn.on,#tb #r2-env-btn.on{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 38%,transparent);background:color-mix(in srgb,var(--accent) 10%,transparent)}
 /* 窄屏：两面板转为 overlay 全屏抽屉，遮罩 + Esc 关闭。 */
 #r2-scr{display:none;position:absolute;inset:0;z-index:29;background:rgba(0,0,0,.35)}
 @media(max-width:1023px){
@@ -1805,6 +1827,16 @@ body.r2-ws-file .r2-ws-view{flex:1 1 62%}
   <div id="body">
     <div id="scr"></div>
     <div id="r2-scr"></div>
+    <div id="r2-pop" hidden>
+      <div class="r2-pop-scr" data-r2pop-close></div>
+      <div class="r2-pop-card" role="dialog" aria-modal="true" aria-labelledby="r2-pop-title">
+        <div class="r2-pop-head">
+          <span class="r2-meta" id="r2-pop-title">—</span>
+          <button class="ib" id="r2-pop-x" data-ic="x" title="关闭 (Esc)"></button>
+        </div>
+        <pre class="r2-ws-code r2-pop-code" id="r2-pop-code"></pre>
+      </div>
+    </div>
     <aside id="side" aria-label="会话列表"><div id="sin">
       <div class="nav" id="nc"><span class="np" data-ic="plus"></span><span data-i="new"></span></div>
       <div class="nav" data-pg="plugins"><span data-ic="plug"></span><span data-i="plugins"></span></div>
@@ -1827,7 +1859,8 @@ body.r2-ws-file .r2-ws-view{flex:1 1 62%}
     <aside id="r2-ws" aria-label="工作区文件面板">
       <div class="r2-ws-head">
         <span class="r2-title" data-i="r2_ws">工作区</span>
-        <span class="r2-root" id="r2-ws-root">—</span>
+        <button class="r2-root" id="r2-ws-root" title="点击复制完整路径">—</button>
+        <button class="ib" id="r2-ws-expand" data-ic="expand" title="在浮层中打开代码" aria-hidden="true" tabindex="-1" disabled></button>
         <button class="ib" id="r2-ws-ref" data-ic="refresh" title="刷新文件树"></button>
       </div>
       <div class="r2-ws-tabs" id="r2-ws-tabs" role="tablist" aria-label="已打开文件"></div>
@@ -1836,6 +1869,7 @@ body.r2-ws-file .r2-ws-view{flex:1 1 62%}
         <div class="r2-ws-meta" id="r2-ws-meta"></div>
         <pre class="r2-ws-code" id="r2-ws-code"></pre>
       </div>
+      <div id="r2-ws-drag" role="separator" aria-orientation="vertical" aria-label="调整工作区面板宽度" tabindex="0" title="拖动调整宽度 · 双击复位 · ←/→ 微调"></div>
     </aside>
     <main id="main">
     <div id="dock">
@@ -2040,6 +2074,7 @@ const IC = {
   panel:'<rect x="3" y="4" width="14" height="12" rx="2.5"/><path d="M13 4v12"/>',
   x:'<path d="M5.5 5.5l9 9M14.5 5.5l-9 9"/>',
   min:'<path d="M4.5 13.5h11"/>',
+  expand:'<path d="M8.5 4H4v4.5M15.5 4H20v4.5M8.5 20H4v-4.5M15.5 20H20v-4.5"/>',
   /* 窗口控制字形用系统图标字体的码位（E921/E922/E923/E8BB），不需要路径。 */
   git:'<circle cx="6" cy="5" r="2"/><circle cx="6" cy="15" r="2"/><circle cx="14.5" cy="10" r="2"/><path d="M6 7v6M8 5h3.5a3 3 0 013 3v.5"/>',
   wand:'<path d="M4 16L12 8"/><path d="M11 4l1 2 2 1-2 1-1 2-1-2-2-1 2-1z"/><path d="M15 11l.6 1.2 1.4.8-1.4.6-.6 1.4-.6-1.4-1.4-.6 1.4-.8z"/>',
@@ -2370,7 +2405,7 @@ const L = {
     sysprev_empty:'（空 — 下一轮会话将没有 system 提示词）', sysprev_fail:'预览失败：',
     plan_mode:'计划模式', plan_mode_h:'先制定计划，经确认后再执行', plan_badge:'计划',
     auto_model:'自动选模型', auto_model_h:'按任务能力自动匹配模型',
-    r2_ws:'工作区', r2_host:'主机', r2_wsdir:'工作区', r2_ctx:'上下文', r2_mcp:'连接器', r2_model:'模型',
+    r2_ws:'工作区', r2_host:'主机', r2_wsdir:'工作区', r2_ctx:'上下文', r2_mcp:'连接器', r2_mcp0:'0 个服务器', r2_model:'模型',
     r2_nofile:'从左侧选择文件查看', r2_loading:'加载中…',
     auto_no_chat:'当前没有会话，不能投递到当前对话', disc:'Parable 是 AI，可能会出错，请核实重要内容',
     sp_title:'新标签页', sp_title_h:'选择要打开的工具面板。',
@@ -2636,7 +2671,7 @@ const L = {
     sysprev_empty:'(empty — the next turn will have no system prompt)', sysprev_fail:'Preview failed: ',
     plan_mode:'Plan mode', plan_mode_h:'Draft a plan first and wait for approval before running', plan_badge:'Plan',
     auto_model:'Auto model', auto_model_h:'Pick a model automatically by task capability',
-    r2_ws:'Workspace', r2_host:'Host', r2_wsdir:'Workspace', r2_ctx:'Context', r2_mcp:'Connectors', r2_model:'Model',
+    r2_ws:'Workspace', r2_host:'Host', r2_wsdir:'Workspace', r2_ctx:'Context', r2_mcp:'Connectors', r2_mcp0:'0 servers', r2_model:'Model',
     r2_nofile:'Select a file from the left to preview', r2_loading:'Loading…',
     auto_no_chat:'No active chat to deliver to', disc:'Parable is AI and can make mistakes. Please double-check important content',
     sp_title:'New tab', sp_title_h:'Choose a tool panel to open.',
@@ -10101,10 +10136,19 @@ function pkHtml() {
 }
 
 /** 渲染并绑定一个模型选择器（主输入框弹层 / 侧聊浮动菜单共用）。 */
+/* 滑杆已选区用 accent 填充（WebKit 无原生 progress 伪元素，按百分比铺渐变）。 */
+function pkRangeFill(input) {
+  if (!input) return;
+  const min = +input.min || 0, max = +input.max || 100, v = +input.value || 0;
+  const pct = ((v - min) / (max - min)) * 100;
+  input.style.background = 'linear-gradient(90deg, var(--accent) ' + pct + '%, var(--hov) ' + pct + '%)';
+}
+
 function pkRenderInto(root) {
   if (!root) return;
   if (!MPROV.length) loadProviders();
   root.innerHTML = pkHtml();
+  pkRangeFill(root.querySelector('[data-pklv]'));
   // 弹层内容填完尺寸才算得出来：填完立刻重新定位一次，否则会按宽度 0 摆到屏幕外。
   if (root.__place) requestAnimationFrame(root.__place);
   root.onclick = e => {
@@ -10138,6 +10182,7 @@ function pkRenderInto(root) {
     if (!e.target.matches('[data-pklv]')) return;
     S.lvl = +e.target.value;
     apply();
+    pkRangeFill(e.target);
     const tx = root.querySelector('[data-pklvtx]');
     if (tx) tx.textContent = t('l' + S.lvl);
     spChromeAll();
@@ -15451,6 +15496,7 @@ async function boot() {
 const R2 = {
   wsOpen: localStorage.getItem('parable.panel.ws') === '1',
   envOpen: localStorage.getItem('parable.panel.env') === '1',
+  wsW: +(localStorage.getItem('parable.panel.ws.w') || 0) || 0,
   root: '',
   treeCache: new Map(),
   expanded: new Set(),
@@ -15458,8 +15504,22 @@ const R2 = {
   tabs: [],
   active: null,
   env: null,
-  telSid: null
+  telSid: null,
+  popLast: null
 };
+
+/* 路径缩写：只显示「上级目录 / 目录名」，完整路径进 title，点击复制。 */
+function r2ShortPath(full) {
+  if (!full) return '—';
+  const parts = full.replace(/[\\/]+$/, '').split(/[\\/]/).filter(Boolean);
+  if (parts.length <= 2) return parts.join('/');
+  return parts.slice(-2).join('/');
+}
+
+function r2ApplyWsW() {
+  const w = Math.max(280, Math.min(380, R2.wsW || 280));
+  document.documentElement.style.setProperty('--r2w', w + 'px');
+}
 
 function r2ApplyBody() {
   document.body.classList.toggle('r2-ws-open', R2.wsOpen);
@@ -15468,6 +15528,8 @@ function r2ApplyBody() {
   const bw = $('#r2-ws-btn'), be = $('#r2-env-btn');
   if (bw) { bw.setAttribute('aria-expanded', String(R2.wsOpen)); bw.classList.toggle('on', R2.wsOpen); }
   if (be) { be.setAttribute('aria-expanded', String(R2.envOpen)); be.classList.toggle('on', R2.envOpen); }
+  const dg = $('#r2-ws-drag');
+  if (dg) { dg.tabIndex = R2.wsOpen ? 0 : -1; dg.setAttribute('aria-hidden', String(!R2.wsOpen)); }
 }
 
 function r2Toggle(which) {
@@ -15491,7 +15553,7 @@ async function r2StatusRoot() {
     if (r.workspace) {
       R2.root = r.workspace;
       const el = $('#r2-ws-root');
-      if (el) el.textContent = r.workspace;
+      if (el) { el.textContent = r2ShortPath(r.workspace); el.title = r.workspace + '\n点击复制完整路径'; }
       // env 面板若已在 /status 之前展开，回退工作区路径需要随 root 回填重绘一次。
       if (!R2.env) r2PaintEnv(null);
     }
@@ -15649,12 +15711,59 @@ function r2PaintPreview() {
   if (!view) return;
   const tab = R2.tabs.find(x => x.path === R2.active);
   document.body.classList.toggle('r2-ws-file', !!tab);
+  const ex = $('#r2-ws-expand');
+  if (ex) { ex.disabled = !tab; ex.setAttribute('aria-hidden', String(!tab)); ex.tabIndex = tab ? 0 : -1; }
   if (!tab) { view.hidden = true; return; }
   view.hidden = false;
-  if (tab.error) { meta.textContent = tab.path; code.innerHTML = '<div class="r2-empty">' + esc(tab.error) + '</div>'; return; }
-  if (tab.binary) { meta.textContent = tab.path; code.innerHTML = '<div class="r2-empty">—</div>'; return; }
+  if (tab.error) { meta.textContent = tab.path; code.innerHTML = '<div class="r2-empty">' + esc(tab.error) + '</div>'; r2PopSync(tab); return; }
+  if (tab.binary) { meta.textContent = tab.path; code.innerHTML = '<div class="r2-empty">—</div>'; r2PopSync(tab); return; }
   meta.textContent = tab.path + (tab.totalLines ? ' · ' + tab.totalLines + ' 行' : '');
   code.innerHTML = r2Highlight(tab.text || '');
+  r2PopSync(tab);
+}
+
+/* 全宽代码浮层：与面板预览同源，仅放大展示；遮罩点击 / Esc 关闭，焦点陷阱在层内循环。 */
+function r2PopSync(tab) {
+  const pop = $('#r2-pop'), title = $('#r2-pop-title'), code = $('#r2-pop-code');
+  if (!pop || pop.hidden || !tab) return;
+  title.textContent = tab.path + (tab.totalLines ? ' · ' + tab.totalLines + ' 行' : '');
+  code.innerHTML = tab.error ? '<div class="r2-empty">' + esc(tab.error) + '</div>'
+    : tab.binary ? '<div class="r2-empty">—</div>' : r2Highlight(tab.text || '');
+}
+
+function r2PopOpen() {
+  const tab = R2.tabs.find(x => x.path === R2.active);
+  if (!tab) return;
+  const pop = $('#r2-pop');
+  R2.popLast = document.activeElement;
+  pop.hidden = false;
+  r2PopSync(tab);
+  const x = $('#r2-pop-x');
+  if (x) x.focus();
+}
+
+function r2PopClosable(el) {
+  return el && el.isConnected && !el.disabled && el.tabIndex >= 0 && el !== document.body;
+}
+function r2PopClose() {
+  const pop = $('#r2-pop');
+  if (!pop || pop.hidden) return;
+  pop.hidden = true;
+  const opener = r2PopClosable(R2.popLast) ? R2.popLast : $('#r2-ws-expand');
+  if (opener && opener.focus) opener.focus();
+  R2.popLast = null;
+}
+
+function r2PopTrap(e) {
+  const pop = $('#r2-pop');
+  if (!pop || pop.hidden) return;
+  const f = [...pop.querySelectorAll('button,[href],input,select,textarea,[tabindex]:not([tabindex="-1"])')].filter(el => !el.disabled);
+  if (!f.length) return;
+  const first = f[0], last = f[f.length - 1];
+  if (e.key === 'Tab') {
+    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  } else if (e.key === 'Escape') { r2PopClose(); }
 }
 
 /* 极简语法高亮：关键字 / 字符串 / 注释 / 数字四类，颜色全部取自现有主题变量。 */
@@ -15748,8 +15857,8 @@ function r2PaintMcp(mcp) {
   const list = $('#r2-mcp-list'), sum = $('#r2-mcp-sum');
   if (!list) return;
   const servers = mcp.servers || [];
-  if (sum) sum.textContent = servers.length ? (mcp.connected || 0) + '/' + (mcp.failed || 0) + '/' + mcp.total : '';
-  if (!servers.length) { list.innerHTML = '<div class="r2-empty">—</div>'; return; }
+  if (sum) sum.textContent = (mcp.connected || 0) + '/' + (mcp.failed || 0) + '/' + (mcp.total || servers.length);
+  if (!servers.length) { list.innerHTML = '<div class="r2-empty">' + esc(t('r2_mcp0')) + '</div>'; return; }
   list.innerHTML = servers.map(sv => {
     const st = sv.status || 'disabled';
     const dotColor = st === 'connected' ? 'var(--diff-add)' : st === 'failed' ? 'var(--danger-text)' : 'var(--fg2)';
@@ -15803,6 +15912,7 @@ function r2PaintTel(d) {
 /* ---------- 初始化 ---------- */
 function r2Init() {
   r2ApplyBody();
+  r2ApplyWsW();
   r2StatusRoot();
   r2WsLoad('');
   r2GitLoad();
@@ -15810,11 +15920,45 @@ function r2Init() {
   r2TelPoll();
 }
 
+/* 面板宽度拖拽：280→380，松手持久化；双击复位；键盘 ←/→ 微调 8px。 */
+function r2SetWsW(w) {
+  R2.wsW = Math.max(280, Math.min(380, Math.round(w)));
+  r2ApplyWsW();
+  try { localStorage.setItem('parable.panel.ws.w', String(R2.wsW)); } catch (e) {}
+}
+function r2WsDragStart(e) {
+  e.preventDefault();
+  document.body.classList.add('r2-ws-drag');
+  const side = $('#side');
+  const base = side ? side.offsetWidth : 0;
+  const move = ev => r2SetWsW(ev.clientX - base);
+  const up = () => {
+    document.body.classList.remove('r2-ws-drag');
+    removeEventListener('mousemove', move);
+    removeEventListener('mouseup', up);
+  };
+  addEventListener('mousemove', move);
+  addEventListener('mouseup', up);
+}
+
 $('#r2-ws-btn').onclick = () => r2Toggle('ws');
 $('#r2-env-btn').onclick = () => r2Toggle('env');
 $('#r2-ws-ref').onclick = () => { R2.treeCache.clear(); R2.expanded.clear(); r2WsLoad(''); r2GitLoad(); };
+$('#r2-ws-expand').onclick = r2PopOpen;
+$('#r2-pop-x').onclick = r2PopClose;
+document.querySelector('[data-r2pop-close]').onclick = r2PopClose;
+$('#r2-ws-root').onclick = () => { if (R2.root) copyText(R2.root); };
+const r2Drag = $('#r2-ws-drag');
+r2Drag.addEventListener('mousedown', r2WsDragStart);
+r2Drag.addEventListener('dblclick', () => { R2.wsW = 0; try { localStorage.removeItem('parable.panel.ws.w'); } catch (e) {} r2ApplyWsW(); });
+r2Drag.addEventListener('keydown', e => {
+  if (e.key === 'ArrowLeft') { e.preventDefault(); r2SetWsW((R2.wsW || 280) - 8); }
+  else if (e.key === 'ArrowRight') { e.preventDefault(); r2SetWsW((R2.wsW || 280) + 8); }
+});
 $('#r2-scr').onclick = r2CloseAll;
 document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && !$('#r2-pop').hidden) { r2PopClose(); return; }
+  r2PopTrap(e);
   if (e.key === 'Escape' && (R2.wsOpen || R2.envOpen)) r2CloseAll();
 });
 window.r2OpenFile = r2OpenFile;
