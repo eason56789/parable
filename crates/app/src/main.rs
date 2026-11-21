@@ -130,12 +130,25 @@ fn main() {
                         // 报 HRESULT(0x8007139F)「组或资源状态不正确」）。
                         let bw_data_dir = Config::home_dir().join("parable-browser");
                         let _ = std::fs::create_dir_all(&bw_data_dir);
-                        let bw_args_pub = format!(
-                            "--remote-debugging-port={cdp_port} \
-                             --no-first-run --no-default-browser-check \
-                             --renderer-process-limit=2 \
-                             --js-flags=--max-old-space-size=256"
-                        );
+                        // P2：内置浏览器的 CDP 远程调试端口默认**不开**——
+                        // 开着的调试端口允许本机任意进程读取/操控该 webview
+                        // 的页面（含登录态 cookie）。与主窗口同一开关
+                        // PARABLE_MAIN_CDP 守卫：显式设置了才随
+                        // PARABLE_CDP_PORT 指定的端口打开。
+                        let bw_args_pub = if std::env::var("PARABLE_MAIN_CDP").is_ok() {
+                            format!(
+                                "--remote-debugging-port={cdp_port} \
+                                 --no-first-run --no-default-browser-check \
+                                 --renderer-process-limit=2 \
+                                 --js-flags=--max-old-space-size=256"
+                            )
+                        } else {
+                            format!(
+                                "--no-first-run --no-default-browser-check \
+                                 --renderer-process-limit=2 \
+                                 --js-flags=--max-old-space-size=256"
+                            )
+                        };
                         std::env::set_var("PARABLE_BW_ARGS", &bw_args_pub);
                         {
                             let sig = Config::home_dir().join("browser-window.request");

@@ -14,10 +14,10 @@
 //! (reading a log outside the workspace is the point) but wrong for a UI
 //! browser, so we do not use it here. The `~/.parable` internals are no
 //! longer refused outright (the user may browse sessions/logs/config), but
-//! secret/key material (`.env`, `*.key`, `*.pem`, SSH private keys) is
-//! blacklisted from both listing and read: the HTTP layer bypasses the tool
-//! permission gate, so this check is the only thing standing between a
-//! caller and the API keys.
+//! secret/key material (`.env*`, `*.key`, `*.pem`, SSH private keys, npm/netrc/
+//! git 凭据文件、KeePass/Java 密钥库) is blacklisted from listing, search and
+//! read: the HTTP layer bypasses the tool permission gate, so this check is
+//! the only thing standing between a caller and the API keys.
 
 use crate::error::HarnessError;
 use serde::Serialize;
@@ -77,17 +77,31 @@ const SKIP_DIRS: &[&str] = &[".git", "node_modules", "target", ".venv", "__pycac
 const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 
 /// B-04：密钥/凭据文件名黑名单——列表面板不展示、读取接口拒绝打开。
+/// `tree` / `read` / `search` 三条路径都会先过这里，UI 面板没有任何绕过口。
 fn is_secret_name(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
-    lower == ".env"
+    // `.env` 前缀覆盖 .env.local / .env.production / .env.staging 等（.env 后
+    // 面常跟环境后缀，精确匹配会漏）。
+    lower.starts_with(".env")
+        // 包管理器 / FTP / git 的凭据文件：npm token、netrc 密码、git 凭据。
+        || lower == ".npmrc"
+        || lower == "_netrc"
+        || lower == ".netrc"
+        || lower == ".git-credentials"
+        // SSH 私钥
         || lower.starts_with("id_rsa")
         || lower.starts_with("id_ed25519")
         || lower.starts_with("id_ecdsa")
         || lower.starts_with("id_dsa")
+        // 证书/私钥容器
         || lower.ends_with(".key")
         || lower.ends_with(".pem")
         || lower.ends_with(".p12")
         || lower.ends_with(".pfx")
+        // 密码库 / Java 密钥库
+        || lower.ends_with(".kdbx")
+        || lower.ends_with(".keystore")
+        || lower.ends_with(".jks")
 }
 
 /// Resolve a caller-supplied path against the workspace, refusing anything

@@ -45,18 +45,23 @@ pub type SharedState = Arc<AppState>;
 
 // ------------------------------------------------------------------ auth
 
-#[derive(Debug, Deserialize)]
-struct TokenQuery {
-    token: Option<String>,
-}
+// CHANGELOG（渐进收紧）：query token 属于凭证入 URL 的弱实践（会留在浏览器
+// 历史、访问日志、Referer 里），计划废弃，后续以 cookie 会话方案替代落地。
+// 当前只保留真正需要它的最小集合：
+//   - `/?token=`（index）：桌面壳/启动链接拼接的唯一入口；
+//   - `/browser-boot?token=`（browser_boot）：内置浏览器引导页同一口径；
+//   - `/api/events?token=`（SSE）：兼容旧版 EventSource 客户端与 perf 脚本
+//     （现行前端已改 fetch + X-Parable-Token 头，不再依赖）。
+// 其余端点（sessions/agents/team/term/environment/telemetry 等）已收敛为仅
+// 接受 `X-Parable-Token` 头。所有端点的 Origin/Referer 外来来源守卫见
+// origin_guard —— 带 query token 的请求若 Referer 指向外部站点直接 403。
 
-/// Query parameters that scope a request to one session.
+/// Query parameters that scope a request to one session. 不再携带 `token`：
+/// 这些端点已收敛为仅接受 `X-Parable-Token` 头（见上方 CHANGELOG）。
 #[derive(Debug, Deserialize)]
 struct SessionQuery {
     #[serde(default)]
     session: Option<String>,
-    #[serde(default)]
-    token: Option<String>,
 }
 
 /// 常量时间比较:xor 折叠整个输入(长度差也折进结果),不逐字节提前返回,
@@ -147,15 +152,20 @@ fn origin_allowed(origin: &str, port: u16) -> bool {
 /// without an `Origin` header (curl, same-origin GET, EventSource in Chromium)
 /// pass through. Covers every route, not just `/api`: the static shell injects
 /// the session token into the page, so a hostile origin must never see it.
+///
+/// P2 收紧：`Origin` 缺省时再看 `Referer`——带 `?token=` 的端点会被浏览器自动
+/// 补 Referer，恶意页面驱动用户浏览器请求 127.0.0.1 时 Referer 是对方站点，
+/// host 与白名单不符直接拒。Origin 与 Referer 都没有的直连（curl / 浏览器
+/// 地址栏 / fetch+header 同源请求）放行，鉴权交给 token 本身。
 async fn origin_guard(
     State(state): State<SharedState>,
     req: axum::extract::Request,
     next: Next,
 ) -> Response {
+    let port = state
+        .port
+        .load(std::sync::atomic::Ordering::Relaxed);
     if let Some(origin) = req.headers().get(axum::http::header::ORIGIN).and_then(|v| v.to_str().ok()) {
-        let port = state
-            .port
-            .load(std::sync::atomic::Ordering::Relaxed);
         if !origin_allowed(origin, port) {
             return (
                 StatusCode::FORBIDDEN,
@@ -163,8 +173,46 @@ async fn origin_guard(
             )
                 .into_response();
         }
+    } else if let Some(referer) = req
+        .headers()
+        .get(axum::http::header::REFERER)
+        .and_then(|v| v.to_str().ok())
+    {
+        if !referer_allowed(referer, port) {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({"error": "referer not allowed"})),
+            )
+                .into_response();
+        }
     }
     next.run(req).await
+}
+
+/// `Referer` 守卫：取 `scheme://authority` 前缀按 Origin 白名单同一条规则校验。
+/// 解析不出 origin（如 `Referer: <about:blank>` 一类非 http URL）一律拒绝。
+fn referer_allowed(referer: &str, port: u16) -> bool {
+    let Some((scheme, rest)) = referer.trim().split_once("://") else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    if authority.is_empty() {
+        return false;
+    }
+    origin_allowed(&format!("{scheme}://{authority}"), port)
+}
+
+/// P1：全局响应安全头。`nosniff` 覆盖所有响应（/api/* 的 JSON、HTML 页面、
+/// 导出文件），防止浏览器把响应按嗅探出的类型解释成可执行内容。HTML 专属的
+/// CSP / X-Frame-Options / Referrer-Policy 在 `index()` 与 `browser_boot()`
+/// 里逐点加（那是仅有的两个 HTML 响应点）。
+async fn security_headers_guard(req: axum::extract::Request, next: Next) -> Response {
+    let mut resp = next.run(req).await;
+    resp.headers_mut().insert(
+        axum::http::header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    resp
 }
 
 fn unauthorized() -> Response {
@@ -330,13 +378,15 @@ pub fn build_router(state: SharedState) -> Router {
         .with_state(state.clone());
 
     // Host / Origin 中间件覆盖全部路由(含 `/` 与 fallback 的静态页):token
-    // 注入的 index.html 不该落到任意 Host/Origin 的请求面前。上传接口放宽
-    // axum 默认 2MB body 限制到 20MB,超限在 handler 里回 413。
+    // 注入的 index.html 不该落到任意 Host/Origin 的请求面前。security_headers
+    // 给全部响应补 nosniff。上传接口放宽 axum 默认 2MB body 限制到 20MB,
+    // 超限在 handler 里回 413。
     Router::new()
         .nest("/api", api)
         .route("/", get(index))
         .route("/index.html", get(index))
         .fallback(get(index))
+        .layer(axum::middleware::from_fn(security_headers_guard))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             origin_guard,
@@ -388,7 +438,36 @@ async fn index(
         axum::http::header::PRAGMA,
         axum::http::HeaderValue::from_static("no-cache"),
     );
+    apply_html_security_headers(resp.headers_mut());
     resp
+}
+
+/// P1：HTML 响应的 CSP / 反嵌入 / 引用策略。
+///
+/// CSP 允许面与页面里的 meta CSP 保持一致（单文件 UI 必须内联脚本，blob:
+/// 截图、data: 字体、GitHub 更新检查都在用），头部策略是在 meta 之上的
+/// 第二道闸（两条策略同时生效，取交集）；`frame-ancestors` 与 `form-action`
+/// 是 meta CSP **不支持**的指令，只能靠响应头补：
+///  - `frame-ancestors 'none'` + `X-Frame-Options: DENY`：拒绝被任意站点
+///    iframe 嵌入（配合 Host/Origin 守卫，防点击劫持与嵌入驱动的 token 泄露）；
+///  - `form-action 'self'`：页面表单只能提交回本服务，防表单劫持外传。
+fn apply_html_security_headers(headers: &mut axum::http::HeaderMap) {
+    const CSP: &str = "default-src 'self'; script-src 'self' 'unsafe-inline'; \
+        style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; \
+        font-src 'self' data:; connect-src 'self' https://api.github.com; \
+        frame-ancestors 'none'; form-action 'self'; base-uri 'self'";
+    headers.insert(
+        axum::http::header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(CSP),
+    );
+    headers.insert(
+        axum::http::header::X_FRAME_OPTIONS,
+        HeaderValue::from_static("DENY"),
+    );
+    headers.insert(
+        axum::http::header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
 }
 
 fn load_index() -> std::io::Result<String> {
@@ -1079,6 +1158,22 @@ async fn get_config(State(state): State<SharedState>, headers: HeaderMap) -> Res
             }
         }
     }
+    // P3：MCP 服务器的 env / headers value 常含令牌（npx 的 API key、http 传
+    // 输的鉴权头），回显同样打码。写回侧由 merge_config 的 mask 标记规则兜底
+    // （含 `…`/`•` 的值不覆盖真值），masked echo 不会落盘。
+    if let Some(servers) = v.get_mut("mcp_servers").and_then(|s| s.as_array_mut()) {
+        for s in servers {
+            for field in ["env", "headers"] {
+                if let Some(pairs) = s.get_mut(field).and_then(|x| x.as_array_mut()) {
+                    for pair in pairs.iter_mut() {
+                        if let Some(val) = pair.get(1).and_then(|x| x.as_str()).map(mask_key) {
+                            pair[1] = json!(val);
+                        }
+                    }
+                }
+            }
+        }
+    }
     if let Some(k) = v.get_mut("search_key") {
         let masked = k.as_str().map(mask_key).unwrap_or_default();
         let has = !masked.is_empty();
@@ -1175,7 +1270,17 @@ fn merge_config(cfg: &mut Config, v: &Value) {
                 "thinkingLevel" | "thinking_level" => {
                     cfg.thinking_level = val.as_u64().unwrap_or(2).min(3) as u32
                 }
-                "workspace" => cfg.workspace = val.as_str().unwrap_or("").to_string(),
+                "workspace" => {
+                    let s = val.as_str().unwrap_or("").trim().to_string();
+                    // P3：空串保留「恢复默认工作区」语义；非空值走 C-21 校验，
+                    // 不存在/不可读时回退旧值（resolve 内部会 tracing::warn），
+                    // 防止把拼错或已删除的路径写进 config.toml。
+                    if s.is_empty() {
+                        cfg.workspace = String::new();
+                    } else {
+                        cfg.workspace = resolve_requested_workspace(&s, &cfg.workspace);
+                    }
+                }
                 // Same masking rule as provider keys: an echo containing the
                 // mask marker never overwrites the stored secret.
                 "searchKey" | "search_key" => {
@@ -1279,7 +1384,18 @@ fn merge_config(cfg: &mut Config, v: &Value) {
                 }
                 // ---- MCP ----
                 "mcpServers" | "mcp_servers" => {
-                    if let Ok(ms) = serde_json::from_value(val.clone()) {
+                    if let Ok(mut ms) = serde_json::from_value::<Vec<crate::mcp::McpServerConfig>>(val.clone()) {
+                        // GET /api/config 的回显是打码过的（mask_key 的 `…`/`•`）。
+                        // 含掩码标记的 env/headers 值不覆盖已存的真值——与
+                        // provider key / search key 同一条规则，防止 UI 原样
+                        // PATCH 回来时把真机密换成掩码串。
+                        for s in &mut ms {
+                            let old = cfg.mcp_servers.iter().find(|x| x.id == s.id);
+                            if let Some(old) = old {
+                                restore_masked_pairs(&mut s.env, &old.env);
+                                restore_masked_pairs(&mut s.headers, &old.headers);
+                            }
+                        }
                         cfg.mcp_servers = ms;
                     }
                 }
@@ -1438,6 +1554,19 @@ fn merge_provider(cfg: &mut Config, v: &Value) {
     }
 }
 
+/// MCP env/headers 的掩码回显保护：PATCH 里含掩码标记（`…` / `•`）的 value
+/// 用已存的真值顶回去，同 key 才顶（key 变了就是用户在改条目，照单全收）。
+/// 与 provider key / search key 的 mask-echo 规则一致。
+fn restore_masked_pairs(incoming: &mut [(String, String)], stored: &[(String, String)]) {
+    for (k, v) in incoming.iter_mut() {
+        if (v.contains('…') || v.contains('•')) && !v.is_empty() {
+            if let Some((_, real)) = stored.iter().find(|(sk, _)| sk == k) {
+                *v = real.clone();
+            }
+        }
+    }
+}
+
 // ------------------------------------------------------------------ providers
 
 async fn get_providers(State(state): State<SharedState>, headers: HeaderMap) -> Response {
@@ -1560,7 +1689,8 @@ async fn list_sessions(
     headers: HeaderMap,
     Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> Response {
-    if !check_auth(&headers, q.get("token").map(|s| s.as_str()), &state) {
+    // query token 已收敛（见文件头 CHANGELOG）：此端点仅接受 X-Parable-Token 头。
+    if !check_auth(&headers, None, &state) {
         return unauthorized();
     }
     let query = q.get("q").cloned().unwrap_or_default();
@@ -1601,7 +1731,8 @@ async fn search_messages(
     headers: HeaderMap,
     Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> Response {
-    if !check_auth(&headers, q.get("token").map(|s| s.as_str()), &state) {
+    // query token 已收敛（见文件头 CHANGELOG）：此端点仅接受 X-Parable-Token 头。
+    if !check_auth(&headers, None, &state) {
         return unauthorized();
     }
     let query = q.get("q").cloned().unwrap_or_default();
@@ -1975,6 +2106,19 @@ async fn post_goal(
     Json(json!({"goal": goal})).into_response()
 }
 
+/// 插件命令/斜杠命令名的服务端白名单：字母开头，后接字母数字、`-` 或 `_`，
+/// ≤64 字符。前端按这个名字渲染 `/<name>` 斜杠命令，恶意插件包把 `<script>`
+/// 之类塞进 name 时，响应侧直接过滤（与前端 XSS 修复构成纵深防御）。
+fn valid_plugin_command_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    name.len() <= 64
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
 async fn list_plugins(
     State(state): State<SharedState>,
     headers: HeaderMap,
@@ -1983,7 +2127,28 @@ async fn list_plugins(
         return unauthorized();
     }
     let store = crate::plugin::PluginStore::new();
-    Json(json!({"plugins": store.scan()})).into_response()
+    let mut plugins = store.scan();
+    for p in &mut plugins {
+        let before = p.commands.len();
+        if before == 0 {
+            continue;
+        }
+        p.commands.retain(|c| {
+            let ok = valid_plugin_command_name(&c.name);
+            if !ok {
+                tracing::warn!(
+                    "plugin `{}` command name `{}` 不符合 ^[a-zA-Z][a-zA-Z0-9_-]{{0,63}}$，已过滤",
+                    p.id,
+                    c.name
+                );
+            }
+            ok
+        });
+        if p.commands.len() != before {
+            tracing::warn!("plugin `{}` filtered {} invalid command name(s)", p.id, before - p.commands.len());
+        }
+    }
+    Json(json!({"plugins": plugins})).into_response()
 }
 
 async fn toggle_plugin(
@@ -2107,13 +2272,14 @@ async fn export_sessions(State(state): State<SharedState>, headers: HeaderMap) -
         "parable-sessions-{}.json",
         chrono::Local::now().format("%Y%m%d-%H%M%S")
     );
+    // HeaderValue::from_str 代替 Box::leak：此前为满足 &'static 约束把
+    // Content-Disposition 泄漏进进程终身堆，每次导出漏一份，改 owned 值即消。
+    let disposition = HeaderValue::from_str(&format!("attachment; filename=\"{filename}\""))
+        .unwrap_or_else(|_| HeaderValue::from_static("attachment"));
     (
         [
-            (header::CONTENT_TYPE, "application/json; charset=utf-8"),
-            (
-                header::CONTENT_DISPOSITION,
-                Box::leak(format!("attachment; filename=\"{filename}\"").into_boxed_str()),
-            ),
+            (header::CONTENT_TYPE, HeaderValue::from_static("application/json; charset=utf-8")),
+            (header::CONTENT_DISPOSITION, disposition),
         ],
         body,
     )
@@ -2715,7 +2881,7 @@ async fn turn_running(
     headers: HeaderMap,
     Query(q): Query<SessionQuery>,
 ) -> Response {
-    if !check_auth(&headers, q.token.as_deref(), &state) {
+    if !check_auth(&headers, None, &state) {
         return unauthorized();
     }
     let sid = q.session.unwrap_or_default();
@@ -3082,7 +3248,7 @@ async fn list_agents(
     headers: HeaderMap,
     Query(q): Query<SessionQuery>,
 ) -> Response {
-    if !check_auth(&headers, q.token.as_deref(), &state) {
+    if !check_auth(&headers, None, &state) {
         return unauthorized();
     }
     let kids = match q.session {
@@ -3191,7 +3357,7 @@ async fn get_team(
     headers: HeaderMap,
     Query(q): Query<SessionQuery>,
 ) -> Response {
-    if !check_auth(&headers, q.token.as_deref(), &state) {
+    if !check_auth(&headers, None, &state) {
         return unauthorized();
     }
     let sid = match q.session {
@@ -3711,10 +3877,14 @@ async fn browser_boot(
     if !check_auth(&headers, q.token.as_deref(), &state) {
         return unauthorized();
     }
-    axum::response::Html(
+    let mut resp = axum::response::Html(
         "<!doctype html><title>Parable Browser</title>         <body style=\"margin:0;display:grid;place-items:center;height:100vh;         background:#1f1e1d;color:#8a8a85;font:14px/1.6 system-ui\">         Parable Browser</body>",
     )
-    .into_response()
+    .into_response();
+    // 第二个 HTML 响应点：与 index() 同一套安全头（CSP 在无脚本的占位页上
+    // 只关 'self' 之外的口子；frame-ancestors 是关键补充）。
+    apply_html_security_headers(resp.headers_mut());
+    resp
 }
 
 /// Browser 侧栏的公共元信息（不含截图，1s 轮询很轻）。
@@ -4014,10 +4184,9 @@ struct TermStartReq {
 async fn term_start(
     State(state): State<SharedState>,
     headers: HeaderMap,
-    Query(q): Query<TokenQuery>,
     Json(r): Json<TermStartReq>,
 ) -> Response {
-    if !check_auth(&headers, q.token.as_deref(), &state) {
+    if !check_auth(&headers, None, &state) {
         return unauthorized();
     }
     let command = r.command.trim().to_string();
@@ -4042,12 +4211,8 @@ async fn term_start(
 }
 
 /// GET /api/term/list — 列出全部后台终端（含已结束的尾部输出）。
-async fn term_list(
-    State(state): State<SharedState>,
-    headers: HeaderMap,
-    Query(q): Query<TokenQuery>,
-) -> Response {
-    if !check_auth(&headers, q.token.as_deref(), &state) {
+async fn term_list(State(state): State<SharedState>, headers: HeaderMap) -> Response {
+    if !check_auth(&headers, None, &state) {
         return unauthorized();
     }
     let jobs = state.terms.list().await;
@@ -4064,10 +4229,9 @@ struct TermKillReq {
 async fn term_kill(
     State(state): State<SharedState>,
     headers: HeaderMap,
-    Query(q): Query<TokenQuery>,
     Json(r): Json<TermKillReq>,
 ) -> Response {
-    if !check_auth(&headers, q.token.as_deref(), &state) {
+    if !check_auth(&headers, None, &state) {
         return unauthorized();
     }
     let killed = state.terms.kill(&state.hub, r.id.trim()).await;
@@ -4075,12 +4239,8 @@ async fn term_kill(
 }
 
 /// POST /api/term/clear — 清掉已结束的后台终端，运行中的保留。
-async fn term_clear(
-    State(state): State<SharedState>,
-    headers: HeaderMap,
-    Query(q): Query<TokenQuery>,
-) -> Response {
-    if !check_auth(&headers, q.token.as_deref(), &state) {
+async fn term_clear(State(state): State<SharedState>, headers: HeaderMap) -> Response {
+    if !check_auth(&headers, None, &state) {
         return unauthorized();
     }
     state.terms.clear().await;
@@ -4136,12 +4296,8 @@ fn estimate_context_tokens(sess: &crate::session::Session) -> u64 {
 /// 全部取真实值：主机名 / 系统 / 架构 / 版本 / pid / workspace / home 都来自
 /// 运行时与 `Config`；`context.used` 取最近活动会话**最后一次请求**的上下文
 /// 占用（不是会话累计计费 token），无会话为 0 且 `estimated:false`。
-async fn environment(
-    State(state): State<SharedState>,
-    headers: HeaderMap,
-    Query(q): Query<TokenQuery>,
-) -> Response {
-    if !check_auth(&headers, q.token.as_deref(), &state) {
+async fn environment(State(state): State<SharedState>, headers: HeaderMap) -> Response {
+    if !check_auth(&headers, None, &state) {
         return unauthorized();
     }
     let (model_json, ctx_limit, workspace, permission_mode, sandbox_mode, auto_model, fallback_chain) = {
@@ -4285,7 +4441,7 @@ async fn telemetry(
     headers: HeaderMap,
     Query(q): Query<SessionQuery>,
 ) -> Response {
-    if !check_auth(&headers, q.token.as_deref(), &state) {
+    if !check_auth(&headers, None, &state) {
         return unauthorized();
     }
     let sid = q.session.unwrap_or_default();
@@ -4939,7 +5095,11 @@ mod regression {
     async fn turn_running_reports_idle_sessions() {
         let (base, token) = spawn_server("basic").await;
         // A session that never ran: not running.
-        let res = reqwest::get(format!("{base}/api/turn/running?session=s_none&token={token}"))
+        // query token 已收敛：turn_running 只认 X-Parable-Token 头。
+        let res = reqwest::Client::new()
+            .get(format!("{base}/api/turn/running?session=s_none"))
+            .header("x-parable-token", &token)
+            .send()
             .await
             .unwrap();
         assert_eq!(res.status(), 200);
@@ -4950,7 +5110,10 @@ mod regression {
     #[tokio::test]
     async fn turn_running_requires_a_session() {
         let (base, token) = spawn_server("basic").await;
-        let res = reqwest::get(format!("{base}/api/turn/running?token={token}"))
+        let res = reqwest::Client::new()
+            .get(format!("{base}/api/turn/running"))
+            .header("x-parable-token", &token)
+            .send()
             .await
             .unwrap();
         assert_eq!(res.status(), 200);
@@ -4961,7 +5124,10 @@ mod regression {
     #[tokio::test]
     async fn turn_running_rejects_a_bad_token() {
         let (base, _token) = spawn_server("basic").await;
-        let res = reqwest::get(format!("{base}/api/turn/running?session=s_x&token=wrong"))
+        let res = reqwest::Client::new()
+            .get(format!("{base}/api/turn/running?session=s_x"))
+            .header("x-parable-token", "wrong")
+            .send()
             .await
             .unwrap();
         assert_eq!(res.status(), 401);
@@ -4970,7 +5136,10 @@ mod regression {
     #[tokio::test]
     async fn sessions_list_is_paged() {
         let (base, token) = spawn_server("list").await;
-        let res = reqwest::get(format!("{base}/api/sessions?token={token}"))
+        let res = reqwest::Client::new()
+            .get(format!("{base}/api/sessions"))
+            .header("x-parable-token", &token)
+            .send()
             .await
             .unwrap();
         assert_eq!(res.status(), 200);
@@ -4983,9 +5152,12 @@ mod regression {
     #[tokio::test]
     async fn term_list_is_empty_for_a_fresh_server() {
         let (base, token) = spawn_server("term-empty").await;
-        let res = reqwest::get(format!("{base}/api/term/list?token=wrong")).await.unwrap();
+        let cli = reqwest::Client::new();
+        let res = cli.get(format!("{base}/api/term/list"))
+            .header("x-parable-token", "wrong").send().await.unwrap();
         assert_eq!(res.status(), 401, "term list must require the token");
-        let res = reqwest::get(format!("{base}/api/term/list?token={token}")).await.unwrap();
+        let res = cli.get(format!("{base}/api/term/list"))
+            .header("x-parable-token", &token).send().await.unwrap();
         assert_eq!(res.status(), 200);
         let v: Value = res.json().await.unwrap();
         assert_eq!(v["jobs"].as_array().map(|a| a.len()), Some(0));
@@ -4996,12 +5168,14 @@ mod regression {
     async fn term_start_rejects_bad_input_and_escaping_cwd() {
         let (base, token) = spawn_server("term-bad").await;
         let cli = reqwest::Client::new();
-        let res = cli.post(format!("{base}/api/term/start?token={token}"))
+        let res = cli.post(format!("{base}/api/term/start"))
+            .header("x-parable-token", &token)
             .json(&json!({"command": "   "}))
             .send().await.unwrap();
         assert_eq!(res.status(), 400, "an empty command is rejected");
         // cwd 必须落在工作区内：`..` 要拒绝，否则后台终端能越界跑命令。
-        let res = cli.post(format!("{base}/api/term/start?token={token}"))
+        let res = cli.post(format!("{base}/api/term/start"))
+            .header("x-parable-token", &token)
             .json(&json!({"command": "echo hi", "cwd": ".."}))
             .send().await.unwrap();
         assert_eq!(res.status(), 400, "a cwd outside the workspace is rejected");
@@ -5011,7 +5185,8 @@ mod regression {
     async fn term_start_runs_and_reports_exit() {
         let (base, token) = spawn_server("term-run").await;
         let cli = reqwest::Client::new();
-        let res = cli.post(format!("{base}/api/term/start?token={token}"))
+        let res = cli.post(format!("{base}/api/term/start"))
+            .header("x-parable-token", &token)
             .json(&json!({"command": "echo parable-term"}))
             .send().await.unwrap();
         assert_eq!(res.status(), 200);
@@ -5024,7 +5199,8 @@ mod regression {
         let mut jobs: Vec<Value> = Vec::new();
         for _ in 0..40 {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            let v: Value = cli.get(format!("{base}/api/term/list?token={token}"))
+            let v: Value = cli.get(format!("{base}/api/term/list"))
+                .header("x-parable-token", &token)
                 .send().await.unwrap().json().await.unwrap();
             jobs = v["jobs"].as_array().cloned().unwrap_or_default();
             if jobs.first().map(|j| j["status"] == "exited").unwrap_or(false) {
@@ -5035,10 +5211,12 @@ mod regression {
         assert_eq!(jobs[0]["status"], "exited", "the job must leave running state");
         assert!(jobs[0]["output"].as_str().unwrap_or("").contains("parable-term"));
 
-        let res = cli.post(format!("{base}/api/term/clear?token={token}"))
+        let res = cli.post(format!("{base}/api/term/clear"))
+            .header("x-parable-token", &token)
             .json(&json!({})).send().await.unwrap();
         assert_eq!(res.status(), 200);
-        let v: Value = cli.get(format!("{base}/api/term/list?token={token}"))
+        let v: Value = cli.get(format!("{base}/api/term/list"))
+            .header("x-parable-token", &token)
             .send().await.unwrap().json().await.unwrap();
         assert_eq!(v["jobs"].as_array().map(|a| a.len()), Some(0));
     }
@@ -5046,7 +5224,10 @@ mod regression {
     #[tokio::test]
     async fn sessions_limit_is_honoured() {
         let (base, token) = spawn_server("limit").await;
-        let res = reqwest::get(format!("{base}/api/sessions?limit=1&token={token}"))
+        let res = reqwest::Client::new()
+            .get(format!("{base}/api/sessions?limit=1"))
+            .header("x-parable-token", &token)
+            .send()
             .await
             .unwrap();
         assert_eq!(res.status(), 200);
@@ -5267,13 +5448,18 @@ mod regression {
     #[tokio::test]
     async fn environment_reports_real_fields_and_mcp_matches_mcp_endpoint() {
         let (base, token) = spawn_server("env").await;
-        // 鉴权：坏 token 401。
-        let res = reqwest::get(format!("{base}/api/environment?token=wrong"))
+        let cli = reqwest::Client::new();
+        // 鉴权：坏 token 401（query token 已收敛，environment 只认 header）。
+        let res = cli.get(format!("{base}/api/environment"))
+            .header("x-parable-token", "wrong")
+            .send()
             .await
             .unwrap();
         assert_eq!(res.status(), 401);
 
-        let res = reqwest::get(format!("{base}/api/environment?token={token}"))
+        let res = cli.get(format!("{base}/api/environment"))
+            .header("x-parable-token", &token)
+            .send()
             .await
             .unwrap();
         assert_eq!(res.status(), 200);
@@ -5298,7 +5484,6 @@ mod regression {
         assert!(env["auto"].get("fallbackChain").is_some());
 
         // mcp.* 必须与 GET /api/mcp 同源计数（/api/mcp 只认 header token）。
-        let cli = reqwest::Client::new();
         let mcp: Value = cli
             .get(format!("{base}/api/mcp"))
             .header("x-parable-token", &token)
@@ -5327,14 +5512,19 @@ mod regression {
     #[tokio::test]
     async fn telemetry_unknown_session_is_200_without_500() {
         let (base, token) = spawn_server("telemetry").await;
-        // 鉴权：坏 token 401。
-        let res = reqwest::get(format!("{base}/api/telemetry?session=s_none&token=wrong"))
+        let cli = reqwest::Client::new();
+        // 鉴权：坏 token 401（query token 已收敛，telemetry 只认 header）。
+        let res = cli.get(format!("{base}/api/telemetry?session=s_none"))
+            .header("x-parable-token", "wrong")
+            .send()
             .await
             .unwrap();
         assert_eq!(res.status(), 401);
 
         // 不存在的会话：仍 200，全零 + tps.value=null，不许 500。
-        let res = reqwest::get(format!("{base}/api/telemetry?session=s_none&token={token}"))
+        let res = cli.get(format!("{base}/api/telemetry?session=s_none"))
+            .header("x-parable-token", &token)
+            .send()
             .await
             .unwrap();
         assert_eq!(res.status(), 200);
@@ -5359,7 +5549,9 @@ mod regression {
         assert!(v["model"].get("model").is_some());
 
         // 不带 session 参数同样 200（空会话不 500）。
-        let res = reqwest::get(format!("{base}/api/telemetry?token={token}"))
+        let res = cli.get(format!("{base}/api/telemetry"))
+            .header("x-parable-token", &token)
+            .send()
             .await
             .unwrap();
         assert_eq!(res.status(), 200);

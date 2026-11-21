@@ -852,7 +852,9 @@ pub fn read_credentials_for(path: &Path) -> Option<String> {
 /// 收紧 config 文件的访问权限（内含 API key / search key）。
 /// Unix：0o600；Windows：尽力 `icacls /inheritance:r /grant:r` 仅保留当前用户。
 /// 失败只告警，不阻塞保存。
-fn restrict_config_acl(p: &Path) {
+/// pub：cookies.rs 的 jar 落盘（browser-cookies.json 同样是明文登录态密文）
+/// 复用同一语义，收敛访问控制实现只有这一份。
+pub fn restrict_config_acl(p: &Path) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

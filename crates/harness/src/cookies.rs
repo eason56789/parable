@@ -131,6 +131,8 @@ pub fn jar_path() -> PathBuf {
 
 impl CookieJar {
     pub fn load() -> Self {
+        // 初始化顺带清扫抽取用的临时残留目录（上次进程崩溃没来得及删的）。
+        sweep_stale_work_dirs();
         let p = jar_path();
         let Ok(text) = std::fs::read_to_string(&p) else {
             return Self::default();
@@ -146,7 +148,12 @@ impl CookieJar {
 
     pub fn save(&self) -> std::io::Result<()> {
         let body = serde_json::to_vec_pretty(self).unwrap_or_default();
-        crate::atomic_write(&jar_path(), &body)
+        let p = jar_path();
+        crate::atomic_write(&p, &body)?;
+        // jar 里是明文 cookie 登录态，机密等级等同 config.toml 的 key：
+        // 落盘后套用同一套 ACL 收紧（Unix 0o600 / Windows icacls 仅当前用户）。
+        crate::config::restrict_config_acl(&p);
+        Ok(())
     }
 
     /// Merge `incoming` over the jar (same domain+path+name wins), then prune
@@ -609,7 +616,7 @@ pub async fn extract_source_ex(
                          请先关闭浏览器，或在导入时允许自动关闭（结束后会自动重新打开并恢复标签页）。"
                     )));
                 }
-                close_browser_image(image_name(kind));
+                close_browser_image(image_name(kind), &root);
                 // 等锁放开（进程优雅退出需要一点时间）。
                 for _ in 0..30 {
                     if !source_locked(&db) {
@@ -619,7 +626,7 @@ pub async fn extract_source_ex(
                 }
                 if source_locked(&db) {
                     // 优雅关不掉（后台进程无窗口）：强杀兜底。
-                    force_close_browser_image(image_name(kind));
+                    force_close_browser_image(image_name(kind), &root);
                     for _ in 0..15 {
                         if !source_locked(&db) {
                             break;
@@ -651,7 +658,7 @@ pub async fn extract_source_ex(
     }
 }
 
-/// 进程镜像名（taskkill /IM 用）。
+/// 进程镜像名（进程枚举过滤用）。
 fn image_name(kind: &str) -> &'static str {
     match kind {
         "chrome" => "chrome.exe",
@@ -662,35 +669,108 @@ fn image_name(kind: &str) -> &'static str {
     }
 }
 
-/// 温柔关闭：taskkill 不带 /F 先走 WM_CLOSE（给窗口一个保存会话的机会）。
-fn close_browser_image(image: &str) {
+/// 命令行是否属于「占用目标 user-data 根」的实例：
+///  - 没有 `--user-data-dir`：默认 profile 就是该镜像的标准 User Data（即
+///    我们手持 cookie 库的那份），算命中；
+///  - 有 `--user-data-dir` 且路径含目标根：命中；
+///  - 有 `--user-data-dir` 指向其它目录（Beta/Portable/调试档）：放过。
+/// 大小写与 `/`→`\` 都归一后再比对。root 为空（拿不到路径）时只有
+/// 「无 --user-data-dir」命中。
+fn cmdline_targets_root(cmdline: &str, root_lower: &str) -> bool {
+    let norm = cmdline.to_ascii_lowercase().replace('/', "\\");
+    if !norm.contains("--user-data-dir") {
+        return true;
+    }
+    !root_lower.is_empty() && norm.contains(root_lower)
+}
+
+/// 枚举镜像名匹配、且命令行指向目标 root 的进程 PID。用 PowerShell 的
+/// Get-CimInstance（wmic 自 Win11 起已弃用）；枚举失败返回空表——调用方
+/// 据此什么都不杀，宁可不抽也不能误杀全镜像。
+#[cfg(windows)]
+fn target_pids(image: &str, root: &Path) -> Vec<u32> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let script = format!(
+        "Get-CimInstance Win32_Process -Filter \"name='{image}'\" | \
+         Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress"
+    );
+    let Ok(out) = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+    else {
+        tracing::warn!("enumerating {image} processes failed (powershell unavailable)");
+        return Vec::new();
+    };
+    let Ok(text) = String::from_utf8(out.stdout) else {
+        return Vec::new();
+    };
+    // 0 条=空输出；1 条=对象；2+ 条=数组。
+    let Ok(v) = serde_json::from_str::<Value>(&text) else {
+        return Vec::new();
+    };
+    let items: Vec<Value> = match v {
+        Value::Array(a) => a,
+        Value::Object(_) => vec![v],
+        _ => Vec::new(),
+    };
+    let root_lower = root
+        .display()
+        .to_string()
+        .to_ascii_lowercase()
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_string();
+    items
+        .into_iter()
+        .filter_map(|o| {
+            let pid = o.get("ProcessId").and_then(|x| x.as_u64())? as u32;
+            let cmdline = o
+                .get("CommandLine")
+                .and_then(|x| x.as_str())
+                .unwrap_or_default();
+            cmdline_targets_root(cmdline, &root_lower).then_some(pid)
+        })
+        .collect()
+}
+
+/// 温柔关闭：taskkill /PID 不带 /F 先走 WM_CLOSE（给窗口一个保存会话的机会）。
+/// 只杀命令行匹配目标 user-data 根的实例——旧实现 `taskkill /IM <镜像>` 会
+/// 把用户开着的所有同款浏览器窗口全部端掉，误伤远大于收益。
+fn close_browser_image(image: &str, root: &Path) {
     #[cfg(windows)]
     {
-        let _ = std::process::Command::new("taskkill")
-            .args(["/IM", image])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
+        for pid in target_pids(image, root) {
+            let _ = std::process::Command::new("taskkill")
+                .args(["/PID", &pid.to_string()])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
     }
     #[cfg(not(windows))]
     {
-        let _ = image;
+        let _ = (image, root);
     }
 }
 
-/// 强杀兜底（无窗口的后台进程温柔关不掉）。
-fn force_close_browser_image(image: &str) {
+/// 强杀兜底（无窗口的后台进程温柔关不掉）。同样只针对匹配目标根的 PID，
+/// 带 /T 连子进程（renderer/GPU）一起结束。
+fn force_close_browser_image(image: &str, root: &Path) {
     #[cfg(windows)]
     {
-        let _ = std::process::Command::new("taskkill")
-            .args(["/IM", image, "/F"])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
+        for pid in target_pids(image, root) {
+            let _ = std::process::Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/T", "/F"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
     }
     #[cfg(not(windows))]
     {
-        let _ = image;
+        let _ = (image, root);
     }
 }
 
@@ -964,12 +1044,104 @@ fn copy_db_tolerant(db: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// 抽取用临时根目录：`~/.parable/tmp` 而不是 `%TEMP%`。里面会短暂存放
+/// 解密后的 cookie 明文与 Local State 密钥，%TEMP% 默认对本机所有进程可读，
+/// 换到用户私有目录（ACL 收紧到仅当前用户）后攻击面只剩同用户进程。
+fn cookies_tmp_root() -> PathBuf {
+    crate::config::Config::home_dir().join("tmp")
+}
+
+/// 抽取用临时工作目录：建目录 + 对根与目录本身收紧 ACL。调用方原有的
+/// `create_dir_all` 变成幂等 no-op。
 fn temp_work_dir(tag: &str) -> PathBuf {
-    std::env::temp_dir().join(format!(
+    let dir = cookies_tmp_root().join(format!(
         "parable-ck-{tag}-{}-{}",
         std::process::id(),
         crate::event::now_ms()
-    ))
+    ));
+    let root = cookies_tmp_root();
+    let _ = std::fs::create_dir_all(&dir);
+    restrict_private_dir_acl(&root);
+    restrict_private_dir_acl(&dir);
+    dir
+}
+
+/// CookieJar 初始化时清扫 `parable-ck-*` 残留目录（上次进程崩溃没来得及删）。
+/// 只扫 `~/.parable/tmp`——历史版本留在 %TEMP% 的旧目录不碰：那里是共享
+/// 目录，且测试也用 `%TEMP%` 下的同名前缀，清扫会引入并发竞态；旧目录
+/// 会随系统的临时目录清理自然老化。
+fn sweep_stale_work_dirs() {
+    let root = cookies_tmp_root();
+    let Ok(rd) = std::fs::read_dir(&root) else {
+        return;
+    };
+    // 只清 30 分钟以上的残留：更年轻的目录可能是并发请求正在用的抽取现场。
+    const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+    let now = std::time::SystemTime::now();
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        if !name.starts_with("parable-ck-") || !e.path().is_dir() {
+            continue;
+        }
+        let stale = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|m| now.duration_since(m).ok())
+            .map(|age| age >= STALE_AFTER)
+            .unwrap_or(false);
+        if stale {
+            if let Err(err) = std::fs::remove_dir_all(e.path()) {
+                tracing::warn!("sweep {}: {err}", e.path().display());
+            }
+        }
+    }
+}
+
+/// 目录版 ACL 收紧（cookies 临时根与工作目录用）：Unix 0o700（目录需要
+/// 可执行位才能进入），Windows 与 config 的 icacls 语义一致并带
+/// (OI)(CI) 继承，目录里复制的 cookie 库/密钥文件继承同样限制。
+/// 失败只告警，不阻塞。
+fn restrict_private_dir_acl(p: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o700);
+        if let Err(e) = std::fs::set_permissions(p, perms) {
+            tracing::warn!("could not chmod 700 {}: {e}", p.display());
+        }
+    }
+    #[cfg(windows)]
+    {
+        let user = std::env::var("USERNAME").unwrap_or_default();
+        if user.is_empty() {
+            tracing::warn!("could not restrict ACL on {}: USERNAME not set", p.display());
+            return;
+        }
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let out = std::process::Command::new("icacls")
+            .arg(p)
+            .arg("/inheritance:r")
+            .arg("/grant:r")
+            .arg(format!("{user}:(OI)(CI)F"))
+            .creation_flags(CREATE_NO_WINDOW)
+            .output();
+        match out {
+            Ok(o) if o.status.success() => {}
+            Ok(o) => tracing::warn!(
+                "icacls on {} failed ({}): {}",
+                p.display(),
+                o.status,
+                String::from_utf8_lossy(&o.stderr).trim()
+            ),
+            Err(e) => tracing::warn!("could not run icacls on {}: {e}", p.display()),
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = p;
+    }
 }
 
 fn free_port() -> Result<u16, HarnessError> {

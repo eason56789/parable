@@ -227,20 +227,11 @@ async fn run_headless(
     Ok(())
 }
 
+/// P3：会话 token 直接用全长 UUID v4（122bit 随机数，32 个 hex 字符）。
+/// 旧实现前缀混了纳秒+pid 的 DefaultHasher（64bit 且可预测）+ 12 hex 随机，
+/// 有效熵不足且跨次启动可推；本地服务也不需要短 token 的可读性。
 fn generate_token() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
-    let hash = {
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        nanos.hash(&mut h);
-        std::process::id().hash(&mut h);
-        format!("{:016x}", h.finish())
-    };
-    format!("{hash}{}", &uuid::Uuid::new_v4().simple().to_string()[..12])
+    uuid::Uuid::new_v4().simple().to_string()
 }
 
 #[cfg(test)]
