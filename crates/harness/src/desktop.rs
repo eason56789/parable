@@ -598,36 +598,44 @@ fn vk_events(vk: u16) -> Vec<INPUT> {
     vec![key_input(vk, false), key_input(vk, true)]
 }
 
-/// Unicode 字符的一对注入事件（wScan = 码点，系统级直输，不经过 IME 状态）。
+/// 单个 UTF-16 码元的 Unicode 注入事件（wScan = 码元，系统级直输，不经过 IME 状态）。
+#[cfg(windows)]
+fn unicode_key(scan: u16, up: bool) -> INPUT {
+    INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VIRTUAL_KEY(0),
+                wScan: scan,
+                dwFlags: if up { KEYEVENTF_UNICODE | KEYEVENTF_KEYUP } else { KEYEVENTF_UNICODE },
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }
+}
+
+/// Unicode 字符的一对注入事件。BMP 字符单码元；Astral 平面字符落在 UTF-16 代理
+/// 对上，必须把高/低代理都发出（B-25：原先 `c as u16` 截断高半，emoji 等字符会丢）。
+/// down 顺序高代理在前，up 顺序相反（低代理先 up）。
 #[cfg(windows)]
 fn unicode_events(c: char) -> Vec<INPUT> {
-    let scan = c as u16;
-    vec![
-        INPUT {
-            r#type: INPUT_KEYBOARD,
-            Anonymous: INPUT_0 {
-                ki: KEYBDINPUT {
-                    wVk: VIRTUAL_KEY(0),
-                    wScan: scan,
-                    dwFlags: KEYEVENTF_UNICODE,
-                    time: 0,
-                    dwExtraInfo: 0,
-                },
-            },
-        },
-        INPUT {
-            r#type: INPUT_KEYBOARD,
-            Anonymous: INPUT_0 {
-                ki: KEYBDINPUT {
-                    wVk: VIRTUAL_KEY(0),
-                    wScan: scan,
-                    dwFlags: KEYEVENTF_UNICODE | KEYEVENTF_KEYUP,
-                    time: 0,
-                    dwExtraInfo: 0,
-                },
-            },
-        },
-    ]
+    let cp = c as u32;
+    let mut units: Vec<u16> = if cp <= 0xFFFF {
+        vec![cp as u16]
+    } else {
+        let v = cp - 0x10000;
+        vec![(0xD800 + (v >> 10)) as u16, (0xDC00 + (v & 0x3FF)) as u16]
+    };
+    let mut evs = Vec::with_capacity(units.len() * 2);
+    for &u in &units {
+        evs.push(unicode_key(u, false));
+    }
+    units.reverse();
+    for &u in &units {
+        evs.push(unicode_key(u, true));
+    }
+    evs
 }
 
 #[cfg(windows)]
@@ -652,8 +660,17 @@ fn send_inputs(evs: &[INPUT]) -> Result<(), HarnessError> {
 #[cfg(windows)]
 fn capture_screen(region: Option<(i32, i32, i32, i32)>) -> Result<(String, i32, i32, i32, i32), HarnessError> {
     let (vx, vy, vw, vh) = virtual_screen();
-    let (x, y, w, h) = region.unwrap_or((vx, vy, vw, vh));
-    let (w, h) = (w.max(1), h.max(1));
+    let (mut x, mut y, mut w, mut h) = region.unwrap_or((vx, vy, vw, vh));
+    // B-26：与虚拟桌面矩形取交，避免超大 w/h 直接按 w*h*4 分配 RGBA，也避免越界坐标 BitBlt。
+    x = x.max(vx);
+    y = y.max(vy);
+    let max_w = (vx + vw).saturating_sub(x);
+    let max_h = (vy + vh).saturating_sub(y);
+    if max_w <= 0 || max_h <= 0 {
+        return Err(HarnessError::Tool("截图区域完全落在虚拟桌面之外".into()));
+    }
+    w = w.clamp(1, max_w);
+    h = h.clamp(1, max_h);
     unsafe {
         let hdc = GetDC(None);
         if hdc.0.is_null() {
