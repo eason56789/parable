@@ -581,6 +581,20 @@ impl PermissionBroker {
         self.pending.lock().await.clear();
     }
 
+    /// 只取消属于 `session_id` 的挂起请求。两个会话并行时，interrupt A
+    /// 不能清掉 B 正在等待用户决策的权限面板（表项自带 session_id，按它过滤）。
+    pub async fn cancel_for_session(&self, session_id: &str) {
+        let mut p = self.pending.lock().await;
+        let stale: Vec<String> = p
+            .iter()
+            .filter(|(_, req)| req.session_id == session_id)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for k in stale {
+            p.remove(&k);
+        }
+    }
+
     /// Decide whether `tool` acting on `path` may run without asking.
     ///
     /// - 规则表(deny 优先)永远先行;Always 决策落成 exact 规则(shell 类存

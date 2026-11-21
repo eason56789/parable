@@ -365,10 +365,11 @@ use serde_json::Value;
 
 /// 项目级设置覆盖：工作区 `.parable/settings.json` 里的键在 run_turn 时
 /// 压过全局配置（仅限白名单键）。缓存按路径 + mtime。
+/// 用 Mutex 而不是 AtomicPtr：旧实现 `Box::into_raw` 换入新缓存时从不释放
+/// 旧 Box，每次 mtime 变更泄漏一次堆内存；Mutex 方案无 unsafe 也无泄漏。
 pub fn project_overlay(workspace: &std::path::Path) -> Option<Value> {
-    use std::sync::atomic::{AtomicPtr, Ordering};
-    static CACHE: AtomicPtr<(std::path::PathBuf, u64, Option<Value>)> =
-        AtomicPtr::new(std::ptr::null_mut());
+    static CACHE: std::sync::Mutex<Option<(std::path::PathBuf, u64, Option<Value>)>> =
+        std::sync::Mutex::new(None);
     let f = workspace.join(".parable").join("settings.json");
     let meta = std::fs::metadata(&f).ok()?;
     let mtime = meta
@@ -377,20 +378,33 @@ pub fn project_overlay(workspace: &std::path::Path) -> Option<Value> {
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-    // 读取缓存
-    let cached = unsafe { CACHE.load(Ordering::Relaxed).as_ref() }.cloned();
-    if let Some((p, m, v)) = cached {
-        if p == f && m == mtime {
-            return v;
+    let mut guard = CACHE.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some((p, m, v)) = guard.as_ref() {
+        if p == &f && *m == mtime {
+            return v.clone();
         }
     }
     let v: Option<Value> = std::fs::read_to_string(&f)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok());
     let out = v.as_ref().and_then(|v| v.get("overrides")).cloned();
-    let boxd = Box::new((f, mtime, out.clone()));
-    unsafe { CACHE.store(Box::into_raw(boxd), Ordering::Relaxed) };
+    *guard = Some((f, mtime, out.clone()));
     out
+}
+
+/// 项目 overlay 的 permission_mode 是否只是「收紧」：full→ws/ask、ws→ask
+/// 允许，反向放宽拒绝。信任边界：项目 settings.json 属于仓库内容，克隆
+/// 仓库的作者不能借它给本机解锁更高权限；用户在 UI 里的显式选择不受限。
+pub fn overlay_mode_tightens(current: &str, project: &str) -> bool {
+    fn rank(m: &str) -> u8 {
+        match m {
+            "full" => 2,
+            "ws" => 1,
+            // ask 与未知值都按最严档处理（未知值在权限引擎里本来就走 ask 语义）。
+            _ => 0,
+        }
+    }
+    rank(project) <= rank(current)
 }
 
 /// 项目覆盖白名单键：只允许这些键生效（防项目文件越权改 provider/key）。

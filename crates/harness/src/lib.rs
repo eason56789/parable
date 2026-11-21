@@ -41,23 +41,45 @@ pub(crate) mod testutil;
 pub use error::HarnessError;
 pub type Result<T> = std::result::Result<T, HarnessError>;
 
-/// 原子写盘：先写 `{文件名}.tmp`，再 rename 覆盖目标。
+/// 原子写盘：先写唯一命名的 `{文件名}.tmp-<rand>`，fsync 后 rename 覆盖目标。
 ///
-/// session / schedule / config 共用的落盘路径。Windows 上 `std::fs::rename`
-/// 对已存在目标可能报错，这里退化为"先删后改名"再试一次；仍失败则清理
-/// 临时文件并返回错误。纯同步函数，无外部依赖。
+/// session / schedule / config / checkpoint 共用的落盘路径。
+/// - tmp 名带随机后缀：固定 `.tmp` 名在两个并发写方交错时会互相覆盖
+///   （A 写 tmp → B 写 tmp → A rename 成功 → B rename 失败），唯一名让
+///   交错退化为"其中一个失败重试"，不会破坏对方的数据。
+/// - rename 前 fsync：掉电时 NTFS 可能先持久化元数据后持久化数据，
+///   目标会变成 0 字节残缺文件；先 sync_all 再 rename 缩小该窗口。
+/// - Windows 上 `std::fs::rename` 对已存在目标可能报错：退化为
+///   "目标先改名成 .bak → tmp 改名上位"，失败则把 .bak 还原回去——
+///   旧实现是"先删目标再改名"，rename 一失败原文件就没了。
+/// 纯同步函数，无外部依赖。
 pub fn atomic_write(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     let mut tmp_name = path.as_os_str().to_os_string();
-    tmp_name.push(".tmp");
+    tmp_name.push(format!(".tmp-{}", uuid::Uuid::new_v4().simple()));
     let tmp = std::path::PathBuf::from(tmp_name);
     std::fs::write(&tmp, bytes)?;
+    // 数据先落稳再换名：rename 只保证名字切换，不保证内容已刷盘。
+    if let Ok(f) = std::fs::File::open(&tmp) {
+        let _ = f.sync_all();
+    }
+    let bak = {
+        let mut b = path.as_os_str().to_os_string();
+        b.push(".bak");
+        std::path::PathBuf::from(b)
+    };
     match std::fs::rename(&tmp, path) {
         Ok(()) => Ok(()),
         Err(_) => {
-            // Windows：目标已存在时 rename 可能失败——先删再改名重试。
-            match std::fs::remove_file(path).and_then(|_| std::fs::rename(&tmp, path)) {
-                Ok(()) => Ok(()),
+            // Windows：目标已存在时 rename 可能失败——目标先挪去 .bak，
+            // 失败可还原；成功后再清理。
+            match std::fs::rename(path, &bak).and_then(|_| std::fs::rename(&tmp, path)) {
+                Ok(()) => {
+                    let _ = std::fs::remove_file(&bak);
+                    Ok(())
+                }
                 Err(e) => {
+                    // tmp 上位失败：把 .bak 还原回目标位，尽量不留残局。
+                    let _ = std::fs::rename(&bak, path);
                     let _ = std::fs::remove_file(&tmp);
                     Err(e)
                 }

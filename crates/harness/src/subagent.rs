@@ -415,6 +415,8 @@ impl SubagentService {
                 "delegation depth limit reached: this session is already at depth {depth} (max {MAX_DEPTH})"
             )));
         }
+        // 命名统一走查重：resolve_child 按名称匹配永远命中第一个，重名会让
+        // 后来者不可寻址。显式指定的名字同样查重（旧实现只对提取名查重）。
         let name = match &req.name {
             Some(n) => {
                 if !valid_name(n) {
@@ -422,21 +424,11 @@ impl SubagentService {
                         "`{n}` is not a valid agent name: use 1-32 Chinese characters, letters, digits or hyphens, starting with a Chinese character or letter (and not `lead`)"
                     )));
                 }
-                n.clone()
+                self.free_name(n).await
             }
             // 模型漏填 name 时：先从中文标签提取，提取不出再退 agent-N。
             None => match name_from_label(&req.label) {
-                Some(n) => {
-                    let free = self.catalog.next_free_name(&root_session).await;
-                    // 提取名与 agent-N 同名时归一到空闲名，避免撞车
-                    if n == free {
-                        free
-                    } else if self.catalog.get(&n).await.is_none() {
-                        n
-                    } else {
-                        format!("{n}-{}", &free[free.rfind('-').map(|i| i + 1).unwrap_or(0)..])
-                    }
-                }
+                Some(n) => self.free_name(&n).await,
                 None => self.catalog.next_free_name(&root_session).await,
             },
         };
@@ -725,25 +717,39 @@ impl SubagentService {
             })
             .await;
 
-            running.lock().await.remove(&cid);
-            // SB-05：收尾后清掉完成通道与代次记录，并淘汰超量的已收尾目录项；
-            // 信号量许可随槽位取出释放，并发槽位回收。
-            outcomes.write().await.remove(&cid);
-            gens.write().await.remove(&cid);
-            if let Some(permit) = permit_slot.lock().await.take() {
-                drop(permit);
-            }
-            permits.lock().await.remove(&cid);
-            cat.prune_settled(CATALOG_MAX_SETTLED).await;
-
-            // 唤醒所有等待者（agent_wait）：终态经通道广播，等待者立刻返回。
+            // SB-05 修正（先广播后清理）：旧实现先把 outcomes 表项删掉再
+            // “发送”，get 恒为 None——agent_wait 永远收不到自然收尾的终态，
+            // 必然空等到超时（默认 300s），误导模型反复轮询。先 send 更新
+            // watch 值并唤醒所有在场等待者，再清表项；清掉的只影响
+            // “迟到”的等待者（wait_for 对已收尾子代理回查目录终态）。
             let outcome = ChildOutcome {
                 status,
                 result: summary.clone(),
                 error: err.clone(),
             };
-            if let Some(tx) = outcomes.read().await.get(&cid) {
-                let _ = tx.send(Some(outcome));
+            {
+                let tx = outcomes.read().await.get(&cid).cloned();
+                if let Some(tx) = tx {
+                    let _ = tx.send(Some(outcome));
+                }
+            }
+
+            // 清理与代次复核：revive 可能已在上面 cat.update/send 的 await 点
+            // 上装入新代（新 cancel / 新通道 / 新 gen）。旧代清理若不复核
+            // 代次，会把新代的通道与 gen 记录一并删掉、还会误释放新代复用的
+            // 并发许可——复活后的子代理从此无人监视、并发槽少一个。
+            // 每个破坏性步骤只在「代次仍属于本代」时执行。
+            if gens.read().await.get(&cid).copied() == Some(gen) {
+                running.lock().await.remove(&cid);
+            }
+            if gens.read().await.get(&cid).copied() == Some(gen) {
+                outcomes.write().await.remove(&cid);
+                gens.write().await.remove(&cid);
+                if let Some(permit) = permit_slot.lock().await.take() {
+                    drop(permit);
+                }
+                permits.lock().await.remove(&cid);
+                cat.prune_settled(CATALOG_MAX_SETTLED).await;
             }
 
             let payload = json!({
@@ -926,9 +932,25 @@ impl SubagentService {
         next
     }
 
+    /// 返回一个空闲的子代理名：base 未被占用则原样返回，否则追加
+    /// -2/-3/… 直到空闲。旧实现的“agent-N 数字后缀拼接”只保证 agent-N
+    /// 本身空闲，不保证 `{label}-N` 这个拼接结果不撞已有名字。
+    async fn free_name(&self, base: &str) -> String {
+        let mut candidate = base.to_string();
+        let mut k = 2u32;
+        while self.catalog.get(&candidate).await.is_some() {
+            candidate = format!("{base}-{k}");
+            k += 1;
+        }
+        candidate
+    }
+
     /// Wait for one child of `parent_session`'s tree to finish.
     ///
     /// Returns the child's outcome, or `None` if the timeout elapsed first.
+    /// watch 通道只是「唤醒信号」：子代理收尾后 watcher 会清掉通道表项，
+    /// 所以除了订阅通道，还要对「通道已不在 / 发送端已 drop」的情况回查
+    /// 目录终态——否则对已收尾子代理的 agent_wait 会误报「未在超时内完成」。
     pub async fn wait_for(
         &self,
         id: &str,
@@ -936,22 +958,45 @@ impl SubagentService {
     ) -> Option<ChildOutcome> {
         let mut rx = {
             let map = self.outcomes.read().await;
-            map.get(id)?.subscribe()
+            map.get(id).map(|tx| tx.subscribe())
         };
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
-            // 先看当前值再看是否变化：watch 保留最新值，不会漏掉"已完成"。
-            if let Some(outcome) = rx.borrow().clone() {
-                return Some(outcome);
+            if let Some(rx) = rx.as_mut() {
+                // 先看当前值再看是否变化：watch 保留最新值，不会漏掉"已完成"。
+                if let Some(outcome) = rx.borrow().clone() {
+                    return Some(outcome);
+                }
             }
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
-                return None;
+                // 到点前一刻可能刚好收尾：终检目录。
+                return self.settled_outcome(id).await;
             }
-            if tokio::time::timeout(remaining, rx.changed()).await.is_err() {
-                return None;
+            let Some(rx) = rx.as_mut() else {
+                // 表项不存在：子代理要么已收尾（目录里有终态），要么不存在。
+                return self.settled_outcome(id).await;
+            };
+            match tokio::time::timeout(remaining, rx.changed()).await {
+                // Err(_elapsed) = 超时；Err(Closed) = 发送端已 drop（watcher
+                // 已收尾清表）。旧实现对 Closed 不处理，会忙转到超时为止。
+                Err(_) | Ok(Err(_)) => return self.settled_outcome(id).await,
+                Ok(Ok(())) => {}
             }
         }
+    }
+
+    /// 从目录读已收尾子代理的终态；仍在运行返回 None。
+    async fn settled_outcome(&self, id: &str) -> Option<ChildOutcome> {
+        let c = self.catalog.get(id).await?;
+        if matches!(c.status, ChildStatus::Running) {
+            return None;
+        }
+        Some(ChildOutcome {
+            status: c.status,
+            result: c.result.clone().unwrap_or_default(),
+            error: c.error.clone(),
+        })
     }
 
     /// The child id addressed by `ref` — a catalog id, an agent name, or a
