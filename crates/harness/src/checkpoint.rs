@@ -73,6 +73,11 @@ struct FileEntry {
     snap: String,
 }
 
+/// 单轮最多记录多少个文件的快照（B-34：防止一轮批量改动把 checkpoint 目录撑爆）。
+const MAX_FILES_PER_TURN: usize = 200;
+/// 单个旧内容快照的字节上限，超出不再落盘快照。
+const MAX_SNAP_BYTES: u64 = 8 * 1024 * 1024;
+
 /// session/turn 用作目录名：拒绝会跑出根目录或为空的 id。
 fn safe_id(id: &str) -> Result<(), HarnessError> {
     if id.is_empty() || id == "." || id == ".." || id.contains('/') || id.contains('\\') {
@@ -179,6 +184,19 @@ impl CheckpointStore {
         // 同 turn 同路径去重：保留第一次记录（本轮最早状态），内容相同与否都不再追加。
         if m.files.iter().any(|f| f.path == path_str) {
             return Ok(());
+        }
+
+        // B-34：单轮条数上限；达到后跳过后续记录，不再扩写 manifest。
+        if m.files.len() >= MAX_FILES_PER_TURN {
+            tracing::warn!("checkpoint: turn {turn} 已达 {MAX_FILES_PER_TURN} 个文件上限，跳过后续记录");
+            return Ok(());
+        }
+        // B-34：单快照字节上限；过大不落盘，避免 checkpoint 目录被大文件占满。
+        if let Some(bytes) = old {
+            if bytes.len() as u64 > MAX_SNAP_BYTES {
+                tracing::warn!("checkpoint: 快照 {path_str} 超过 {MAX_SNAP_BYTES} 字节，跳过备份");
+                return Ok(());
+            }
         }
 
         let entry = match old {
