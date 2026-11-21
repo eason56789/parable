@@ -590,6 +590,16 @@ fn calamine_cell_text(d: &calamine::Data) -> String {
 
 /// csv/md/txt：原样读（保留分隔与格式），只数行数做头信息。
 fn extract_text_file(path: &Path) -> Result<(String, usize), HarnessError> {
+    // B-11：读入前先按文件大小守上限，避免超大纯文本整份读进内存后再按字符截断。
+    const DOC_TEXT_MAX_BYTES: u64 = 8 * 1024 * 1024;
+    let meta = std::fs::metadata(path).map_err(HarnessError::Io)?;
+    if meta.len() > DOC_TEXT_MAX_BYTES {
+        return Err(HarnessError::Tool(format!(
+            "{} 是 {} 字节，超过纯文本读取上限 {DOC_TEXT_MAX_BYTES} 字节",
+            path.display(),
+            meta.len()
+        )));
+    }
     let bytes = std::fs::read(path)?;
     let text = decode_text(&bytes);
     let lines = text.lines().count();
@@ -2010,14 +2020,22 @@ async fn soffice_convert(src: &Path, to: &str) -> Result<PathBuf, HarnessError> 
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
     tracing::info!(src = %src.display(), to, soffice = %soffice.display(), "soffice 转换开始");
-    let out = tokio::time::timeout(std::time::Duration::from_secs(120), cmd.output())
+    let out = match tokio::time::timeout(std::time::Duration::from_secs(120), cmd.output())
         .await
-        .map_err(|_| {
-            HarnessError::Tool(
+    {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => {
+            let _ = std::fs::remove_dir_all(&profile);
+            return Err(HarnessError::Tool(format!("soffice 启动失败: {e}")));
+        }
+        Err(_) => {
+            // B-12：超时早退同样回收 profile，避免临时目录残留。
+            let _ = std::fs::remove_dir_all(&profile);
+            return Err(HarnessError::Tool(
                 "LibreOffice 转换超时（120s）。文件较大或 soffice 卡死；可重试一次，或让用户手动转换".into(),
-            )
-        })?
-        .map_err(|e| HarnessError::Tool(format!("soffice 启动失败: {e}")))?;
+            ));
+        }
+    };
     // 清 profile（失败不管，temp 目录系统会收）
     let _ = std::fs::remove_dir_all(&profile);
     let expected = outdir
