@@ -273,7 +273,16 @@ impl PluginStore {
             )));
         }
         let path = dir.join(format!("{tool}.{ext}"));
-        std::fs::write(&path, code)
+        // Windows PowerShell 5.1 对无 BOM 的 UTF-8 按 ANSI 解析：中文注释/字符串
+        // 会乱码甚至打破语法。ps1 统一补 UTF-8 BOM（python/node 不需要）。
+        let bytes = if ext == "ps1" && !code.starts_with('\u{FEFF}') {
+            let mut b = vec![0xEF, 0xBB, 0xBF];
+            b.extend_from_slice(code.as_bytes());
+            b
+        } else {
+            code.as_bytes().to_vec()
+        };
+        std::fs::write(&path, bytes)
             .map_err(|e| HarnessError::Tool(format!("写入脚本 {} 失败: {e}", path.display())))?;
         let script_path = path.to_string_lossy().to_string();
         Ok((format!("{runner} \"{}\"", path.display()), script_path))

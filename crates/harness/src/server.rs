@@ -4386,6 +4386,11 @@ async fn telemetry(
             "startedAt": started_at,
             "elapsedMs": elapsed_ms,
             "running": running,
+            // 计时字段只在进程内有实时观测（运行中/本轮刚结束）时非零；
+            // 历史会话按设计为 0——前端据此显示 0 秒而不是上一个会话的残留。
+            "modelMs": live.model_ms,
+            "toolMs": live.tool_ms,
+            "ttftMs": live.ttft_ms,
         },
         "tokens": {"prompt": prompt, "completion": completion, "total": prompt + completion},
         "tps": {"value": tps_value, "windowSec": 10, "samples": samples},
@@ -4395,7 +4400,11 @@ async fn telemetry(
             "write": cache_write,
             "supported": cache_supported,
         },
-        "context": {"used": used, "limit": ctx_limit, "pct": pct},
+        // 上下文细分同样只有运行中的实时观测；历史会话全 0，前端条宽归零。
+        "context": {
+            "used": used, "limit": ctx_limit, "pct": pct,
+            "system": live.ctx_system, "tools": live.ctx_tools, "messages": live.ctx_messages,
+        },
         "model": model_json,
     }))
     .into_response()
