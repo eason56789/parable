@@ -290,10 +290,22 @@ pub fn search(workspace: &Path, query: &str) -> Result<Vec<Match>, HarnessError>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
+    /// 每次调用都拿到唯一目录。旧模板只有「name + pid」，同一测试二进制内
+    /// pid 相同，`resolve_rejects_parent_escape` 与 `resolve_still_rejects_escape`
+    /// 都调 `tmp_ws("escape")` 会撞同一目录；helper 开头的 `remove_dir_all` 把
+    /// 另一个并行用例刚建好的 `sub` 删掉，写 `sub/b.md` 时 NotFound（flaky）。
+    /// 唯一路径后不再需要开头清理，各用例结束自行 `remove_dir_all`。
     fn tmp_ws(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("parable-wsfs-{}-{}", name, std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "parable-wsfs-{}-{}-{}",
+            name,
+            std::process::id(),
+            n
+        ));
         std::fs::create_dir_all(dir.join("sub")).unwrap();
         std::fs::write(dir.join("a.txt"), "one\ntwo\nthree\n").unwrap();
         std::fs::write(dir.join("sub/b.md"), "# b").unwrap();

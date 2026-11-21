@@ -4418,7 +4418,13 @@ mod regression {
     async fn spawn_server(tag: &str) -> (String, String) {
         let token = "regression-token".to_string();
         let cfg = Config::default();
-        let home = std::env::temp_dir().join(format!("parable-regression-{tag}"));
+        // tag 会被多个用例复用（如 "basic"），home 再拼 UUID 保证并行用例
+        // 不共享同一临时根：否则一个用例开头的 remove_dir_all 会清掉另一个的 home。
+        let home = std::env::temp_dir().join(format!(
+            "parable-regression-{}-{}",
+            tag,
+            uuid::Uuid::new_v4().simple()
+        ));
         let _ = std::fs::remove_dir_all(&home);
         let (port, _state, _handle) =
             serve_in(token.clone(), StdArc::new(RwLock::new(cfg)), 0, Some(home))
