@@ -253,6 +253,15 @@ pub struct Config {
     /// 单轮最大工具步数（20-500），超过即收尾并说明。
     #[serde(default = "default_max_steps")]
     pub max_steps: u32,
+    /// 模型采样温度（None = 不覆盖，用各 provider 现有默认值）。
+    /// 配置键保持 snake_case；不进项目 overlay 白名单（OVERLAY_KEYS）——
+    /// 项目文件不得替用户决定采样行为。None 不落盘（toml 不支持 None 值）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+    /// 单次回复输出 token 上限（None = 各 provider 现有默认值，agent 历史
+    /// 值 8192）。同上不进 overlay 白名单。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
     /// ask_user 提问 120 秒无应答时自动选第一项（无人值守/定时任务场景）。
     #[serde(default)]
     pub ask_auto_resolve: bool,
@@ -537,6 +546,8 @@ impl Default for Config {
             compaction_enabled: true,
             compaction_pct: default_compaction_pct(),
             max_steps: default_max_steps(),
+            temperature: None,
+            max_tokens: None,
             ask_auto_resolve: false,
             keep_awake: false,
             ctx_warn_pct: default_ctx_warn(),
@@ -1060,5 +1071,20 @@ mod tests {
         .unwrap();
         cfg.normalize();
         assert_eq!(cfg.extra_dirs, vec!["C:/data/a", "C:/data/b"]);
+    }
+
+    /// temperature / max_tokens：默认 None（provider 用自己的默认值，行为
+    /// 不变）；配置里有值时按原类型解析透传。
+    #[test]
+    fn temperature_and_max_tokens_default_none_and_parse_when_set() {
+        let none: Config = toml::from_str("").unwrap();
+        assert_eq!(none.temperature, None);
+        assert_eq!(none.max_tokens, None);
+        let set: Config = toml::from_str("temperature = 0.3\nmax_tokens = 4096").unwrap();
+        assert_eq!(set.temperature, Some(0.3));
+        assert_eq!(set.max_tokens, Some(4096));
+        // serde default：写盘时省略 None 字段，读回仍是 None。
+        let s = toml::to_string_pretty(&set).unwrap();
+        assert!(s.contains("temperature"), "set value must persist");
     }
 }

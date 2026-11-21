@@ -115,7 +115,13 @@ pub struct ChatRequest {
     /// Tool schemas. Shared behind an `Arc` so the per-step clone in the
     /// agent loop does not copy 19 JSON schemas every time.
     pub tools: std::sync::Arc<Vec<ToolSpec>>,
-    pub max_tokens: u32,
+    /// 输出 token 上限。None = 用各 provider 现有默认值（anthropic/openai
+    /// chat 回落 8192、responses 不发送——与改动前行为一致）。
+    pub max_tokens: Option<u32>,
+    /// 采样温度。None = 不覆盖（anthropic 保持 1.0、openai 不发送）；
+    /// 配置了才写进请求体。思考模式下 anthropic 侧仍不发送（API 要求
+    /// 思考开启时温度必须缺省或 1）。
+    pub temperature: Option<f32>,
     /// 思考档位:0 = 显式关闭(不发送任何 thinking/reasoning 参数),1 = low,
     /// 2 = medium,3 = high。各 provider 自行映射到线上协议的具体字段。
     pub thinking_level: u32,

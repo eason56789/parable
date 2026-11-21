@@ -113,7 +113,13 @@ pub fn build_messages(messages: &[Msg]) -> Value {
                     }
                 }
                 if content.is_empty() {
-                    content.push(json!({"type":"text","text":""}));
+                    // 折叠后一条内容都不剩（比如 thinking 块因缺 signature 被
+                    // 丢弃、空 Text 被过滤）：整条跳过而不是发空 text 块——
+                    // 真实 API 会把 `{"type":"text","text":""}` 判 400。
+                    // 对重放语义这是最安全的落点：空 assistant 轮不携带任何
+                    // 信息，跳过它只少一个空轮；Anthropic 对连续同角色消息
+                    // 会自动合并，不会破坏后续 tool_result 的 user 轮。
+                    continue;
                 }
                 out.push(json!({"role":"assistant","content": content}));
             }
@@ -135,7 +141,9 @@ pub fn build_body(req: &ChatRequest, thinking_supported: bool) -> Value {
         })
         .collect();
 
-    let mut max_tokens = req.max_tokens.max(1024);
+    // max_tokens：None 回落到 agent 历史默认 8192（与改动前行为一致），
+    // 配置了就用配置值；1024 是 API 的硬下限。
+    let mut max_tokens = req.max_tokens.unwrap_or(8192).max(1024);
     let mut body = json!({
         "model": req.model,
         "max_tokens": max_tokens,
@@ -159,9 +167,11 @@ pub fn build_body(req: &ChatRequest, thinking_supported: bool) -> Value {
             body["max_tokens"] = json!(max_tokens);
         }
         body["thinking"] = json!({"type":"enabled","budget_tokens": budget});
-        // With thinking enabled the API requires temperature to be unset or 1.
+        // With thinking enabled the API requires temperature to be unset or 1:
+        // 即使配置了 temperature 也保持不发送（None 与 Some(x) 行为一致）。
     } else {
-        body["temperature"] = json!(1.0);
+        // 温度：未配置保持既有默认 1.0；配置了才覆盖。
+        body["temperature"] = json!(req.temperature.unwrap_or(1.0));
     }
     body
 }
@@ -671,12 +681,67 @@ mod tests {
                 description: "read".into(),
                 input_schema: json!({"type":"object"}),
             }]),
-            max_tokens: 4096,
+            max_tokens: Some(4096),
+            temperature: None,
             thinking_level: 2,
             workspace: String::new(),
         };
         let body = build_body(&req, true);
         assert_eq!(body["thinking"]["type"], "enabled");
         assert!(body["max_tokens"].as_i64().unwrap() > 4096);
+    }
+
+    /// max_tokens / temperature 透传：None 走既有默认（8192 / 1.0），有值
+    /// 时原样进请求体。
+    #[test]
+    fn body_applies_configured_sampling_params() {
+        let mk = |max_tokens: Option<u32>, temperature: Option<f32>, thinking: u32| ChatRequest {
+            model: "m".into(),
+            system: String::new(),
+            messages: vec![Msg::user("hi")],
+            tools: std::sync::Arc::new(Vec::new()),
+            max_tokens,
+            temperature,
+            thinking_level: thinking,
+            workspace: String::new(),
+        };
+        // 默认值：行为与改动前完全一致。
+        let body = build_body(&mk(None, None, 0), true);
+        assert_eq!(body["max_tokens"], json!(8192));
+        assert_eq!(body["temperature"], json!(1.0));
+        // 有值：透传（f32 经 serde_json 以 f64 表示，期望值同样按 f32 构造）。
+        let body = build_body(&mk(Some(2048), Some(0.3), 0), true);
+        assert_eq!(body["max_tokens"], json!(2048));
+        assert_eq!(body["temperature"], json!(0.3_f32));
+        // 思考模式：温度不发送（API 要求思考开启时温度缺省或 1），max_tokens 仍生效。
+        let body = build_body(&mk(Some(16384), Some(0.3), 1), true);
+        assert_eq!(body["max_tokens"], json!(16384));
+        assert!(body.get("temperature").is_none());
+    }
+
+    /// 折叠后空内容的 assistant 消息整条跳过：真实 API 会把空 text 块判 400，
+    /// 旧行为（补 `{"type":"text","text":""}`）在线上必炸。
+    #[test]
+    fn empty_assistant_messages_are_skipped() {
+        let msgs = vec![
+            Msg::user("hi"),
+            // 只有 thinking 且无 signature → 折叠后为空。
+            Msg::Assistant(vec![AsstPart::Thinking {
+                text: "hidden".into(),
+                signature: String::new(),
+                ms: 0,
+            }]),
+            Msg::user("next"),
+            // 完全空的 assistant。
+            Msg::Assistant(vec![]),
+            Msg::assistant("final"),
+        ];
+        let out = build_messages(&msgs);
+        let arr = out.as_array().unwrap();
+        assert_eq!(arr.len(), 3, "两个空 assistant 轮都应被跳过");
+        assert_eq!(arr[0]["role"], "user");
+        assert_eq!(arr[1]["role"], "user");
+        assert_eq!(arr[2]["role"], "assistant");
+        assert_eq!(arr[2]["content"][0]["text"], "final");
     }
 }

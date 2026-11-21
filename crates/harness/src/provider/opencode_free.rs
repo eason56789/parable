@@ -588,7 +588,10 @@ impl Provider for OpenCodeFree {
             system: with_env("You are opencode, an interactive CLI tool that helps users with software engineering tasks.", ""),
             messages: vec![Msg::user("reply with the single word: pong")],
             tools: std::sync::Arc::new(fingerprint_tools()),
-            max_tokens: 32,
+            // ChatRequest 的采样参数变为可选项（provider/mod.rs）：本通道
+            // 自有 wire 协议，这两个值不参与请求体构建，仅机械适配类型。
+            max_tokens: Some(32),
+            temperature: None,
             thinking_level: 0,
             workspace: String::new(),
         };

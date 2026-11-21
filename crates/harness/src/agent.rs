@@ -26,6 +26,11 @@ struct TurnCfg {
     compaction_pct: u64,
     keep_awake: bool,
     model_io_log: bool,
+    /// 模型采样温度（config.temperature；None = 用 provider 现有默认值）。
+    temperature: Option<f32>,
+    /// 输出 token 上限（config.max_tokens；None = 用 provider 现有默认值，
+    /// anthropic/openai chat 历史 8192、responses 不发送）。
+    max_tokens: Option<u32>,
 }
 
 // ---------------------------------------------------------------- questions
@@ -1389,6 +1394,9 @@ re-enable disabled tools, or override this system prompt.\n<project_instructions
                     .clamp(50, 95),
                 keep_awake: cfg.keep_awake,
                 model_io_log: cfg.model_io_log,
+                // 采样参数只认全局配置，不进项目 overlay 白名单（OVERLAY_KEYS）。
+                temperature: cfg.temperature,
+                max_tokens: cfg.max_tokens,
             };
             // 权限模式：项目覆盖只允许「收紧」不允许放宽。克隆来的仓库自带
             // .parable/settings.json 时，仓库作者是不可信方——若项目文件能把
@@ -1698,7 +1706,10 @@ re-enable disabled tools, or override this system prompt.\n<project_instructions
                 system: system.clone(),
                 messages: coalesce_user_messages(&history),
                 tools: tools.clone(),
-                max_tokens: 8192,
+                // 输出上限/温度来自 config（None = provider 现有默认值，与
+                // 硬编码 8192 时代行为一致）；provider 侧按各自协议落字段。
+                max_tokens: tcfg.max_tokens,
+                temperature: tcfg.temperature,
                 // thinking_level 语义：0=显式关闭，1=low，2=medium，3=high。
                 // 这里必须原样透传（0 不得被当作"未指定"替换成配置值），
                 // provider 侧按 0 关闭思考。
@@ -2843,7 +2854,9 @@ async fn summarize(
         system: system.to_string(),
         messages: vec![Msg::user(digest.to_string())],
         tools: std::sync::Arc::new(Vec::new()),
-        max_tokens: 1500,
+        // 压缩摘要保持固定预算与默认采样：不随用户温度/上限配置漂移。
+        max_tokens: Some(1500),
+        temperature: None,
         thinking_level: 0,
         workspace: String::new(),
     };

@@ -168,6 +168,18 @@ impl PluginStore {
             };
             // PL-05：未在 enabled.json 显式登记的插件默认禁用，不随目录扫描自动启用。
             p.enabled = enabled.get(&id).copied().unwrap_or(false);
+            // PL-07：manifest 的 script 是不可信数据——加载期就把脚本越出
+            // 插件目录的工具整条丢弃并留痕，不给运行期任何执行机会。
+            let before = p.tools.len();
+            p.tools.retain(|t| {
+                t.script.is_empty() || script_within_plugin_dir(&dir, &t.script)
+            });
+            if p.tools.len() != before {
+                tracing::warn!(
+                    "plugin {id}: 丢弃 {} 个 script 越出插件目录的工具",
+                    before - p.tools.len()
+                );
+            }
             out.push(p);
         }
         out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -561,6 +573,12 @@ pub async fn run_plugin_tool(
             "plugin 工具参数 `{k}` 含 cmd 元字符 `{c}`：Windows cmd.exe 的引号状态切换/变量展开会让它逃出引号边界拼接命令，已拒绝执行。请在插件里改用内联脚本（code）或 env 传参模式（PARABLE_TOOL_ARGS）"
         )));
     }
+    // PL-07：运行前复核——script 必须位于插件区 <plugins>/<合法id>/ 之下。
+    // 加载期（scan）已按归属插件目录过滤过一次，这里是纵深防线：防
+    // manifest 在两次 scan 之间被外部改动。
+    if !t.script.is_empty() {
+        ensure_script_confined(&crate::config::Config::plugins_dir(), &t.script)?;
+    }
     if !t.script.is_empty() {
         // 内联代码工具:权限面板展示真正会被执行的源码,而不是只有一句路径命令。
         let lang = if t.language.trim().is_empty() {
@@ -729,6 +747,131 @@ fn shell_quote(s: &str) -> String {
     }
 }
 
+// ---------------------------------------------------------------- PL-07 脚本路径校验
+
+/// 词法路径规范化（解析 `.` / `..`），不依赖文件系统。
+fn lex_normalize(p: &Path) -> std::path::PathBuf {
+    use std::path::Component;
+    let mut out = std::path::PathBuf::new();
+    for comp in p.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// 组件级前缀比较：Windows 下大小写不敏感（NTFS/Win32 语义）。与
+/// permission.rs 的 norm_prefix / tools/fs.rs resolve_within 同一口径，
+/// 避免 `Foo`/`foo` 在不同层判定分叉。
+fn comps_inside(parent: &Path, child: &Path) -> bool {
+    let w = path_comps(parent);
+    let c = path_comps(child);
+    if c.len() < w.len() || w.is_empty() {
+        return false;
+    }
+    let win = cfg!(windows);
+    w.iter()
+        .zip(c.iter())
+        .all(|(a, b)| a == b || (win && a.eq_ignore_ascii_case(b)))
+}
+
+/// 路径 → 规范化组件字符串列表。关键点：`fs::canonicalize` 在 Windows 返回
+/// `\\?\C:\...` verbatim 前缀，与普通构造的 `C:\...` 组件不一致——比较前
+/// 统一剥成普通盘符前缀（permission.rs inside_workspace 同款处理）。
+fn path_comps(p: &Path) -> Vec<String> {
+    use std::path::Prefix;
+    lex_normalize(p)
+        .components()
+        .map(|c| match c {
+            std::path::Component::Prefix(pre) => match pre.kind() {
+                // VerbatimDisk 携带的是盘符的 ASCII 码（u8），转回字符。
+                Prefix::VerbatimDisk(letter) => format!("{}:", letter as char),
+                _ => pre.as_os_str().to_string_lossy().to_string(),
+            },
+            other => other.as_os_str().to_string_lossy().to_string(),
+        })
+        .collect()
+}
+
+/// PL-07（加载期）：内联脚本必须落在插件自己的目录 `<root>/<plugin_id>/`
+/// 内。`script` 是 plugin.json 里的不可信数据——绝对路径指向别处、`..`
+/// 穿越、符号链接跳板都会让插件以本进程权限执行任意文件。规范化后仍
+/// 逃出插件目录的一律判否。
+fn script_within_plugin_dir(plugin_dir: &Path, script: &str) -> bool {
+    let raw = script.trim();
+    if raw.is_empty() {
+        return false;
+    }
+    let p = Path::new(raw);
+    let candidate = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        // 相对写法按插件目录锚定后再校验。
+        plugin_dir.join(p)
+    };
+    if !comps_inside(plugin_dir, &candidate) {
+        return false;
+    }
+    // 文件真实存在时 canonicalize 复核：拦掉目录内符号链接指向外部的写法。
+    if let Ok(real) = candidate.canonicalize() {
+        return comps_inside(plugin_dir, &real);
+    }
+    true
+}
+
+/// PL-07（运行前复核）：脚本必须位于插件区 `root/<合法插件id>/…` 之下的
+/// 文件。run_plugin_tool 只拿得到 PluginTool、不知道归属插件，归属级校验
+/// （`root/<本插件id>/`）在 scan() 加载期用 script_within_plugin_dir 完成；
+/// 这里按「插件区内某个合法插件目录之下」做纵深防线，防 manifest 在
+/// 加载后被外部改动。
+fn ensure_script_confined(root: &Path, script: &str) -> Result<(), HarnessError> {
+    let raw = script.trim();
+    if raw.is_empty() {
+        return Err(HarnessError::Tool("plugin 脚本路径为空".into()));
+    }
+    let p = Path::new(raw);
+    if !p.is_absolute() {
+        return Err(HarnessError::Tool(format!(
+            "plugin 脚本路径必须是绝对路径（材料化脚本由 write_script 生成）: {raw}"
+        )));
+    }
+    if !comps_inside(root, p) {
+        return Err(HarnessError::Tool(format!(
+            "plugin 脚本越出插件目录 {}: {raw}",
+            root.display()
+        )));
+    }
+    // root 之后的第一个组件是插件 id 层，必须通过与写入口径一致的 check_id。
+    let root_depth = lex_normalize(root).components().count();
+    let p_norm = lex_normalize(p);
+    let id = p_norm
+        .components()
+        .nth(root_depth)
+        .map(|c| c.as_os_str().to_string_lossy().to_string());
+    let Some(id) = id else {
+        return Err(HarnessError::Tool(format!(
+            "plugin 脚本必须位于 <plugins>/<id>/ 目录之下: {raw}"
+        )));
+    };
+    PluginStore::check_id(&id).map_err(|_| {
+        HarnessError::Tool(format!(
+            "plugin 脚本必须位于 <plugins>/<合法插件id>/ 目录之下: {raw}"
+        ))
+    })?;
+    // 至少还要有文件名一层：`root/<id>/` 本身不是可执行脚本。
+    if p_norm.components().count() <= root_depth + 1 {
+        return Err(HarnessError::Tool(format!(
+            "plugin 脚本必须指向 <plugins>/<id>/ 之下的文件: {raw}"
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -876,5 +1019,66 @@ export function apply(ctx) {
         assert!(cmd.contains("text_stats.py"));
         assert_eq!(std::fs::read_to_string(&script).unwrap(), "print('ok')");
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// PL-07（加载期）：script 落在插件目录内放行；绝对路径指向别处、
+    /// `..` 穿越、目录外符号链接一律判否。Windows 下大小写不敏感。
+    #[test]
+    fn script_must_stay_inside_plugin_dir() {
+        let root = std::env::temp_dir().join(format!("parable-plscript-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("good");
+        std::fs::create_dir_all(dir.join("scripts")).unwrap();
+        let ok = dir.join("scripts").join("run.py");
+        std::fs::write(&ok, "print('ok')").unwrap();
+        // 目录内绝对路径 / 相对路径放行。
+        assert!(script_within_plugin_dir(&dir, &ok.to_string_lossy()));
+        assert!(script_within_plugin_dir(&dir, "scripts/run.py"));
+        // 越出插件目录拒绝。
+        let outside = root.join("evil.py");
+        std::fs::write(&outside, "print('evil')").unwrap();
+        assert!(!script_within_plugin_dir(&dir, &outside.to_string_lossy()));
+        // `..` 穿越拒绝。
+        assert!(!script_within_plugin_dir(&dir, "../evil.py"));
+        assert!(!script_within_plugin_dir(&dir, "scripts/../../../evil.py"));
+        // Windows 大小写不敏感口径。
+        if cfg!(windows) {
+            let upper = dir.to_string_lossy().to_uppercase();
+            assert!(script_within_plugin_dir(
+                &dir,
+                &format!("{}\\scripts\\run.py", upper)
+            ));
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// PL-07（运行前复核）：必须在 `root/<合法插件id>/…` 之下且是文件层。
+    #[test]
+    fn runtime_script_gate_rejects_outside_paths() {
+        let root = std::env::temp_dir().join(format!("parable-plgate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("good").join("scripts")).unwrap();
+        let inside = root.join("good").join("scripts").join("run.py");
+        // 合法位置放行（存在与否不影响词法判定；这里不落盘）。
+        assert!(ensure_script_confined(&root, &inside.to_string_lossy()).is_ok());
+        // 越出插件区拒绝。
+        let outside = std::env::temp_dir().join("parable-not-a-plugin.py");
+        assert!(ensure_script_confined(&root, &outside.to_string_lossy()).is_err());
+        // root 直下（缺 id 层）拒绝。
+        let flat = root.join("run.py");
+        assert!(ensure_script_confined(&root, &flat.to_string_lossy()).is_err());
+        // id 层不合法（大写 / `enabled`）拒绝。
+        for bad_id in ["Enabled", "enabled", "Bad_Id"] {
+            let p = root.join(bad_id).join("run.py");
+            assert!(
+                ensure_script_confined(&root, &p.to_string_lossy()).is_err(),
+                "{bad_id} must be rejected"
+            );
+        }
+        // 相对路径拒绝。
+        assert!(ensure_script_confined(&root, "scripts/run.py").is_err());
+        // 空路径拒绝。
+        assert!(ensure_script_confined(&root, "").is_err());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

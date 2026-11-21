@@ -851,6 +851,15 @@ impl Registry {
                 }), &["message"]),
             },
             ToolSpec {
+                name: "git_worktree".into(),
+                description: "Manage git worktrees of the workspace repository. `action: \"list\"` shows every worktree (read-only). `action: \"add\"` creates an isolated checkout at `<repo root>/<name>` on a new branch — use it to run parallel tasks or try risky/experimental changes without polluting the main working tree; `branch` defaults to `name`. `action: \"remove\"` deletes a worktree you created earlier (the main worktree can never be removed). `name` must be a plain identifier (letters/digits/-/_). add/remove are destructive and require user approval. Requires the workspace to be a git repository.".into(),
+                input_schema: obj(json!({
+                    "action": str_prop("One of: list | add | remove"),
+                    "name": str_prop("Worktree name (required for add/remove); the checkout lands at <repo root>/<name>"),
+                    "branch": str_prop("Branch to create for add (optional; defaults to name)"),
+                }), &["action"]),
+            },
+            ToolSpec {
                 name: "list_dir".into(),
                 description: "List a directory (non-recursive) with file sizes and types.".into(),
                 input_schema: obj(json!({
@@ -1495,6 +1504,7 @@ skill matches the current request, then follow the steps it contains. Read-only.
             "write_file" => self.write_file(args, ctx).await,
             "edit_file" => self.edit_file(args, ctx).await,
             "git_commit" => self.git_commit(args, ctx).await,
+            "git_worktree" => self.git_worktree(args, ctx).await,
             "list_dir" => self.list_dir(args, ctx).await,
             "glob" => self.glob(args, ctx).await,
             "grep" => self.grep(args, ctx).await,
@@ -1704,6 +1714,102 @@ impl Registry {
                 }
             ),
         ))
+    }
+
+    /// `git_worktree` —— git worktree 隔离区管理（对标 Claude Code worktrees /
+    /// Cursor 2.0）：并行任务或实验性修改不想污染主工作区时，在
+    /// `<repo root>/<name>` 建独立检出，做完 `remove` 收尾。
+    ///
+    /// list 只读；add/remove 落库横跨工作区且不可逆，风险口径与 git_commit
+    /// 一致归为 Destructive：ws/ask 模式一律弹确认，full 模式直接过。
+    async fn git_worktree(&self, a: &Value, ctx: &ToolCtx) -> Result<ToolOutcome, HarnessError> {
+        let action = a["action"].as_str().unwrap_or("").trim().to_string();
+        let name = a["name"].as_str().unwrap_or("").trim().to_string();
+        let branch = a["branch"].as_str().unwrap_or("").trim().to_string();
+        match action.as_str() {
+            "list" => {
+                ctx.authorize("git_worktree", "list worktrees", Risk::ReadOnly)
+                    .await?;
+                let wts = crate::git::worktree_list(&self.workspace)?;
+                let mut body = String::from("Worktrees:\n");
+                if wts.is_empty() {
+                    body.push_str("  (none)\n");
+                }
+                for w in &wts {
+                    let kind = if w.is_main { " (main)" } else { "" };
+                    let br = if w.branch.is_empty() {
+                        if w.bare {
+                            "bare".to_string()
+                        } else {
+                            "detached".to_string()
+                        }
+                    } else {
+                        format!("branch {}", w.branch)
+                    };
+                    let head = if w.head.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" @ {}", w.head)
+                    };
+                    let locked = if w.locked.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" [locked: {}]", w.locked)
+                    };
+                    body.push_str(&format!(
+                        "  {}{} {}{}{}\n",
+                        w.path, kind, br, head, locked
+                    ));
+                }
+                Ok(ToolOutcome::text(true, format!("List {} worktree(s)", wts.len()), body))
+            }
+            "add" => {
+                if name.is_empty() {
+                    return Err(HarnessError::Tool("`name` is required for action `add`".into()));
+                }
+                // 权限面板上展示落点与分支——用户看到的就是将要创建的内容。
+                let shown_branch = if branch.is_empty() { &name } else { &branch };
+                ctx.authorize(
+                    "git_worktree",
+                    &format!("create worktree `{name}` (new branch `{shown_branch}`)"),
+                    Risk::Destructive,
+                )
+                .await?;
+                let wt = crate::git::worktree_add(&self.workspace, &name, &branch)?;
+                Ok(ToolOutcome::text(
+                    true,
+                    format!("Created worktree {}", name),
+                    format!(
+                        "Created worktree `{}` on new branch `{}`.\nPath: {}\nWork there with absolute paths (the checkout is a separate directory); the main workspace stays untouched.",
+                        name, wt.branch, wt.path
+                    ),
+                ))
+            }
+            "remove" => {
+                if name.is_empty() {
+                    return Err(HarnessError::Tool(
+                        "`name` is required for action `remove`".into(),
+                    ));
+                }
+                ctx.authorize(
+                    "git_worktree",
+                    &format!("remove worktree `{name}`"),
+                    Risk::Destructive,
+                )
+                .await?;
+                crate::git::worktree_remove(&self.workspace, &name)?;
+                Ok(ToolOutcome::text(
+                    true,
+                    format!("Removed worktree {}", name),
+                    format!(
+                        "Removed worktree `{name}` and its registration; the branch it was on still exists."
+                    ),
+                ))
+            }
+            other => Err(HarnessError::Tool(format!(
+                "`action` must be one of list | add | remove, got `{other}`"
+            ))),
+        }
     }
 
     async fn list_dir(&self, a: &Value, ctx: &ToolCtx) -> Result<ToolOutcome, HarnessError> {
@@ -2043,8 +2149,10 @@ Poll `background_list` to check status/output, or `background_kill` to stop it."
             return Err(HarnessError::Tool("`values` is empty — nothing to change".into()));
         }
         // C-02：`permission_mode` 是提权键——一次弱审批即可自提权到 full 并落盘。
-        // 升级为 Destructive 风险，审批理由列出键名与旧→新值；其余键维持 Write。
-        let escalated = vals.contains_key("permission_mode");
+        // `prefs` 是注入系统提示词的自由文本——full 模式下模型可静默持久化
+        // 自改指令（下一轮起直接改写自己的行为边界，且对用户不可见）。
+        // 两者都升级为 Destructive 风险，审批理由列出键名与旧→新值；其余键维持 Write。
+        let escalated = vals.contains_key("permission_mode") || vals.contains_key("prefs");
         let before_snap = settings_snapshot(&crate::config::Config::load());
         let detail: Vec<String> = vals
             .iter()
@@ -3364,6 +3472,7 @@ mod tests {
             "background_list",
             "background_kill",
             "git_commit",
+            "git_worktree",
         ] {
             assert!(names.contains(&want), "{want} must be declared");
         }

@@ -169,11 +169,21 @@ pub(crate) fn build_chat_body(req: &ChatRequest) -> Value {
         "stream_options": {"include_usage": true},
     });
     // o 系列 / gpt-5 只认 max_completion_tokens,老参数会被它们直接拒绝;
-    // 其余模型保持 max_tokens。
-    if is_reasoning_model(&req.model) {
-        body["max_completion_tokens"] = json!(req.max_tokens);
+    // 其余模型保持 max_tokens。None 回落到 agent 历史默认 8192(与改动前
+    // 每次请求都带 8192 的行为一致)。
+    let max_tokens = req.max_tokens.unwrap_or(8192);
+    let reasoning_model = is_reasoning_model(&req.model);
+    if reasoning_model {
+        body["max_completion_tokens"] = json!(max_tokens);
     } else {
-        body["max_tokens"] = json!(req.max_tokens);
+        body["max_tokens"] = json!(max_tokens);
+    }
+    // 温度:未配置不发送(与改动前一致);配置了才带上。o 系列 / gpt-5 一族
+    // 只认默认采样参数,temperature 会被直接拒绝,推理模型一律不发。
+    if let Some(t) = req.temperature {
+        if !reasoning_model {
+            body["temperature"] = json!(t);
+        }
     }
     if !tools.is_empty() {
         body["tools"] = Value::Array(tools);
@@ -523,6 +533,18 @@ fn build_responses_body(req: &ChatRequest) -> Value {
     if !tools.is_empty() {
         body["tools"] = Value::Array(tools);
     }
+    // max_output_tokens:Responses API 此前从不发送(默认给到模型上限),
+    // 保持 None = 不发送;配置了 max_tokens 才带上,避免静默收窄输出。
+    if let Some(mt) = req.max_tokens {
+        body["max_output_tokens"] = json!(mt);
+    }
+    // 温度:None 不发送(与改动前一致);o 系列 / gpt-5 只认默认采样,推理
+    // 模型一律不发,免得被 API 直接拒绝。
+    if let Some(t) = req.temperature {
+        if !is_reasoning_model(&req.model) {
+            body["temperature"] = json!(t);
+        }
+    }
     // thinking_level → reasoning.effort;0 = 显式关闭,不发参数。
     if let Some(effort) = reasoning_effort(req.thinking_level) {
         body["reasoning"] = json!({"effort": effort});
@@ -785,5 +807,56 @@ impl Provider for OpenAiBase {
                 models: vec![],
             }),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mk(model: &str, max_tokens: Option<u32>, temperature: Option<f32>) -> ChatRequest {
+        ChatRequest {
+            model: model.into(),
+            system: String::new(),
+            messages: vec![Msg::user("hi")],
+            tools: std::sync::Arc::new(Vec::new()),
+            max_tokens,
+            temperature,
+            thinking_level: 0,
+            workspace: String::new(),
+        }
+    }
+
+    /// chat 路径:max_tokens None 回落 8192(与改动前一致),有值时透传;
+    /// temperature 只有配置了才发送。
+    #[test]
+    fn chat_body_applies_sampling_params() {
+        let body = build_chat_body(&mk("gpt-4o", None, None));
+        assert_eq!(body["max_tokens"], json!(8192));
+        assert!(body.get("temperature").is_none());
+
+        let body = build_chat_body(&mk("gpt-4o", Some(2048), Some(0.3)));
+        assert_eq!(body["max_tokens"], json!(2048));
+        // f32 经 serde_json 以 f64 表示，期望值同样按 f32 构造。
+        assert_eq!(body["temperature"], json!(0.3_f32));
+
+        // 推理模型:参数名换成 max_completion_tokens,temperature 一律不发。
+        let body = build_chat_body(&mk("o4-mini", Some(1024), Some(0.3)));
+        assert_eq!(body["max_completion_tokens"], json!(1024));
+        assert!(body.get("max_tokens").is_none());
+        assert!(body.get("temperature").is_none());
+    }
+
+    /// responses 路径:此前从不发送输出上限,None 必须保持不发送;配置了
+    /// 才带 max_output_tokens。
+    #[test]
+    fn responses_body_applies_sampling_params() {
+        let body = build_responses_body(&mk("gpt-4o", None, None));
+        assert!(body.get("max_output_tokens").is_none());
+        assert!(body.get("temperature").is_none());
+
+        let body = build_responses_body(&mk("gpt-4o", Some(4096), Some(0.7)));
+        assert_eq!(body["max_output_tokens"], json!(4096));
+        assert_eq!(body["temperature"], json!(0.7_f32));
     }
 }
