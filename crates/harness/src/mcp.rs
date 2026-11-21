@@ -33,17 +33,31 @@ use tokio::sync::{oneshot, Mutex};
 pub struct McpServerConfig {
     pub id: String,
     pub name: String,
-    /// 启动命令（如 npx / python / 可执行文件路径）。
+    /// 传输类型：`"stdio"`（默认，子进程 + 行协议）或 `"http"`（Streamable HTTP）。
+    #[serde(default = "default_transport")]
+    pub r#type: String,
+    /// 启动命令（stdio：如 npx / python / 可执行文件路径）。
+    #[serde(default)]
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
     #[serde(default)]
     pub env: Vec<(String, String)>,
+    /// http 传输的端点 URL；stdio 忽略。
+    #[serde(default)]
+    pub url: String,
+    /// http 传输的附加请求头（如自定义鉴权头）；stdio 忽略。
+    #[serde(default)]
+    pub headers: Vec<(String, String)>,
     #[serde(default = "default_true")]
     pub enabled: bool,
     /// 每次工具调用超时（毫秒）。
     #[serde(default = "default_timeout")]
     pub timeout_ms: u64,
+}
+
+fn default_transport() -> String {
+    "stdio".to_string()
 }
 
 fn default_true() -> bool {
@@ -192,6 +206,27 @@ fn parse_tools(result: &Value) -> Vec<McpTool> {
         .unwrap_or_default()
 }
 
+/// 解析一段 SSE 响应体，取第一条 `data:` 承载的 JSON-RPC 消息。
+/// 最小可用实现：按行累积 `data:`，空行分隔事件；不做断线续传/重连。
+fn parse_sse_rpc(body: &str) -> Option<Value> {
+    let mut data: String = String::new();
+    for line in body.lines() {
+        if let Some(d) = line.strip_prefix("data:") {
+            data.push_str(d.trim());
+        } else if line.is_empty() && !data.is_empty() {
+            if let Ok(v) = serde_json::from_str::<Value>(&data) {
+                return Some(v);
+            }
+            data.clear();
+        }
+    }
+    if !data.is_empty() {
+        serde_json::from_str::<Value>(&data).ok()
+    } else {
+        None
+    }
+}
+
 /// initialize 的 result → (serverInfo.name, protocolVersion)。
 /// 协议版本不强校验（服务器可能协商降级），仅记录。
 fn parse_init(result: &Value) -> Option<(String, String)> {
@@ -278,6 +313,8 @@ enum ReqFail {
     Rpc(String),
     /// 请求行写失败（管道断了）。
     Send(String),
+    /// HTTP 传输层失败（连接拒绝 / DNS / TLS / 非 2xx）。
+    Connect(String),
 }
 
 impl ReqFail {
@@ -295,6 +332,7 @@ impl ReqFail {
             ReqFail::Closed(m) => HarnessError::Tool(format!("MCP {method}: {m}")),
             ReqFail::Rpc(m) => HarnessError::Tool(format!("MCP {method} 失败: {m}")),
             ReqFail::Send(m) => HarnessError::Tool(format!("MCP {method}: {m}")),
+            ReqFail::Connect(m) => HarnessError::Tool(format!("MCP {method} 连接失败: {m}")),
         }
     }
 }
@@ -511,12 +549,163 @@ fn error_reason(e: &HarnessError) -> String {
 
 // ------------------------------------------------------------------ 连接
 
+/// 在线连接的传输形态：stdio 子进程共享层，或 Streamable HTTP 会话。
+enum Live {
+    Stdio(Arc<Shared>),
+    Http(Arc<HttpConn>),
+}
+
+/// Streamable HTTP 会话：每个 JSON-RPC 请求一次 POST；响应可为普通 JSON
+/// 或 SSE（`text/event-stream`）。会话 id（`mcp-session-id`）在 initialize
+/// 响应里拿到，后续请求回带。OAuth 不在本轮实现——401/403 按连接失败上报。
+struct HttpConn {
+    client: reqwest::Client,
+    url: String,
+    headers: Vec<(String, String)>,
+    next_id: AtomicU64,
+    session_id: std::sync::Mutex<Option<String>>,
+    alive: AtomicBool,
+    death: std::sync::Mutex<String>,
+}
+
+impl HttpConn {
+    /// 建客户端 + initialize + initialized 通知 + tools/list，返回会话与工具表。
+    async fn connect(
+        cfg: &McpServerConfig,
+    ) -> Result<(Arc<HttpConn>, Vec<McpTool>), HarnessError> {
+        let url = cfg.url.trim().to_string();
+        if url.is_empty() {
+            return Err(HarnessError::Tool(
+                "http MCP 服务器缺少 `url` 配置".to_string(),
+            ));
+        }
+        let conn = Arc::new(Self {
+            client: crate::config::http_client(),
+            url,
+            headers: cfg.headers.clone(),
+            next_id: AtomicU64::new(1),
+            session_id: std::sync::Mutex::new(None),
+            alive: AtomicBool::new(true),
+            death: std::sync::Mutex::new(String::new()),
+        });
+
+        let init = conn
+            .request(
+                "initialize",
+                json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "parable", "version": "0.1.0"},
+                }),
+                HANDSHAKE_TIMEOUT,
+            )
+            .await
+            .map_err(|f| f.into_error("initialize"))?;
+        if let Some((server, proto)) = parse_init(&init) {
+            tracing::debug!(server = %server, protocol = %proto, "MCP(http) initialize 完成");
+        }
+
+        conn.notify("notifications/initialized", HANDSHAKE_TIMEOUT)
+            .await
+            .map_err(|f| f.into_error("notifications/initialized"))?;
+
+        let listed = conn
+            .request("tools/list", json!({}), HANDSHAKE_TIMEOUT)
+            .await
+            .map_err(|f| f.into_error("tools/list"))?;
+        Ok((conn, parse_tools(&listed)))
+    }
+
+    /// 发一个 JSON-RPC 请求并等响应（普通 JSON 或 SSE 单条消息）。
+    async fn request(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value, ReqFail> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let body = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+        let resp = self.post(&body, timeout).await?;
+        let content_type = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| ReqFail::Connect(format!("读取响应失败: {e}")))?;
+        let rpc = if content_type.contains("text/event-stream") {
+            parse_sse_rpc(&text)
+                .ok_or_else(|| ReqFail::Connect("SSE 响应中缺少 JSON-RPC 消息".to_string()))?
+        } else {
+            serde_json::from_str::<Value>(&text)
+                .map_err(|e| ReqFail::Connect(format!("响应不是合法 JSON: {e}")))?
+        };
+        if let Some(e) = rpc.get("error") {
+            return Err(ReqFail::Rpc(format_rpc_error(e)));
+        }
+        Ok(rpc.get("result").cloned().unwrap_or(Value::Null))
+    }
+
+    /// 通知（无 id，不等响应体内容）。
+    async fn notify(&self, method: &str, timeout: Duration) -> Result<(), ReqFail> {
+        let body = json!({"jsonrpc": "2.0", "method": method});
+        self.post(&body, timeout).await?;
+        Ok(())
+    }
+
+    /// 组装并发送 POST，回带会话 id；非 2xx 视为连接级故障。
+    async fn post(&self, body: &Value, timeout: Duration) -> Result<reqwest::Response, ReqFail> {
+        let mut req = self
+            .client
+            .post(&self.url)
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .timeout(timeout);
+        for (k, v) in &self.headers {
+            req = req.header(k, v);
+        }
+        if let Ok(Some(sid)) = self.session_id.lock().map(|g| g.clone()) {
+            req = req.header("mcp-session-id", sid);
+        }
+        let resp = req
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| ReqFail::Connect(e.to_string()))?;
+        // initialize 响应可能下发会话 id，后续请求必须回带。
+        if let Some(sid) = resp
+            .headers()
+            .get("mcp-session-id")
+            .and_then(|v| v.to_str().ok())
+        {
+            if let Ok(mut g) = self.session_id.lock() {
+                *g = Some(sid.to_string());
+            }
+        }
+        if !resp.status().is_success() {
+            return Err(ReqFail::Connect(format!("HTTP {}", resp.status())));
+        }
+        Ok(resp)
+    }
+
+    fn mark_dead(&self, reason: &str) {
+        if self.alive.swap(false, Ordering::SeqCst) {
+            if let Ok(mut g) = self.death.lock() {
+                *g = reason.to_string();
+            }
+        }
+    }
+}
+
 /// 一台服务器连接的本地状态（懒连接；进程死亡由读任务经 Shared 标记）。
 #[derive(Default)]
 struct Conn {
-    /// 在线时的共享层（写端 + pending 表 + 存活标记）。None = 未连接。
-    live: Option<Arc<Shared>>,
-    /// 子进程句柄（kill 用；wait 交给后台任务回收，避免僵尸）。
+    /// 在线时的传输层。None = 未连接。
+    live: Option<Live>,
+    /// 子进程句柄（仅 stdio；kill 用，wait 交给后台任务回收，避免僵尸）。
     child: Option<tokio::process::Child>,
     /// 最近一次 tools/list 的缓存。
     tools: Vec<McpTool>,
@@ -525,16 +714,29 @@ struct Conn {
 }
 
 impl Conn {
-    /// 进程是否还活着。
+    /// 连接是否还活着。
     fn is_alive(&self) -> bool {
-        self.live
-            .as_ref()
-            .map(|s| s.alive.load(Ordering::SeqCst))
-            .unwrap_or(false)
+        match &self.live {
+            Some(Live::Stdio(s)) => s.alive.load(Ordering::SeqCst),
+            Some(Live::Http(h)) => h.alive.load(Ordering::SeqCst),
+            None => false,
+        }
     }
 
-    /// 杀进程 + 清状态（幂等）。reason 会出现在状态页。
+    /// 死亡原因（状态页展示）。
+    async fn death_text(&self) -> String {
+        match &self.live {
+            Some(Live::Stdio(s)) => s.death.lock().await.clone(),
+            Some(Live::Http(h)) => h.death.lock().map(|g| g.clone()).unwrap_or_default(),
+            None => String::new(),
+        }
+    }
+
+    /// 拆连接 + 清状态（幂等）。reason 会出现在状态页。
     fn teardown(&mut self, reason: &str) {
+        if let Some(Live::Http(h)) = &self.live {
+            h.mark_dead(reason);
+        }
         self.live = None;
         self.tools.clear();
         if let Some(mut child) = self.child.take() {
@@ -635,34 +837,70 @@ fn handshake_fail(f: ReqFail, step: &str, shared: &Shared) -> HarnessError {
     with_tail(f.into_error(step), shared)
 }
 
-/// 惰性连接：活着直接复用；死了/没连过就 spawn + 握手。
-/// 持 conn 锁完成整个握手，避免并发首调重复 spawn。
+fn live_alive(live: &Live) -> bool {
+    match live {
+        Live::Stdio(s) => s.alive.load(Ordering::SeqCst),
+        Live::Http(h) => h.alive.load(Ordering::SeqCst),
+    }
+}
+
+fn clone_live(live: &Live) -> Live {
+    match live {
+        Live::Stdio(s) => Live::Stdio(Arc::clone(s)),
+        Live::Http(h) => Live::Http(Arc::clone(h)),
+    }
+}
+
+/// 经在线连接发 JSON-RPC 请求（按传输形态分发）。
+async fn live_request(
+    live: &Live,
+    method: &str,
+    params: Value,
+    timeout: Duration,
+) -> Result<Value, ReqFail> {
+    match live {
+        Live::Stdio(s) => s.request(method, params, timeout).await,
+        Live::Http(h) => h.request(method, params, timeout).await,
+    }
+}
+
+/// 惰性连接：活着直接复用；死了/没连过就按传输形态建连 + 握手。
+/// 持 conn 锁完成整个握手，避免并发首调重复建连。
 async fn ensure_connected(
     cfg: &McpServerConfig,
     conn: &Arc<Mutex<Conn>>,
-) -> Result<Arc<Shared>, HarnessError> {
+) -> Result<Live, HarnessError> {
     let mut guard = conn.lock().await;
-    if let Some(s) = guard.live.as_ref() {
-        if s.alive.load(Ordering::SeqCst) {
-            return Ok(Arc::clone(s));
+    if let Some(live) = guard.live.as_ref() {
+        if live_alive(live) {
+            return Ok(clone_live(live));
         }
     }
     // 死连接：先以死亡原因说明再拆（比笼统的"已失效"更有用）
     if guard.live.is_some() {
-        let reason = match guard.live.as_ref() {
-            Some(s) => s.death.lock().await.clone(),
-            None => String::new(),
-        };
+        let reason = guard.death_text().await;
         let reason = if reason.is_empty() { "连接已失效".into() } else { reason };
         guard.teardown(&reason);
     }
-    match spawn_and_init(cfg).await {
-        Ok((child, shared, tools)) => {
-            guard.child = Some(child);
-            guard.tools = tools;
-            guard.live = Some(Arc::clone(&shared));
+    let established = match cfg.r#type.as_str() {
+        "http" => HttpConn::connect(cfg)
+            .await
+            .map(|(http, tools)| {
+                guard.tools = tools;
+                guard.live = Some(Live::Http(http));
+            }),
+        _ => spawn_and_init(cfg)
+            .await
+            .map(|(child, shared, tools)| {
+                guard.child = Some(child);
+                guard.tools = tools;
+                guard.live = Some(Live::Stdio(shared));
+            }),
+    };
+    match established {
+        Ok(()) => {
             guard.error.clear();
-            Ok(shared)
+            Ok(clone_live(guard.live.as_ref().expect("live just set")))
         }
         Err(e) => {
             guard.error = error_reason(&e);
@@ -701,9 +939,12 @@ impl McpManager {
                         continue;
                     }
                     // 连接参数变了 → 丢掉旧连接，下次调用用新配置重连
-                    let changed = old.command != s.command
+                    let changed = old.r#type != s.r#type
+                        || old.command != s.command
                         || old.args != s.args
                         || old.env != s.env
+                        || old.url != s.url
+                        || old.headers != s.headers
                         || old.timeout_ms != s.timeout_ms;
                     if changed {
                         conn.lock().await.teardown("配置已更新");
@@ -747,9 +988,10 @@ impl McpManager {
                     String::new(),
                 )
             } else {
-                let error = match guard.live.as_ref() {
-                    Some(s) => s.death.lock().await.clone(),
-                    None => guard.error.clone(),
+                let error = if guard.live.is_some() {
+                    guard.death_text().await
+                } else {
+                    guard.error.clone()
                 };
                 (false, Vec::new(), error)
             };
@@ -815,20 +1057,23 @@ impl McpManager {
     /// 调用一个 MCP 工具，返回文本结果。`exposed` 是 all_tools 给出的暴露名。
     pub async fn call_tool(&self, exposed: &str, args: Value) -> Result<String, HarnessError> {
         let (cfg, conn, tool) = self.route(exposed).await?;
-        let shared = ensure_connected(&cfg, &conn).await?;
-        match shared
-            .request(
-                "tools/call",
-                json!({"name": tool, "arguments": args}),
-                effective_timeout(&cfg),
-            )
-            .await
+        let live = ensure_connected(&cfg, &conn).await?;
+        match live_request(
+            &live,
+            "tools/call",
+            json!({"name": tool, "arguments": args}),
+            effective_timeout(&cfg),
+        )
+        .await
         {
             Ok(result) => extract_call_text(&result),
             Err(f) => {
-                // 非 Rpc 失败 = 连接级故障：杀进程标记断开，下次调用重连
+                // 非 Rpc 失败 = 连接级故障：拆连接标记断开，下次调用重连
                 let fatal = f.is_fatal();
-                let msg = with_tail(f.into_error("tools/call"), &shared);
+                let msg = match &live {
+                    Live::Stdio(s) => with_tail(f.into_error("tools/call"), s),
+                    Live::Http(_) => f.into_error("tools/call"),
+                };
                 if fatal {
                     conn.lock().await.teardown(&error_reason(&msg));
                 }
@@ -1023,6 +1268,34 @@ mod tests {
         assert_eq!(parse_tools(&broken).len(), 1);
     }
 
+    #[test]
+    fn config_defaults_to_stdio_and_parses_http() {
+        // 旧配置（无 type/url/headers）默认 stdio，向后兼容。
+        let legacy = r#"{"id":"a","name":"A","command":"npx","args":["x"],"env":[],"enabled":true,"timeout_ms":1000}"#;
+        let c: McpServerConfig = serde_json::from_str(legacy).unwrap();
+        assert_eq!(c.r#type, "stdio");
+        assert!(c.url.is_empty());
+        assert!(c.headers.is_empty());
+
+        let http = r#"{"id":"b","name":"B","type":"http","url":"https://example.com/mcp","headers":[["Authorization","Bearer t"]],"enabled":true}"#;
+        let h: McpServerConfig = serde_json::from_str(http).unwrap();
+        assert_eq!(h.r#type, "http");
+        assert_eq!(h.url, "https://example.com/mcp");
+        assert_eq!(h.headers, vec![("Authorization".into(), "Bearer t".into())]);
+    }
+
+    #[test]
+    fn sse_parse_extracts_message_data() {
+        let body = "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}\n\n";
+        let v = parse_sse_rpc(body).unwrap();
+        assert_eq!(v["result"]["ok"], true);
+        // 纯通知（无 result/error）也能解析出来，交由上层判定。
+        let note = "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n\n";
+        assert!(parse_sse_rpc(note).is_some());
+        // 空体 → None。
+        assert!(parse_sse_rpc("").is_none());
+    }
+
     // ---------- 分发层（duplex 模拟子进程，不起真进程） ----------
 
     /// 搭一条假 MCP 会话：请求方向 / 响应方向各一根 duplex 管道，由
@@ -1134,9 +1407,12 @@ mod tests {
         McpServerConfig {
             id: id.into(),
             name: name.into(),
+            r#type: "stdio".into(),
             command: "cmd-that-does-not-exist".into(),
             args: vec![],
             env: vec![],
+            url: String::new(),
+            headers: vec![],
             enabled,
             timeout_ms: 1_000,
         }
@@ -1179,5 +1455,22 @@ mod tests {
         assert!(err.to_string().contains("未知的 MCP 工具"));
         assert!(m.all_tools().await.is_empty());
         assert!(m.connect("missing").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn http_connect_unreachable_reports_failed() {
+        let m = McpManager::new();
+        let mut h = cfg("h", "Http Bad", true);
+        h.r#type = "http".into();
+        h.url = "http://127.0.0.1:1/mcp".into();
+        h.timeout_ms = 1_000;
+        m.set_servers(vec![h]).await;
+        // 不可达端点：连接级失败，不 panic，状态落为 failed。
+        let err = m.connect("h").await.unwrap_err();
+        assert!(err.to_string().contains("initialize"));
+        let st = m.list_status().await;
+        assert_eq!(st.len(), 1);
+        assert!(!st[0].connected);
+        assert!(!st[0].error.is_empty());
     }
 }

@@ -1038,14 +1038,10 @@ mod tests {
 
     #[test]
     fn normalize_dedupes_extra_dirs_and_drops_blanks() {
-        let mut cfg = Config::default();
-        cfg.extra_dirs = vec![
-            "C:/data/a".into(),
-            "  C:/data/a  ".into(),
-            "".into(),
-            "   ".into(),
-            "C:/data/b".into(),
-        ];
+        let mut cfg: Config = serde_json::from_value(serde_json::json!({
+            "extra_dirs": ["C:/data/a", "  C:/data/a  ", "", "   ", "C:/data/b"]
+        }))
+        .unwrap();
         cfg.normalize();
         assert_eq!(cfg.extra_dirs, vec!["C:/data/a", "C:/data/b"]);
     }

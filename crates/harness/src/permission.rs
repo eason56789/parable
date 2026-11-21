@@ -1034,6 +1034,38 @@ mod tests {
     }
 
     #[test]
+    fn sandbox_enforce_allows_extra_root_but_denies_other_outside() {
+        let base = std::env::temp_dir().join(format!("parable-sbx-roots-{}", std::process::id()));
+        let ws = base.join("ws");
+        let extra = base.join("extra");
+        let other = base.join("other");
+        std::fs::create_dir_all(&ws).ok();
+        std::fs::create_dir_all(&extra).ok();
+        std::fs::create_dir_all(&other).ok();
+        let roots = vec![extra.clone()];
+        let policy = SandboxPolicy { mode: "enforce".into(), network_allow: Vec::new() };
+        // 追加目录内的 cwd 放行（与 --workspace 不冲突）。
+        assert!(matches!(policy.check_cwd(&ws, &roots, &extra), SandboxVerdict::Allow));
+        // 负向：既不在工作区、也不在追加目录 → 拒绝。
+        match policy.check_cwd(&ws, &roots, &other) {
+            SandboxVerdict::Deny { .. } => {}
+            other => panic!("expected Deny, got {other:?}"),
+        }
+        // 命令路径同理：追加目录内放行，区外拒绝。
+        let cmd_ok = format!("ls {}", extra.join("f.txt").to_string_lossy());
+        assert!(matches!(
+            policy.check_command_paths(&ws, &roots, &cmd_ok),
+            SandboxVerdict::Allow
+        ));
+        let cmd_bad = format!("cat {}", other.join("f.txt").to_string_lossy());
+        assert!(matches!(
+            policy.check_command_paths(&ws, &roots, &cmd_bad),
+            SandboxVerdict::Deny { .. }
+        ));
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
     fn sandbox_network_allowlist_allows_only_listed_hosts() {
         let policy = SandboxPolicy {
             mode: "enforce".into(),

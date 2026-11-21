@@ -4033,7 +4033,7 @@ async fn environment(
         out_servers.push(json!({
             "id": s.id,
             "name": s.name,
-            "transport": "stdio",
+            "transport": if s.r#type == "http" { "http" } else { "stdio" },
             "status": status_str,
             "error": error,
         }));
