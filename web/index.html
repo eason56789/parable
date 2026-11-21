@@ -238,9 +238,10 @@ body.chat #chat{opacity:1;pointer-events:auto}
 .th.open.clipped.top .thb>div::before{opacity:0}
 .th.open.clipped.top .thbody{-webkit-mask-image:none;mask-image:none}
 /* ---- 工具运行组：同一气泡里连续出现的工具卡折叠成一行统计，可展开 ---- */
-.tgrp{margin:4px 0}
-/* 紧贴组壳的正文行收敛自己的段距，避免「段距+组距」叠加出大缝 */
-.ab>*:has(+ .tgrp){margin-bottom:6px}
+.tgrp{margin:0 0 4px}
+/* 紧贴组壳的正文行收敛自己的段距，避免「段距+组距」叠加出大缝；
+   上下都收敛到 4px：上方 = 前段 4px + 组 0，下方 = 组 4px + 段 0，视觉对称 */
+.ab>*:has(+ .tgrp){margin-bottom:4px}
 .tgrp-h{display:flex;align-items:center;gap:7px;max-width:100%;padding:2px 0;border:0;background:none;color:var(--fg2);font:13px var(--sans);cursor:pointer;text-align:left;transition:color calc(.2s * var(--animd))}
 .tgrp-h:hover{color:var(--fg)}
 .tgrp-ic{display:flex;flex:none}.tgrp-ic svg{width:14px;height:14px}
@@ -821,16 +822,22 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 #toast{position:fixed;left:50%;bottom:calc(60px + env(safe-area-inset-bottom,0px));transform:translate(-50%,20px);background:var(--fg);color:var(--bg);padding:9px 16px;border-radius:10px;opacity:0;pointer-events:none;transition:opacity calc(.35s * var(--animd)),transform calc(.5s * var(--animd)) cubic-bezier(.16,.84,.3,1);z-index:140}
 #toast.show{opacity:1;transform:translate(-50%,0)}
 /* 自写的确认框：居中弹层 + 背景模糊（不用浏览器的 window.confirm） */
-#cfm{position:fixed;inset:0;z-index:120;display:grid;place-items:center;padding:20px;
+#cfm,#pib{position:fixed;inset:0;z-index:120;display:grid;place-items:center;padding:20px;
   background:rgba(0,0,0,0);-webkit-backdrop-filter:blur(0);backdrop-filter:blur(0);
   opacity:0;pointer-events:none;
   transition:opacity calc(.28s * var(--animd)) ease,background-color calc(.28s * var(--animd)) ease,backdrop-filter calc(.28s * var(--animd)) ease}
-#cfm.open{opacity:1;pointer-events:auto;background:rgba(0,0,0,.34);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)}
+#cfm.open,#pib.open{opacity:1;pointer-events:auto;background:rgba(0,0,0,.34);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)}
 .cfmb{width:min(400px,92vw);background:var(--bg);border:.5px solid var(--line);border-radius:14px;
   padding:22px 24px 18px;box-shadow:0 24px 64px rgba(0,0,0,.34);
   opacity:0;transform:translateY(10px) scale(.97);
   transition:opacity calc(.26s * var(--animd)) ease,transform calc(.34s * var(--animd)) cubic-bezier(.16,.84,.3,1)}
 #cfm.open .cfmb{opacity:1;transform:none}
+#pib.open .cfmb{opacity:1;transform:none}
+/* 输入弹窗（promptBox）：单行输入 + 确定 / 取消，卡片样式复用 .cfmb */
+.pibi{width:100%;margin:14px 0 0;padding:9px 12px;font:13px var(--sans);color:var(--fg);
+  background:var(--input);border:.5px solid var(--line);border-radius:8px;outline:none}
+.pibi:focus{border-color:var(--accent-focus)}
+.pibi::placeholder{color:var(--fg2);opacity:.7}
 .cfmt{font:400 15px/1.55 var(--sans);color:var(--fg);white-space:pre-wrap;word-break:break-word}
 /* 危险确认：红色左边条 + 警示图标；武装期确定键置灰（D-07） */
 .cfmb.danger{border-left:3px solid var(--danger-text)}
@@ -1452,6 +1459,10 @@ body.dragging #main{outline:2px dashed var(--accent);outline-offset:-8px}
 .foldsent{display:flex;justify-content:center;padding:10px 0 4px}
 .foldsent .btn{font-size:12px;color:var(--fg2);padding:5px 14px;border-radius:99px;background:var(--hov);border:0}
 .foldsent .btn:hover{color:var(--fg)}
+/* 超长输出截断：提示行 + 展开按钮（工具卡输出体、文件预览共用） */
+.caprow{display:flex;align-items:center;justify-content:center;gap:10px;opacity:.62;
+  font-size:11px;padding:6px 0;white-space:normal}
+.caprow .btn{font-size:11px;padding:3px 12px}
 
 /* ============ 快捷键面板 ============ */
 #kbd{position:fixed;inset:0;z-index:96;display:none;place-items:center;background:rgba(0,0,0,.38);-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px)}
@@ -2108,6 +2119,11 @@ body.r2-ws-drag #r2-ws{transition:none}
   <div class="cfmt"></div>
   <div class="cfma"><button class="btn ghost" data-cf="0"></button><button class="btn danger" data-cf="1"></button></div>
 </div></div>
+<div id="pib"><div class="cfmb">
+  <div class="cfmt"></div>
+  <input class="pibi" type="text" spellcheck="false" autocomplete="off">
+  <div class="cfma"><button class="btn ghost" data-pi="0"></button><button class="btn" data-pi="1"></button></div>
+</div></div>
 <div id="toast"></div>
 <div id="cm"></div>
 <input type="file" id="fileIn" multiple hidden>
@@ -2288,6 +2304,7 @@ const L = {
     sp_changes_empty:'本轮没有文件改动（可能已全部撤销）',
     sp_changes_open:'打开文件',
     chg_undo_done:'已回退 {n} 个文件', chg_undone_tip:'本轮改动已回退',
+    body_cut_more:'…（输出过长，仅保留头尾，共 {n} 行）', body_showall:'显示全部',
     dk_agents:'后台智能体', dk_terms:'后台终端', dk_goal:'目标与阶段',
     dk_idle:'空闲', dk_thinking:'思考中', dk_writing:'输出中', dk_tool:'执行工具',
     dk_none_agents:'当前没有后台智能体在跑', dk_none_terms:'还没有后台终端会话',
@@ -2558,6 +2575,7 @@ const L = {
     sp_changes_empty:'No file changes in this turn (possibly all reverted)',
     sp_changes_open:'Open file',
     chg_undo_done:'Reverted {n} file(s)', chg_undone_tip:'Turn changes reverted',
+    body_cut_more:'… (output truncated, head & tail kept, {n} lines total)', body_showall:'Show all',
     dk_agents:'Agents', dk_terms:'Terminals', dk_goal:'Goal & stage',
     dk_idle:'Idle', dk_thinking:'Thinking', dk_writing:'Writing', dk_tool:'Running tool',
     dk_none_agents:'No background agents', dk_none_terms:'No background terminals',
@@ -3108,6 +3126,53 @@ function confirmBox(message, opts) {
     }
     // 焦点落在取消按钮上（危险确认默认不预聚焦确定键），回车/空格由 onKey 分流。
     setTimeout(() => (danger ? cancelBtn : okBtn).focus(), 60);
+  });
+}
+
+/* ---- 自写的输入框 ----------------------------------------------------
+   对标 confirmBox：替换 window.prompt。原生弹窗在 WebView 里样式突兀、
+   阻塞整个渲染进程，还顶着系统浏览器的域名标题（如「127.0.0.1:7789 显示」）。
+   返回 Promise<string|null>：确定 → 输入值；取消 / Esc / 点背景 → null。 */
+function promptBox(message, opts) {
+  opts = opts || {};
+  const z = S.lang === 'zh';
+  const wrap = $('#pib');
+  const box = wrap.querySelector('.cfmb');
+  const inp = box.querySelector('.pibi');
+  box.querySelector('.cfmt').textContent = message || '';
+  inp.value = opts.value || '';
+  inp.placeholder = opts.placeholder || '';
+  const okBtn = box.querySelector('[data-pi="1"]');
+  const cancelBtn = box.querySelector('[data-pi="0"]');
+  okBtn.textContent = opts.ok || (z ? '确定' : 'OK');
+  cancelBtn.textContent = z ? '取消' : 'Cancel';
+  wrap.setAttribute('role', 'dialog');
+  wrap.setAttribute('aria-modal', 'true');
+
+  return new Promise(resolve => {
+    let done = false;
+    const prevFocus = document.activeElement;
+    const finish = v => {
+      if (done) return;
+      done = true;
+      document.removeEventListener('keydown', onKey, true);
+      wrap.classList.remove('open');
+      document.body.classList.remove('modal-open');
+      if (prevFocus && prevFocus.focus) { try { prevFocus.focus(); } catch (e) {} }
+      resolve(v);
+    };
+    const onKey = e => {
+      if (e.key === 'Escape') { e.preventDefault(); finish(null); }
+      else if (e.key === 'Enter') { e.preventDefault(); finish(inp.value); }
+    };
+    okBtn.onclick = () => finish(inp.value);
+    cancelBtn.onclick = () => finish(null);
+    // 点背景 = 取消
+    wrap.onclick = e => { if (e.target === wrap) finish(null); };
+    document.addEventListener('keydown', onKey, true);
+    document.body.classList.add('modal-open');
+    wrap.classList.add('open');
+    setTimeout(() => { inp.focus(); inp.select(); }, 60);
   });
 }
 
@@ -3962,15 +4027,17 @@ const TNAV = { items: [], active: -1, hover: -1, timer: 0 };
 
 /** 建目录：只记节点与轮次顶位；摘要文字在悬停时现算，流式期间不反复读全文。 */
 function tnavBuild() {
-  const us = [...feed.children].filter(n => n.classList.contains('u'));
-  const items = us.map(u => {
+  // 真折叠的早期轮次不在 DOM 里：从折叠快照（FOLD.items）补进轨道，
+  // top 记 0（即占位条位置），点击时先展开再定位。
+  const pre = (FOLD && FOLD.box.isConnected) ? FOLD.items : [];
+  const us = [...feed.children].filter(n => n.classList.contains('u')).map(u => {
     let a = null;
     for (let n = u.nextElementSibling; n && !n.classList.contains('u'); n = n.nextElementSibling) {
       if (n.classList.contains('a')) a = n;
     }
     return { el: u, a: a, top: u.offsetTop };
   });
-  TNAV.items = items;
+  TNAV.items = pre.concat(us);
   tnavPaint();
   tnavTrack();
 }
@@ -4071,6 +4138,12 @@ if (tnavRail) {
     const it = b && TNAV.items[+b.dataset.i];
     if (!it) return;
     stick = false;
+    // 折叠轮次先展开再定位：detach 的节点 offsetTop 无意义，展开后同序号即原位。
+    if (it.folded && expandFolded()) {
+      tnavBuild();
+      const el2 = TNAV.items[+b.dataset.i] && TNAV.items[+b.dataset.i].el;
+      if (el2) { chat.scrollTo({ top: Math.max(0, el2.offsetTop - 16), behavior: 'smooth' }); return; }
+    }
     chat.scrollTo({ top: Math.max(0, it.el.offsetTop - 16), behavior: 'smooth' });
   };
 }
@@ -5752,6 +5825,42 @@ function labelFor(d, tool) {
   return t('done_label');
 }
 
+/* ---- 超长输出截断：头尾保留 + 一键展开 ----
+   shell 输出 / 大文件读取 / 大 diff 动辄几千行，整树进 DOM 是长会话内存
+   与滚动卡顿的大头。超过阈值只画头尾，展开按钮按需重建全量（用户显式
+   要全量时才付出那份内存）。 */
+const BODY_CAP_CHARS = 20000;
+const BODY_CAP_LINES = 400;
+
+/** 截断提示行（行数组渲染器用，拼进 innerHTML）。 */
+function capNoteHtml(total) {
+  return '<div class="caprow"><span>' + esc(t('body_cut_more').replace('{n}', total)) + '</span></div>';
+}
+
+/** 展开按钮：点击后移除自身及同排提示，调 onAll 重画全量。 */
+function capAllBtn(onAll) {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'btn';
+  btn.textContent = t('body_showall');
+  btn.onclick = onAll;
+  return btn;
+}
+
+/** 纯文本体截断：head + 行数提示 + tail，展开后替换为全文。 */
+function capTextInto(el, full) {
+  const s = String(full == null ? '' : full);
+  const lines = s.split('\n');
+  if (s.length <= BODY_CAP_CHARS && lines.length <= BODY_CAP_LINES) {
+    el.textContent = s;
+    return;
+  }
+  el.textContent = lines.slice(0, 120).join('\n') + '\n' +
+    t('body_cut_more').replace('{n}', lines.length) + '\n' +
+    lines.slice(-80).join('\n');
+  el.append(capAllBtn(() => { el.textContent = s; }));
+}
+
 function fillToolCard(e, display, ok, title) {
   if (!e) return;
   const stTx = e.querySelector('.st-tx');
@@ -5804,7 +5913,8 @@ function fillToolCard(e, display, ok, title) {
     try { pretty = JSON.stringify(JSON.parse(pretty), null, 2); } catch (err) {}
     const raw = document.createElement('div');
     raw.className = 'df rawargs';
-    raw.textContent = toolName + '(' + pretty + ')';
+    // 与 showArgsBody 同款：超大入参（write_file 全文）截断，避免整块噪音。
+    raw.textContent = toolName + '(' + (pretty.length > 4000 ? pretty.slice(0, 4000) + '\n…' : pretty) + ')';
     body.append(raw);
   }
 
@@ -5815,26 +5925,52 @@ function fillToolCard(e, display, ok, title) {
     diff.textContent = t('rdn').replace('{n}', display.total || 0);
     const df = document.createElement('div');
     df.className = 'df';
-    df.innerHTML = (display.lines || [])
-      .map(l => '<div><i class="ln">' + l.n + '</i>' + esc(l.text) + '</div>')
-      .join('');
+    const rows = display.lines || [];
+    const paintRead = ls => {
+      df.innerHTML = ls.map(l => '<div><i class="ln">' + l.n + '</i>' + esc(l.text) + '</div>').join('');
+    };
+    if (rows.length > BODY_CAP_LINES) {
+      paintRead(rows.slice(0, 280));
+      df.insertAdjacentHTML('beforeend', capNoteHtml(rows.length));
+      df.insertAdjacentHTML('beforeend',
+        rows.slice(-100).map(l => '<div><i class="ln">' + l.n + '</i>' + esc(l.text) + '</div>').join(''));
+      df.append(capAllBtn(() => paintRead(rows)));
+    } else {
+      paintRead(rows);
+    }
     body.append(df);
   } else if (display.kind === 'diff') {
     diff.innerHTML = '<span class="add">+' + (display.added || 0) + '</span> <span class="del">-' + (display.removed || 0) + '</span>';
     const df = document.createElement('div');
     df.className = 'df';
-    df.innerHTML = (display.lines || []).map(l => {
-      const cls = l.sign === '+' ? 'ad' : l.sign === '-' ? 'rm' : '';
-      const no = l.old != null ? l.old : (l.new != null ? l.new : '');
-      return '<div class="' + cls + '"><i class="ln">' + no + '</i>' + esc(l.text) + '</div>';
-    }).join('');
+    const paintDiff = ls => {
+      df.innerHTML = ls.map(l => {
+        const cls = l.sign === '+' ? 'ad' : l.sign === '-' ? 'rm' : '';
+        const no = l.old != null ? l.old : (l.new != null ? l.new : '');
+        return '<div class="' + cls + '"><i class="ln">' + no + '</i>' + esc(l.text) + '</div>';
+      }).join('');
+    };
+    const rows = display.lines || [];
+    if (rows.length > BODY_CAP_LINES) {
+      paintDiff(rows.slice(0, 280));
+      df.insertAdjacentHTML('beforeend', capNoteHtml(rows.length));
+      df.insertAdjacentHTML('beforeend',
+        rows.slice(-100).map(l => {
+          const cls = l.sign === '+' ? 'ad' : l.sign === '-' ? 'rm' : '';
+          const no = l.old != null ? l.old : (l.new != null ? l.new : '');
+          return '<div class="' + cls + '"><i class="ln">' + no + '</i>' + esc(l.text) + '</div>';
+        }).join(''));
+      df.append(capAllBtn(() => paintDiff(rows)));
+    } else {
+      paintDiff(rows);
+    }
     body.append(df);
   } else if (display.kind === 'shell') {
     const pre = document.createElement('div');
     pre.className = 'df';
     pre.style.whiteSpace = 'pre-wrap';
-    pre.textContent = '$ ' + display.command + '\n' + (display.stdout || '') +
-      (display.stderr ? '\n[stderr]\n' + display.stderr : '');
+    capTextInto(pre, '$ ' + display.command + '\n' + (display.stdout || '') +
+      (display.stderr ? '\n[stderr]\n' + display.stderr : ''));
     body.append(pre);
   } else if (display.kind === 'ask') {
     const d = document.createElement('div');
@@ -5912,7 +6048,7 @@ function fillToolCard(e, display, ok, title) {
     d.className = 'df';
     d.style.padding = '10px 12px';
     d.style.whiteSpace = 'pre-wrap';
-    d.textContent = display.text || '';
+    capTextInto(d, display.text || '');
     body.append(d);
   }
   // Cards stay collapsed: the header line carries the summary and clicking
@@ -7449,6 +7585,7 @@ async function clearConv() {
       await api('/sessions/' + conv.id + '/messages', { method: 'DELETE', body: { from: 0 } });
     }
     releaseFeedBlobs();
+    discardFold();
     feed.innerHTML = '';
     resetTurn();
     // 服务端已从 0 截断：之前暂存的编辑下标全部失效，别再拿它去 DELETE。
@@ -8301,12 +8438,14 @@ async function addFiles(list) {
  * 回收，切一次会话就漏一批；这里在清空 feed 之前统一 revoke。
  */
 function releaseFeedBlobs() {
-  feed.querySelectorAll('img[src^="blob:"]').forEach(im => {
+  // 已折叠（detach 出文档）的早期轮次也要扫：querySelectorAll 够不到它们。
+  const hosts = FOLD && FOLD.box.isConnected ? [feed].concat(FOLD.hidden) : [feed];
+  hosts.forEach(host => host.querySelectorAll('img[src^="blob:"]').forEach(im => {
     const u = im.getAttribute('src');
     if (!u) return;
     try { URL.revokeObjectURL(u); } catch (e) {}
     OBJ_URLS.delete(u);
-  });
+  }));
 }
 
 function renderAtts() {
@@ -8862,6 +9001,10 @@ async function openSession(id, focusMsg) {
       if (my !== openTok) return;
     }
     conv = { id, title: (CONVS.find(c => c.id === id) || {}).t || '' };
+    // 切换即清零状态栏：否则在 r2SyncStatusBar 回填到达前，底部弹层里挂着
+    // 上一个会话的模型用时/工具用时/TTFT/上下文构成——「切换后模型信息失效」
+    // 的来源。回填（r2SyncStatusBar）与实时 status 事件随后覆盖。
+    resetStatus();
     // 进会话即消费侧栏状态小球（不管什么颜色，点进来就清除）。
     consumeDot(id);
     // 「当前会话不显示球」随切换实时变化：进隐、离显（转圈的离开又出现）。
@@ -8870,6 +9013,7 @@ async function openSession(id, focusMsg) {
     // 加载成功才丢弃「待发送的编辑」：失败时还得留在原视图里（见 catch）。
     pendingEdit = null;
     releaseFeedBlobs();
+    discardFold();
     feed.innerHTML = '';
     resetTurn();
     document.body.classList.add('chat');
@@ -9104,13 +9248,9 @@ async function openSession(id, focusMsg) {
         .find(n => n.dataset.mi === String(focusMsg));
       let hit = byMi();
       // 目标消息被早期折叠收进占位条：先展开折叠再定位，保证跳转不丢消息（B-03）。
-      if (!hit) {
-        const fs = feed.querySelector(':scope > .foldsent');
-        if (fs && fs._hidden) {
-          fs._hidden.forEach(n2 => feed.insertBefore(n2, fs));
-          fs.remove();
-          hit = byMi();
-        }
+      if (!hit && FOLD && FOLD.box.isConnected) {
+        expandFolded();
+        hit = byMi();
       }
       if (hit) {
         hit.scrollIntoView({ block: 'center', behavior: 'smooth' });
@@ -9278,7 +9418,10 @@ async function restamp() {
   // 下标回填成功后重新点亮编辑/删除/重试按钮（渲染时 idx 未知会先挂 .off）
   const light = n => n.querySelectorAll('.ib.off').forEach(b => b.classList.remove('off'));
   let ni = 0;
-  for (let i = 0; i < msgs.length && ni < nodes.length; i++) {
+  // 真折叠后早期轮次不在 feed 里：它们消费掉的存储前缀由 FOLD.msgEnd 记账，
+  // 配对直接从那个下标继续（折叠在 restamp 之后执行，节点上已有准确盖章）。
+  const iStart = (FOLD && FOLD.box.isConnected) ? (FOLD.msgEnd || 0) : 0;
+  for (let i = iStart; i < msgs.length && ni < nodes.length; i++) {
     const m = msgs[i];
     if (m.hidden) continue;   // hidden 不渲染成气泡，也不参与下标配对
     const tx = normParts(m.parts).filter(p => p.k === 'text');
@@ -9314,6 +9457,14 @@ async function restamp() {
       }
     }
   }
+  // 折叠前缀与存储脱节（如 /compact 重写了历史，msgEnd 前后对不上）：
+  // 展开全量重新配对一次。只在「一个节点都没配上」时触发，避免把正常
+  // 的尾部新增也当成脱节。
+  if (iStart > 0 && FOLD && FOLD.box.isConnected && nodes.length &&
+      !nodes.some(n => n.dataset.mi !== undefined)) {
+    expandFolded();
+    return restamp();
+  }
   // 配对循环可能在中途 break（DOM 与存储短暂不同步），剩下的节点就永远
   // 停在 .off——看起来像按钮坏了。只要回填到了存储下标，这条消息就是
   // 可编辑/重试/删除的，所以兜底点亮。
@@ -9331,14 +9482,26 @@ async function restamp() {
  * 的占位条。记忆点：思考块 / 工具卡 / Markdown 渲染出的节点是重对象，
  * 几百条消息的会话原先会堆出上万节点。
  *
+ * 真折叠（detach）：早期轮次整体移出文档树。Blink 的 LayoutObject /
+ * PaintLayer 随之释放，滚动、样式重算、绘制都不再触碰这部分；滚动尺由
+ * 占位条的 minHeight 顶住。JS 侧节点暂由 FOLD 持有（供展开恢复），切走
+ * 会话 / 清空对话时 discardFold() 一次性放给 GC。
+ *
  * 用「用户轮次」作为切分单位：一个用户提问 + 它后面的助手回复算一轮。
  * 已经被用户点开过的会话不重复折叠（避免滚动位置跳动）。
  */
 const FOLD_KEEP_TURNS = 30;
+
+/** 当前折叠状态：{ box, hidden, items, msgEnd }。items 是 detach 前记下的
+ *  「用户气泡 → 助手气泡」配对快照（detach 后 sibling 关系不再可靠，轨道
+ *  tnavBuild 改用这份快照）；msgEnd 是被折叠前缀消费掉的存储消息数（独占
+ *  上界），restamp 用它续配对。 */
+let FOLD = null;
+
 function foldEarlyTurns() {
   if (!feed) return;
-  // 已经折叠过的（有 .foldsent）就跳过，防止反复处理。
-  if (feed.querySelector(':scope > .foldsent')) return;
+  // 已经折叠过就跳过，防止反复处理。
+  if (FOLD && FOLD.box.isConnected) return;
   const kids = [...feed.children];
   // 用户轮次边界：用户气泡 class 里带 .u（提问气泡）。
   const userIdx = [];
@@ -9349,22 +9512,56 @@ function foldEarlyTurns() {
   const hidden = kids.slice(0, cut);
   // 只折叠「确实有内容」的那部分：全是空白就不值得做一个占位条。
   if (!hidden.length) return;
-  // 折叠前量一次高度：占位条保留估算高度，滚动尺不至于塌成一条；
-  // 被隐藏节点仍挂在 box._hidden 上，跳转/展开时按原序恢复。
+  // 折叠前量一次高度：占位条保留估算高度，滚动尺不至于塌成一条。
   const est = hidden.reduce((s, n2) => s + (n2.offsetHeight || 0), 0);
+  // detach 前把轮次配对记下来（见 FOLD.items 注释）。
+  const items = [];
+  for (const u of hidden) {
+    if (!u.classList.contains('u')) continue;
+    let a = null;
+    for (let n2 = u.nextElementSibling; n2 && !n2.classList.contains('u'); n2 = n2.nextElementSibling) {
+      if (n2.classList.contains('a')) a = n2;
+    }
+    items.push({ el: u, a: a, top: 0, folded: true });
+  }
   const box = document.createElement('div');
   box.className = 'foldsent';
   const n = userIdx.length - FOLD_KEEP_TURNS;
   box.innerHTML = '<button class="btn">' + esc(t('fold_early').replace('{n}', n)) + '</button>';
   if (est > 0) box.style.minHeight = Math.min(est, 240) + 'px';
-  box._hidden = hidden;
   feed.insertBefore(box, hidden[0]);
-  hidden.forEach(n2 => { n2.style.display = 'none'; });
-  box.querySelector('button').onclick = () => {
-    hidden.forEach(n2 => { n2.style.display = ''; });
-    box.remove();
+  hidden.forEach(n2 => n2.remove());
+  box.querySelector('button').onclick = () => expandFolded();
+  FOLD = {
+    box: box,
+    hidden: hidden,
+    items: items,
+    msgEnd: hidden.reduce((mx, n2) => Math.max(mx, +(n2.dataset.miEnd || 0)), 0),
   };
+  tnavSchedule();
 }
+
+/** 展开折叠：按原序把早期轮次插回占位条原位，重压工具运行组、整理收尾
+ *  控件并重建轨道。返回是否有实际展开。 */
+function expandFolded() {
+  if (!FOLD || !FOLD.box.isConnected) { FOLD = null; return false; }
+  const box = FOLD.box;
+  const hidden = FOLD.hidden;
+  FOLD = null;
+  hidden.forEach(n2 => feed.insertBefore(n2, box));
+  box.remove();
+  hidden.forEach(n2 => {
+    const ab = n2.classList && n2.classList.contains('a') ? n2.querySelector('.ab') : null;
+    if (ab) compactToolRuns(ab);
+  });
+  tidyTurnFooters();
+  tnavSchedule();
+  return true;
+}
+
+/** 丢弃折叠持有的节点引用：切走会话 / 清空对话时调用，detached 树整体
+ *  交给 GC。早轮次的内容以存储为准，重新打开会重渲。 */
+function discardFold() { FOLD = null; }
 
 /**
  * turn.end 兜底：以存储为准重渲染最后一个助手气泡的答案文本。 * 流式期间在途文本只活在 DOM 里——切换会话、SSE 断连重连、渲染中的任何
@@ -9645,6 +9842,13 @@ function closeChatMenu() {
   document.querySelectorAll('.rc.menu').forEach(e => e.classList.remove('menu'));
 }
 
+/* 全局屏蔽原生右键菜单：桌面壳里弹出系统浏览器的右键（Edge 风格、带
+   域名/检查等项）非常割裂。应用自己的右键面（会话行 openChatMenu、
+   工作区文件 r2CtxShow、侧栏最大化 #spbtn）都在 target/bubble 阶段各自
+   处理并展示页内菜单，capture 阶段的 preventDefault 不影响它们执行；
+   其余区域右键一律无操作。文本粘贴走 Ctrl+V / Ctrl+C，不受影响。 */
+document.addEventListener('contextmenu', e => { e.preventDefault(); }, true);
+
 /** 文件回退：列出该会话的检查点，一键恢复该轮改动前的文件状态。 */
 async function openRewind(c) {
   const z = S.lang === 'zh';
@@ -9839,7 +10043,7 @@ function newChat() {
   refreshGoalBadge();
   document.body.classList.remove('chat');
   apply();
-  setTimeout(() => { if (!conv) { releaseFeedBlobs(); feed.innerHTML = ''; } }, A(600));
+  setTimeout(() => { if (!conv) { releaseFeedBlobs(); discardFold(); feed.innerHTML = ''; } }, A(600));
   document.querySelectorAll('.rc.on').forEach(e => e.classList.remove('on'));
   // 未发送的附件预览也要回收，否则新对话里这些 blob 再没有节点引用它们。
   ATTS.forEach(a => {
@@ -10866,9 +11070,9 @@ function panel() {
             return;
           }
           if (e.target.closest('[data-mcp-add]')) {
-            const name = prompt(t('mcp_pname'), '');
+            const name = await promptBox(t('mcp_pname'));
             if (!name) return;
-            const cmd = prompt(t('mcp_pcmd'), 'npx -y @modelcontextprotocol/server-filesystem .');
+            const cmd = await promptBox(t('mcp_pcmd'), { value: 'npx -y @modelcontextprotocol/server-filesystem .' });
             if (!cmd) return;
             const parts = cmd.split(/\s+/);
             const d = await (await fetch('/api/mcp', { headers: { 'X-Parable-Token': TOKEN } })).json();
@@ -10954,7 +11158,7 @@ function panel() {
             return;
           }
           if (e.target.closest('[data-prof-save]')) {
-            const name = prompt(t('prof_pname'), '');
+            const name = await promptBox(t('prof_pname'));
             if (!name) return;
             (S.profiles = S.profiles || []).push({
               id: 'prof_' + Date.now().toString(36), name: name,
@@ -16601,10 +16805,18 @@ function r2TokLine(line) {
   return out + esc(line.slice(last));
 }
 
+/** 文件预览渲染上限：万行级文件整树进 DOM 会拖垮侧栏，超限只画头 3000 行。 */
+const R2_CAP_LINES = 3000;
+
 function r2Highlight(text) {
-  return text.split('\n').map((ln, i) =>
+  const all = String(text || '').split('\n');
+  const lines = all.length > R2_CAP_LINES ? all.slice(0, R2_CAP_LINES) : all;
+  return lines.map((ln, i) =>
     '<div class="r2-code-line"><span class="r2-ln">' + (i + 1) + '</span>' + r2TokLine(ln) + '</div>'
-  ).join('');
+  ).join('') +
+    (all.length > R2_CAP_LINES
+      ? '<div class="caprow"><span>' + esc(t('body_cut_more').replace('{n}', all.length)) + '</span></div>'
+      : '');
 }
 
 /* ---------- 右：Environment / Connectors ---------- */
@@ -16729,6 +16941,11 @@ async function r2SyncStatusBar(sid) {
   set('sb-stats-tx', rounds + ' ' + t('u_turns') + ' ' + steps + ' ' + t('u_steps') + ' · ' + tpsTx + ' tok/s');
   set('p-stats-top', rounds + ' ' + t('u_turns') + ' ' + steps + ' ' + t('u_steps'));
   set('p-tps', tpsTx + ' tok/s');
+  // 计时字段与上下文细分：与 applyStatus 对齐（历史会话后端按设计回 0，
+  // 显示 0 秒而不是上一个会话的残留值——这正是切换后「模型信息失效」的来源）。
+  set('p-model-ms', fmtMs(tn.modelMs || 0));
+  set('p-tool-ms', fmtMs(tn.toolMs || 0));
+  set('p-ttft', fmtMs(tn.ttftMs || 0));
   const total = tk.total || 0;
   const hit = ca.supported && ca.hitRate != null ? Math.round(ca.hitRate * 100) : 0;
   set('sb-token-tx', kfmt(total) + ' tok · ' + t('cache_hit') + ' ' + hit + '%');
@@ -16749,6 +16966,16 @@ async function r2SyncStatusBar(sid) {
       el.style.color = pct >= warn + 10 ? '#d4574c' : pct >= warn ? '#e0a03c' : '';
     }
   }
+  // 上下文构成条 + 分类数值：运行中有真实细分；历史会话全 0 → 条宽归零，
+  // 不再保留上一个会话的比例。
+  const denom2 = used || 1;
+  const bar = (id, v) => { const el = $('#' + id); if (el) el.style.width = ((v || 0) / denom2 * 100) + '%'; };
+  bar('p-bar-sys', cx.system);
+  bar('p-bar-tools', cx.tools);
+  bar('p-bar-msgs', cx.messages);
+  set('p-sys', '~' + kfmt(cx.system || 0));
+  set('p-tools', '~' + kfmt(cx.tools || 0));
+  set('p-msgs', '~' + kfmt(cx.messages || 0));
 }
 
 /* ---------- 初始化 ---------- */
