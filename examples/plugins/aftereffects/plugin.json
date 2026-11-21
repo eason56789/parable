@@ -1,0 +1,85 @@
+{
+  "name": "After Effects 控制",
+  "description": "让 Agent 驱动本机 After Effects：通过 Startup 守护桥执行 ExtendScript（AE 2025+ 的 -r/-s 命令行脚本通道已废弃，本插件采用 nexrender 同款的桥接架构）、查询安装信息、用 aerender 渲染工程。首次使用需要一次性设置：在 AE 设置里开启「允许脚本写入文件和访问网络」。",
+  "version": "1.1.0",
+  "commands": [
+    {
+      "name": "ae",
+      "description": "在 After Effects 里执行一段 ExtendScript",
+      "template": "请使用 ae_script 工具在 After Effects 中完成以下任务。code 用 ExtendScript（ES3 语法，不要用 let/const/箭头函数），需要结果时在 IIFE 里 return 一个字符串；创建合成、图层、特效后要把关键信息（合成名、图层数、项目路径等）拼进返回值：\n{{input}}"
+    }
+  ],
+  "tools": [
+    {
+      "name": "ae_info",
+      "description": "探测本机 After Effects 安装：AfterFX.exe / aerender.exe 路径与文件版本号、桥接守护安装状态、脚本写文件权限状态。只读元数据，不会启动 AE。",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      },
+      "language": "powershell",
+      "code": "# ae_info —— 探测 AE 安装 + 桥接/权限自检（只读，不启动 AE）\r\n$ErrorActionPreference = 'Stop'\r\n$roots = @('C:\\Program Files\\Adobe', 'C:\\Program Files (x86)\\Adobe')\r\n$dirs = @()\r\nforeach ($r in $roots) {\r\n  if (Test-Path $r) {\r\n    $dirs += Get-ChildItem -Path $r -Directory -Filter 'Adobe After Effects *' -ErrorAction SilentlyContinue\r\n  }\r\n}\r\n$dirs = $dirs | Sort-Object Name -Descending\r\nif (-not $dirs -or $dirs.Count -eq 0) {\r\n  Write-Output '未找到 After Effects：已扫描 C:\\Program Files\\Adobe 与 C:\\Program Files (x86)\\Adobe 下的 Adobe After Effects * 目录。'\r\n  exit 2\r\n}\r\n$found = $false\r\nforeach ($d in $dirs) {\r\n  $exe = Join-Path $d.FullName 'Support Files\\AfterFX.exe'\r\n  $ar  = Join-Path $d.FullName 'Support Files\\aerender.exe'\r\n  if (Test-Path $exe) {\r\n    $found = $true\r\n    $v = (Get-Item $exe).VersionInfo.FileVersion\r\n    Write-Output (\"AE 安装：\" + $exe)\r\n    Write-Output (\"版本：\" + $v)\r\n    if (Test-Path $ar) { Write-Output (\"渲染器：\" + $ar) }\r\n  }\r\n}\r\nif (-not $found) { Write-Output '找到目录但目录里没有 Support Files\\AfterFX.exe（安装可能不完整）'; exit 2 }\r\n# 桥接守护自检\r\n$aeData = Get-ChildItem \"$env:APPDATA\\Adobe\\After Effects\" -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^\\d+\\.\\d+$' } | Sort-Object Name -Descending | Select-Object -First 1\r\nif ($aeData) {\r\n  $bridge = Join-Path $aeData.FullName 'Scripts\\Startup\\parable-bridge.jsx'\r\n  if (Test-Path $bridge) { Write-Output ('桥接守护：已安装 ' + $bridge) }\r\n  else { Write-Output '桥接守护：未安装（ae_script 首次调用会自动安装）' }\r\n  # 脚本写文件权限（首选项落盘于 AE 退出时，运行中读取的是上次退出状态）\r\n  $prefHit = Get-ChildItem $aeData.FullName -Filter '*.txt' -ErrorAction SilentlyContinue | ForEach-Object { Select-String -Path $_.FullName -Pattern 'Allow Scripts to Write Files' -SimpleMatch -ErrorAction SilentlyContinue } | Select-Object -First 1\r\n  if ($prefHit) { Write-Output ('脚本写文件权限（上次退出时状态）：' + $prefHit.Line.Trim()) }\r\n  else { Write-Output '脚本写文件权限：首选项里没有该键（新装默认关闭）。请在 AE 「设置 > 脚本和表达式」里开启「允许脚本写入文件和访问网络」。' }\r\n}\r\nWrite-Output '通道说明：AE 2025+ 的 AfterFX.exe -r/-s 脚本通道已废弃（实测与社区一致），本插件用 Startup 守护桥 + 收件箱轮询。'\r\n"
+    },
+    {
+      "name": "ae_script",
+      "description": "在 After Effects 中执行 ExtendScript（ES3 语法）并返回结果。原理：自装 Startup 守护桥（AE 启动时自动加载），把载荷写进收件箱由桥执行。若 AE 未运行会先启动它（冷启动 40-90 秒）。需要一次性设置：AE 「设置 > 脚本和表达式 > 允许脚本写入文件和访问网络」。需要结果时在 code 里用 IIFE return 一个字符串。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "ExtendScript 代码（ES3：不用 let/const/箭头函数/JSON）。写法：var r = (function(){ ...; return '文本结果'; })();"
+          },
+          "timeout": {
+            "type": "integer",
+            "description": "等待结果的秒数，默认 100，最大 110。"
+          }
+        },
+        "required": ["code"]
+      },
+      "language": "powershell",
+      "code": "# ae_script —— Startup 守护桥 + 收件箱轮询\r\n$ErrorActionPreference = 'Stop'\r\n$a = $null\r\ntry { $a = $env:PARABLE_TOOL_ARGS | ConvertFrom-Json } catch { $a = $null }\r\nif (-not $a -or -not $a.code) { Write-Output '缺少 code 参数（ExtendScript 代码）'; exit 2 }\r\n$code = [string]$a.code\r\n$timeoutSec = 100\r\nif ($a.timeout) { $timeoutSec = [Math]::Min(110, [int]$a.timeout) }\r\n\r\n# 1. 定位最新 AE（可执行文件 + 用户脚本目录）\r\n$exe = $null; $aeVerDir = $null\r\nforeach ($root in @('C:\\Program Files\\Adobe', 'C:\\Program Files (x86)\\Adobe')) {\r\n  if (Test-Path $root) {\r\n    foreach ($d in (Get-ChildItem -Path $root -Directory -Filter 'Adobe After Effects *' -ErrorAction SilentlyContinue | Sort-Object Name -Descending)) {\r\n      $cand = Join-Path $d.FullName 'Support Files\\AfterFX.exe'\r\n      if ((Test-Path $cand) -and (-not $exe)) { $exe = $cand }\r\n    }\r\n  }\r\n}\r\nif (-not $exe) { Write-Output '未找到 AfterFX.exe：先运行 ae_info。'; exit 2 }\r\n# 只认纯版本号数据目录（排除 已隔离/old/Logs 等干扰项）\r\n$aeData = Get-ChildItem \"$env:APPDATA\\Adobe\\After Effects\" -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^\\d+\\.\\d+$' } | Sort-Object Name -Descending | Select-Object -First 1\r\nif (-not $aeData) { Write-Output '找不到 %APPDATA%\\Adobe\\After Effects 数据目录（AE 至少完整启动过一次才有）。'; exit 2 }\r\n\r\n# 2. 安装/刷新 Startup 守护桥\r\n$startupDir = Join-Path $aeData.FullName 'Scripts\\Startup'\r\nNew-Item -ItemType Directory -Force -Path $startupDir | Out-Null\r\n$bridgePath = Join-Path $startupDir 'parable-bridge.jsx'\r\n$bridge = @'\r\n// Parable 桥：AE 启动时自动加载，轮询收件箱并执行载荷脚本。\r\n// 载荷通过 File 写结果文件回传——需要「允许脚本写入文件和访问网络」首选项开启。\r\n(function () {\r\n    var TASK = \"(function(){ var t=Folder.temp.fullName; var fs=new Folder(t).getFiles('parable-ae-bridge-*.cmd'); for(var i=0;i<fs.length;i++){ var tf=fs[i]; var pp=''; try{ tf.open('r'); pp=tf.read(); tf.close(); tf.remove(); }catch(eRead){ continue; } if(!pp) continue; try{ var pf=new File(pp); if(pf.exists){ pf.encoding='UTF-8'; pf.open('r'); var code=pf.read(); pf.close(); (new Function(code))(); } }catch(eExec){ var ef=new File(pp+'.err'); try{ ef.open('w'); ef.write('BRIDGE-ERR '+eExec.toString()+' @line '+eExec.line); ef.close(); }catch(e2){} } } })()\";\r\n    try { (new Function(TASK))(); } catch (e0) {}\r\n    try { app.scheduleTask(TASK, 600, true); } catch (e1) {}\r\n})();\r\n'@\r\n$utf8Bom = New-Object System.Text.UTF8Encoding($true)\r\n$needWrite = $true\r\nif (Test-Path $bridgePath) {\r\n    $old = [System.IO.File]::ReadAllText($bridgePath)\r\n    if ($old -eq $bridge) { $needWrite = $false }\r\n}\r\nif ($needWrite) { [System.IO.File]::WriteAllText($bridgePath, $bridge, $utf8Bom); Write-Output ('桥接守护已安装：' + $bridgePath) }\r\n\r\n# 3. 确保 AE 在运行（守护桥随 AE 启动加载）\r\n$coldStart = $false\r\n$running = Get-Process -Name 'AfterFX' -ErrorAction SilentlyContinue\r\nif (-not $running) {\r\n    Start-Process -FilePath $exe | Out-Null\r\n    $coldStart = $true\r\n    Write-Output 'AE 未运行：已启动（冷启动约 40-90 秒，启动完成后守护桥自动就位）。'\r\n}\r\n\r\n# 4. 写载荷与收件箱\r\n$outFile = Join-Path $env:TEMP ('parable-ae-res-' + [guid]::NewGuid().ToString('N') + '.txt')\r\n$outJsx = ($outFile -replace '\\\\', '/')\r\n$payloadFile = Join-Path $env:TEMP ('parable-ae-payload-' + [guid]::NewGuid().ToString('N') + '.jsx')\r\n$wrapper = @\"\r\nvar __P_OUT = `\"$outJsx`\";\r\ntry {\r\n  var __P_RES = (function(){\r\n$code\r\n  })();\r\n  var __P_F = new File(__P_OUT);\r\n  __P_F.encoding = 'UTF-8';\r\n  __P_F.open('w');\r\n  __P_F.write('OK ' + String(__P_RES));\r\n  __P_F.close();\r\n} catch (e) {\r\n  var __P_F2 = new File(__P_OUT);\r\n  __P_F2.encoding = 'UTF-8';\r\n  __P_F2.open('w');\r\n  __P_F2.write('ERR ' + e.toString() + ' (line ' + e.line + ')');\r\n  __P_F2.close();\r\n}\r\n\"@\r\n[System.IO.File]::WriteAllText($payloadFile, $wrapper, $utf8Bom)\r\n$triggerFile = Join-Path $env:TEMP ('parable-ae-bridge-' + [guid]::NewGuid().ToString('N') + '.cmd')\r\n[System.IO.File]::WriteAllText($triggerFile, $payloadFile, (New-Object System.Text.UTF8Encoding($false)))\r\n\r\n# 5. 轮询结果\r\n$deadline = (Get-Date).AddSeconds($timeoutSec)\r\nwhile ((Get-Date) -lt $deadline) {\r\n  Start-Sleep -Milliseconds 800\r\n  if (Test-Path $outFile) {\r\n    $res = [System.IO.File]::ReadAllText($outFile)\r\n    Remove-Item $outFile, $payloadFile -ErrorAction SilentlyContinue\r\n    Write-Output $res\r\n    if ($res -like 'ERR*') { exit 1 }\r\n    exit 0\r\n  }\r\n  if ($coldStart -and -not (Get-Process -Name 'AfterFX' -ErrorAction SilentlyContinue)) {\r\n    break\r\n  }\r\n}\r\nRemove-Item $triggerFile, $payloadFile -ErrorAction SilentlyContinue\r\n\r\n# 6. 超时结构化自诊断\r\nWrite-Output \"TIMEOUT：${timeoutSec}s 内未拿到结果。\"\r\nWrite-Output '按顺序检查：'\r\nif ($coldStart) { Write-Output '1) AE 刚冷启动——等它加载完（窗口出现后）用相同参数重试一次，通常秒回。' }\r\n$prefHit = Get-ChildItem $aeData.FullName -Filter '*.txt' -ErrorAction SilentlyContinue | ForEach-Object { Select-String -Path $_.FullName -Pattern 'Allow Scripts to Write Files' -SimpleMatch -ErrorAction SilentlyContinue } | Select-Object -First 1\r\nif ($prefHit -and $prefHit.Line -match '\" 0\\r?$| 0$') {\r\n  Write-Output '2) 「允许脚本写入文件和访问网络」首选项是关闭的——桥读不到收件箱。在 AE 设置 > 脚本和表达式 里开启后重试（一次性设置）。'\r\n} else {\r\n  Write-Output '2) 确认 AE 设置 > 脚本和表达式 > 「允许脚本写入文件和访问网络」已开启（桥和载荷都需要写文件）。'\r\n}\r\nWrite-Output '3) AE 启动时是否弹了模态警告框——去 AE 窗口点掉（警告内容如有必要请转述给用户）。'\r\nWrite-Output '4) 桥是否加载：AE 菜单 文件 > 脚本 里应能看到 Startup；本工具已在需要时自动安装桥到 Scripts\\Startup\\parable-bridge.jsx。'\r\nexit 3\r\n"
+    },
+    {
+      "name": "ae_render",
+      "description": "用 aerender.exe 渲染 AE 工程（输出到指定路径）。单次上限约 110 秒：大工程/长合成请按帧区间分块（start_frame/end_frame），或让 Parable 用 bash 工具挂后台终端跑完整渲染。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "project": {
+            "type": "string",
+            "description": "aep/aepx 工程文件路径。"
+          },
+          "comp": {
+            "type": "string",
+            "description": "要渲染的合成名（可带 \"comp/子comp\" 路径）。"
+          },
+          "output": {
+            "type": "string",
+            "description": "输出文件路径（含扩展名或帧号模式，如 [#####].png）。"
+          },
+          "start_frame": {
+            "type": "integer",
+            "description": "起始帧。"
+          },
+          "end_frame": {
+            "type": "integer",
+            "description": "结束帧。"
+          },
+          "rs_template": {
+            "type": "string",
+            "description": "可选：渲染设置模板名（-RStemplate）。"
+          },
+          "om_template": {
+            "type": "string",
+            "description": "可选：输出模块模板名（-OMtemplate）。"
+          }
+        },
+        "required": ["project", "output"]
+      },
+      "language": "powershell",
+      "code": "# ae_render —— aerender 渲染，110s 守护\r\n$ErrorActionPreference = 'Stop'\r\n$a = $null\r\ntry { $a = $env:PARABLE_TOOL_ARGS | ConvertFrom-Json } catch { $a = $null }\r\nif (-not $a -or -not $a.project -or -not $a.output) { Write-Output '需要 project 与 output 参数'; exit 2 }\r\n\r\n$ar = $null\r\nforeach ($root in @('C:\\Program Files\\Adobe', 'C:\\Program Files (x86)\\Adobe')) {\r\n  if (Test-Path $root) {\r\n    foreach ($d in (Get-ChildItem -Path $root -Directory -Filter 'Adobe After Effects *' -ErrorAction SilentlyContinue | Sort-Object Name -Descending)) {\r\n      $cand = Join-Path $d.FullName 'Support Files\\aerender.exe'\r\n      if (Test-Path $cand) { if (-not $ar) { $ar = $cand } }\r\n    }\r\n  }\r\n}\r\nif (-not $ar) { Write-Output '未找到 aerender.exe：先运行 ae_info。'; exit 2 }\r\n\r\n$argList = @('-project', ('\"' + $a.project + '\"'))\r\nif ($a.comp) { $argList += @('-comp', ('\"' + $a.comp + '\"')) }\r\nif ($a.rs_template) { $argList += @('-RStemplate', ('\"' + $a.rs_template + '\"')) }\r\nif ($a.om_template) { $argList += @('-OMtemplate', ('\"' + $a.om_template + '\"')) }\r\nif ($a.start_frame) { $argList += @('-s', [string][int]$a.start_frame) }\r\nif ($a.end_frame) { $argList += @('-e', [string][int]$a.end_frame) }\r\n$argList += @('-output', ('\"' + $a.output + '\"'))\r\n\r\n$so = Join-Path $env:TEMP ('parable-ae-rd-' + [guid]::NewGuid().ToString('N') + '.log')\r\n$p = Start-Process -FilePath $ar -ArgumentList $argList -RedirectStandardOutput $so -PassThru -WindowStyle Hidden\r\nWrite-Output ('aerender 已启动 (pid ' + $p.Id + ')')\r\n$deadline = (Get-Date).AddSeconds(110)\r\nwhile (-not $p.HasExited -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 900 }\r\nif (-not $p.HasExited) {\r\n  try { $p.Kill() } catch {}\r\n  $log = if (Test-Path $so) { [System.IO.File]::ReadAllText($so) } else { '' }\r\n  if ($log) { Write-Output ('[已产出日志尾] ' + $log.Substring([Math]::Max(0, $log.Length - 2000))) }\r\n  Write-Output 'TIMEOUT：渲染 110s 未完成已终止。大任务请按帧区间分块（start_frame/end_frame），或用 bash 工具挂后台终端跑完整渲染（不受 120s 限制）。'\r\n  exit 3\r\n}\r\n$log = if (Test-Path $so) { [System.IO.File]::ReadAllText($so) } else { '' }\r\nif ($log) {\r\n  $tail = $log.Substring([Math]::Max(0, $log.Length - 4000))\r\n  Write-Output $tail\r\n}\r\nif ($p.ExitCode -ne 0) { Write-Output ('[aerender 退出码 ' + $p.ExitCode + ']'); exit $p.ExitCode }\r\nRemove-Item $so -ErrorAction SilentlyContinue\r\n"
+    }
+  ],
+  "prompt": "本插件让 Parable 能操作本机 After Effects 2026（C:\\Program Files\\Adobe\\Adobe After Effects 2026\\Support Files\\）。要点：\n- AE 2025+ 已废弃 AfterFX.exe -r/-s 命令行脚本通道（实测脚本不会执行），也移除了 COM 注册。本插件用「Startup 守护桥」：ae_script 会把桥装进 AE 的 Scripts\\Startup（AE 启动自动加载），通过临时收件箱文件投递载荷、结果文件取回。\n- 前提（一次性）：AE 「设置 > 脚本和表达式 > 允许脚本写入文件和访问网络」必须开启——桥读收件箱、载荷写结果都依赖它。未开启时 ae_script 会在诊断里提示。\n- ExtendScript 是 ES3：不要用 let/const、箭头函数、模板字符串、JSON 对象。集合用 for (var i = 0; i < arr.length; i++)。\n- ae_script 的 code 必须是 IIFE 并 return 字符串（无 JSON.stringify）：如 var r = (function(){ var c = app.project.activeItem; return 'comp=' + c.name + ' layers=' + c.numLayers; })();\n- AE 未运行时 ae_script 会自动启动它（冷启动 40-90 秒）；超时后用相同参数重试通常秒回。AE 弹模态警告框时脚本会卡住——需要用户点掉。\n- ae_render 走 aerender.exe，110 秒上限：长渲染用 start_frame/end_frame 分块，或让 Parable 用 bash 工具挂后台终端。\n- app.project 未打开时先建项目：app.newProject()；常用 API：app.project.items.addComp(name,w,h,fps,dur)、comp.layers.addText/addSolid、layer.property('position').setValue(...)、app.project.save(file)。"
+}

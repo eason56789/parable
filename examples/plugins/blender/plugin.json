@@ -1,0 +1,86 @@
+{
+  "name": "Blender 控制",
+  "version": "1.0.0",
+  "description": "让 Agent 通过无头（-b）模式驱动本机 Blender：跑 bpy 脚本、建场景、改模型、渲染帧。安装位置自动探测（PATH / Program Files / 各盘 Steam 库）。",
+  "commands": [
+    {
+      "name": "blender",
+      "description": "在 Blender 里执行一段 bpy 任务",
+      "template": "请使用 blender_run 工具在 Blender 中完成以下任务。用 bpy Python API 写实现代码，注意无头模式没有 UI 反馈，结束后要把结果（对象数、尺寸、导出路径等）print 出来：\n{{input}}"
+    }
+  ],
+  "tools": [
+    {
+      "name": "blender_info",
+      "description": "探测本机 Blender 安装：返回 blender.exe 路径与版本号。不启动完整 Blender 会话，开销很小。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "blender_path": {
+            "type": "string",
+            "description": "可选。手动指定 blender.exe 绝对路径；不填则按 PATH → Program Files → 各盘 Steam 库 顺序自动探测。"
+          }
+        }
+      },
+      "language": "python",
+      "code": "# -*- coding: utf-8 -*-\n'''blender_info —— 探测本机 blender.exe 与版本。'''\nimport glob\nimport json\nimport os\nimport re\nimport shutil\nimport subprocess\nimport sys\n\n\ndef find_blender(explicit=None):\n    cands = []\n    if explicit:\n        cands.append(explicit)\n    p = shutil.which(\"blender\")\n    if p:\n        cands.append(p)\n    # 官方安装目录（常见于 C 盘）\n    cands += glob.glob(r\"C:\\Program Files\\Blender Foundation\\Blender *\\blender.exe\")\n    # Steam 库（扫常见盘符的几种布局）\n    for drive in \"CDEFGH\":\n        cands += glob.glob(rf\"{drive}:\\SteamLibrary\\steamapps\\common\\Blender\\blender.exe\")\n        cands += glob.glob(rf\"{drive}:\\Steam\\steamapps\\common\\Blender\\blender.exe\")\n        cands += glob.glob(rf\"{drive}:\\Program Files (x86)\\Steam\\steamapps\\common\\Blender\\blender.exe\")\n    for c in cands:\n        if c and os.path.isfile(c):\n            return os.path.normpath(c)\n    return None\n\n\ndef main():\n    try:\n        args = json.loads(os.environ.get(\"PARABLE_TOOL_ARGS\") or \"{}\")\n    except ValueError:\n        args = {}\n    exe = find_blender(args.get(\"blender_path\"))\n    if not exe:\n        print(\"未找到 Blender。已尝试：PATH 中的 blender、\"\n              r\"C:\\Program Files\\Blender Foundation\\Blender *\\blender.exe、\"\n              \"C-H 各盘的 SteamLibrary/Steam 目录。\"\n              \"可以用 blender_run/blender_render 的 blender_path 参数手动指定。\")\n        sys.exit(2)\n    try:\n        r = subprocess.run(\n            [exe, \"--version\"], capture_output=True, text=True,\n            timeout=60, errors=\"replace\",\n        )\n        m = re.search(r\"Blender\\s+([^\\n]+)\", r.stdout or \"\")\n        ver = m.group(1).strip() if m else \"未知\"\n    except Exception as e:\n        print(f\"blender.exe 存在但执行失败：{exe}\\n{e}\")\n        sys.exit(2)\n    print(f\"Blender 已找到：{exe}\")\n    print(f\"版本：{ver}\")\n    print(\"用法提示：blender_run 跑 bpy 代码；blender_render 渲染帧。\"\n          \"单次调用上限约 105 秒，长任务请分块执行。\")\n\n\nmain()\n"
+    },
+    {
+      "name": "blender_run",
+      "description": "在无头（-b）Blender 中执行一段 bpy Python 代码并返回输出。适合建场景、改物体、导出文件、读取工程信息。可先打开指定 .blend 文件再执行。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "在 Blender 内执行的 bpy Python 代码。请把关键结果 print 出来（无头模式没有 UI）。"
+          },
+          "file": {
+            "type": "string",
+            "description": "可选。要先打开的 .blend 文件路径；相对路径按工作区解析。"
+          },
+          "blender_path": {
+            "type": "string",
+            "description": "可选。手动指定 blender.exe 路径。"
+          }
+        },
+        "required": ["code"]
+      },
+      "language": "python",
+      "code": "# -*- coding: utf-8 -*-\n'''blender_run —— 在无头 Blender 中执行用户 bpy 代码。'''\nimport glob\nimport json\nimport os\nimport shutil\nimport subprocess\nimport sys\nimport tempfile\n\nTIMEOUT = 105  # Parable 工具层 120s 硬超时，这里留余量自行终止，错误信息更友好\n\n\ndef find_blender(explicit=None):\n    cands = []\n    if explicit:\n        cands.append(explicit)\n    p = shutil.which(\"blender\")\n    if p:\n        cands.append(p)\n    cands += glob.glob(r\"C:\\Program Files\\Blender Foundation\\Blender *\\blender.exe\")\n    for drive in \"CDEFGH\":\n        cands += glob.glob(rf\"{drive}:\\SteamLibrary\\steamapps\\common\\Blender\\blender.exe\")\n        cands += glob.glob(rf\"{drive}:\\Steam\\steamapps\\common\\Blender\\blender.exe\")\n        cands += glob.glob(rf\"{drive}:\\Program Files (x86)\\Steam\\steamapps\\common\\Blender\\blender.exe\")\n    for c in cands:\n        if c and os.path.isfile(c):\n            return os.path.normpath(c)\n    return None\n\n\ndef main():\n    try:\n        args = json.loads(os.environ.get(\"PARABLE_TOOL_ARGS\") or \"{}\")\n    except ValueError:\n        args = {}\n    code = args.get(\"code\") or \"\"\n    if not code.strip():\n        print(\"缺少 code 参数（要执行的 bpy Python 代码）。\")\n        sys.exit(2)\n    exe = find_blender(args.get(\"blender_path\"))\n    if not exe:\n        print(\"未找到 Blender：先运行 blender_info 看探测路径，\"\n              \"或用 blender_path 参数手动指定 blender.exe。\")\n        sys.exit(2)\n    ws = os.environ.get(\"PARABLE_TOOL_WORKSPACE\") or os.getcwd()\n    if ws and os.path.isdir(ws):\n        os.chdir(ws)\n    tmp = os.path.join(tempfile.gettempdir(), f\"parable-blender-{os.getpid()}.py\")\n    with open(tmp, \"w\", encoding=\"utf-8\") as f:\n        f.write(code)\n    cmd = [exe, \"-b\"]\n    bf = args.get(\"file\")\n    if bf:\n        cmd += [bf]\n    cmd += [\"-P\", tmp]\n    try:\n        r = subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT,\n                           errors=\"replace\")\n    except subprocess.TimeoutExpired as e:\n        head = (e.stdout or b\"\")\n        if isinstance(head, bytes):\n            head = head.decode(\"utf-8\", \"replace\")\n        tail = (e.stderr or b\"\")\n        if isinstance(tail, bytes):\n            tail = tail.decode(\"utf-8\", \"replace\")\n        print(f\"已终止：脚本超过 {TIMEOUT}s 未结束（Parable 工具层 120s 硬上限）。\")\n        print(\"长任务请拆块执行，或把 blender 命令交给 bash 工具挂后台终端跑。\")\n        if head.strip():\n            print(\"[stdout 已产出部分]\\n\" + head[-4000:])\n        if tail.strip():\n            print(\"[stderr 已产出部分]\\n\" + tail[-2000:])\n        sys.exit(3)\n    except FileNotFoundError:\n        print(f\"无法启动 {exe}\")\n        sys.exit(2)\n    finally:\n        try:\n            os.remove(tmp)\n        except OSError:\n            pass\n    out = (r.stdout or \"\").strip()\n    err = (r.stderr or \"\").strip()\n    if out:\n        print(out[-12000:])\n    if err:\n        # Blender 把脚本异常也写进 stderr；原样带回给模型判断\n        print(\"[stderr]\\n\" + err[-6000:])\n    if r.returncode != 0:\n        print(f\"[blender 退出码 {r.returncode}]\")\n        sys.exit(r.returncode)\n\n\nmain()\n"
+    },
+    {
+      "name": "blender_render",
+      "description": "用无头 Blender 渲染 .blend 工程的一帧或一段帧区间。渲染引擎与分辨率取自工程文件设置。单次上限约 105 秒，长动画请分段调用。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "file": {
+            "type": "string",
+            "description": ".blend 工程文件路径。"
+          },
+          "output": {
+            "type": "string",
+            "description": "输出路径前缀，支持 # 帧号占位（如 D:/out/render_####）。不带头尾时渲染单帧。"
+          },
+          "start": {
+            "type": "integer",
+            "description": "起始帧（默认取工程设置）。"
+          },
+          "end": {
+            "type": "integer",
+            "description": "结束帧（默认与 start 相同，即单帧）。"
+          },
+          "blender_path": {
+            "type": "string",
+            "description": "可选。手动指定 blender.exe 路径。"
+          }
+        },
+        "required": ["file", "output"]
+      },
+      "language": "python",
+      "code": "# -*- coding: utf-8 -*-\n'''blender_render —— 无头渲染 .blend 的帧区间。'''\nimport glob\nimport json\nimport os\nimport shutil\nimport subprocess\nimport sys\n\nTIMEOUT = 105\n\n\ndef find_blender(explicit=None):\n    cands = []\n    if explicit:\n        cands.append(explicit)\n    p = shutil.which(\"blender\")\n    if p:\n        cands.append(p)\n    cands += glob.glob(r\"C:\\Program Files\\Blender Foundation\\Blender *\\blender.exe\")\n    for drive in \"CDEFGH\":\n        cands += glob.glob(rf\"{drive}:\\SteamLibrary\\steamapps\\common\\Blender\\blender.exe\")\n        cands += glob.glob(rf\"{drive}:\\Steam\\steamapps\\common\\Blender\\blender.exe\")\n        cands += glob.glob(rf\"{drive}:\\Program Files (x86)\\Steam\\steamapps\\common\\Blender\\blender.exe\")\n    for c in cands:\n        if c and os.path.isfile(c):\n            return os.path.normpath(c)\n    return None\n\n\ndef main():\n    try:\n        args = json.loads(os.environ.get(\"PARABLE_TOOL_ARGS\") or \"{}\")\n    except ValueError:\n        args = {}\n    bf = args.get(\"file\") or \"\"\n    out = args.get(\"output\") or \"\"\n    if not bf or not out:\n        print(\"需要 file（.blend 工程路径）与 output（输出前缀）两个参数。\")\n        sys.exit(2)\n    exe = find_blender(args.get(\"blender_path\"))\n    if not exe:\n        print(\"未找到 Blender：先运行 blender_info，或用 blender_path 参数指定。\")\n        sys.exit(2)\n    ws = os.environ.get(\"PARABLE_TOOL_WORKSPACE\") or os.getcwd()\n    if ws and os.path.isdir(ws):\n        os.chdir(ws)\n    cmd = [exe, \"-b\", bf, \"-o\", out]\n    if args.get(\"start\") is not None:\n        cmd += [\"-s\", str(int(args[\"start\"]))]\n    if args.get(\"end\") is not None:\n        cmd += [\"-e\", str(int(args[\"end\"]))]\n    cmd += [\"-a\"]\n    print(\"运行：\" + subprocess.list2cmdline(cmd))\n    try:\n        r = subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT,\n                           errors=\"replace\")\n    except subprocess.TimeoutExpired:\n        print(f\"已终止：渲染超过 {TIMEOUT}s 未结束。\")\n        print(\"建议：缩小分辨率/帧区间分块渲染，或改用 bash 工具把同一命令挂后台终端（不受 120s 限制）。\")\n        sys.exit(3)\n    out_txt = (r.stdout or \"\").strip()\n    err_txt = (r.stderr or \"\").strip()\n    # 渲染报告行 stdout/stderr 都可能出现，两边都扫「Saved:」\n    saved = [ln for ln in (out_txt + \"\\n\" + err_txt).splitlines()\n             if \"Saved:\" in ln or \"FileOutputError\" in ln]\n    if saved:\n        print(\"\\n\".join(saved[-20:]))\n    if out_txt:\n        print(out_txt[-3000:])\n    if r.returncode != 0:\n        print(\"[stderr 末尾]\\n\" + err_txt[-3000:] if err_txt else \"\")\n        print(f\"[blender 退出码 {r.returncode}]\")\n        sys.exit(r.returncode)\n    if not saved:\n        print(\"（未检测到 Saved: 行——检查 output 路径与工程输出设置是否有效）\")\n\n\nmain()\n"
+    }
+  ],
+  "prompt": "本插件让 Parable 能操作本机 Blender（Steam 安装在 F:\\SteamLibrary\\steamapps\\common\\Blender\\blender.exe，也支持自动探测）。要点：\n- blender_run 的 code 是在 Blender 内部执行的 bpy Python：常用 bpy.data.objects / bpy.ops.mesh.primitive_* / bpy.ops.wm.save_as_mainfile(filepath=...) / bpy.context.scene。\n- 无头模式（-b）没有 UI：代码里必须把关键结果 print 出来（对象名、尺寸、导出路径、报错上下文）。\n- 相对路径按 Parable 工作区解析；导出/渲染请给绝对路径。\n- 单次工具调用约 105 秒上限：渲染长动画用 blender_render 分段（-s/-e），或让 Parable 用 bash 工具把 blender 命令挂后台终端跑（不受限制）。\n- Blender 的 bpy 是自带 Python，与本机 python 无关；不要在 code 里 import Parable 环境的东西。"
+}
