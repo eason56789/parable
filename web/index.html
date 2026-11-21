@@ -1688,15 +1688,111 @@ body.dragging #main{outline:2px dashed var(--accent);outline-offset:-8px}
 .profon { font-size:12px; color:var(--accent); border:1px solid var(--accent); border-radius:999px; padding:2px 10px; }
 .rwf { font-family:var(--mono); font-size:11px; opacity:.5; margin-left:8px; }
 .rwrow { display:flex; gap:10px; align-items:center; border-top:1px solid var(--line); padding:10px 0; }
+
+/* ---- round2 ui ---- */
+#body{position:relative}
+/* 左工作区面板 / 右 Environment 面板：默认折叠，展开宽度由契约冻结（280 / 300px）。 */
+#r2-ws,#r2-env{flex:none;min-height:0;overflow:hidden;background:var(--side);display:flex;flex-direction:column;
+  width:0;opacity:0;border:0;transition:width calc(.45s * var(--animd)) cubic-bezier(.32,.72,0,1),opacity calc(.3s * var(--animd))}
+body.r2-ws-open #r2-ws{width:280px;opacity:1;border-right:.5px solid var(--line)}
+body.r2-env-open #r2-env{width:300px;opacity:1;border-left:.5px solid var(--line)}
+.r2-title{font:600 var(--fs-secondary) var(--sans);letter-spacing:.04em;text-transform:uppercase;color:var(--fg2)}
+.r2-meta{font:var(--fs-caption) var(--sans);color:var(--fg2)}
+
+/* —— 左：工作区文件树 + 预览 —— */
+.r2-ws-head{flex:none;display:flex;align-items:center;gap:8px;padding:10px 12px 8px}
+.r2-ws-head .r2-root{flex:1;min-width:0;font:11px var(--mono);color:var(--fg2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#r2-ws-ref{width:26px;height:26px}
+.r2-ws-tabs{flex:none;display:flex;gap:2px;padding:0 8px;overflow-x:auto;scrollbar-width:none}
+.r2-ws-tabs::-webkit-scrollbar{display:none}
+.r2-ws-tab{display:flex;align-items:center;gap:6px;max-width:132px;border:0;background:none;color:var(--fg2);font:12px var(--sans);padding:5px 7px;border-radius:8px;cursor:pointer;white-space:nowrap}
+.r2-ws-tab.on{background:var(--hov);color:var(--fg)}
+.r2-ws-tab .x{width:15px;height:15px;border-radius:5px;display:grid;place-items:center;opacity:0;flex:none}
+.r2-ws-tab:hover .x{opacity:.6}
+.r2-ws-tab .x:hover{opacity:1;background:var(--line)}
+.r2-ws-tab .x svg{width:11px;height:11px}
+.r2-ws-tree{flex:1;min-height:0;overflow:auto;padding:2px 6px 10px}
+.r2-ws-view{flex:1;min-height:0;display:none;flex-direction:column;border-top:.5px solid var(--line)}
+body.r2-ws-file .r2-ws-view{display:flex}
+body.r2-ws-file .r2-ws-tree{flex:0 1 38%}
+body.r2-ws-file .r2-ws-view{flex:1 1 62%}
+.r2-ws-meta{flex:none;padding:6px 12px;font:11px var(--mono);color:var(--fg2);border-bottom:.5px solid var(--line);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.r2-ws-code{flex:1;min-height:0;overflow:auto;margin:0;padding:8px 0;font:12.5px/1.6 var(--mono)}
+.r2-code-line{display:block;white-space:pre}
+.r2-ln{display:inline-block;width:3.4em;text-align:right;padding-right:12px;color:var(--code-ln);user-select:none;flex:none}
+.r2-tree-row{display:flex;align-items:center;gap:6px;height:28px;padding:0 6px;border-radius:8px;cursor:pointer;font:var(--fs-body) var(--sans);color:var(--fg)}
+.r2-tree-row:hover{background:var(--hov)}
+.r2-tree-row .ic{width:14px;height:14px;flex:none;color:var(--fg2);display:grid;place-items:center}
+.r2-tree-row .ic svg{width:14px;height:14px}
+.r2-tree-row .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.r2-tree-row .dot{width:7px;height:7px;border-radius:50%;flex:none}
+.r2-tree-row .sz{font:11px var(--sans);color:var(--fg2);flex:none}
+.r2-tw{flex:none;width:14px;display:grid;place-items:center;color:var(--fg2)}
+.r2-tw svg{width:12px;height:12px;transition:transform calc(.2s * var(--animd))}
+.r2-tree-row.dir.closed .r2-tw svg{transform:rotate(-90deg)}
+.r2-children{margin-left:14px}
+.r2-empty{padding:18px 12px;color:var(--fg2);font:12px var(--sans);text-align:center}
+/* 极简语法高亮：关键字 / 字符串 / 注释 / 数字四类，颜色全部取自现有主题变量。 */
+.r2-ws-code .tk-kw{color:var(--uch1)}
+.r2-ws-code .tk-str{color:var(--diff-add)}
+.r2-ws-code .tk-com{color:var(--fg2);font-style:italic}
+.r2-ws-code .tk-num{color:var(--uch5)}
+
+/* —— 右：Environment / Connectors —— */
+.r2-env-scroll{flex:1;min-height:0;overflow:auto;padding:12px}
+.r2-sec{padding:10px 0;border-top:1px solid var(--line)}
+.r2-sec:first-child{border-top:0;padding-top:0}
+.r2-sec .r2-title{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.r2-row{font:var(--fs-body) var(--sans);color:var(--fg);display:flex;align-items:center;gap:8px;min-width:0}
+.r2-path{font-family:var(--mono);word-break:break-all;line-height:1.5}
+.r2-ctx{display:flex;align-items:center;gap:12px}
+.r2-ctx svg{flex:none}
+.r2-ctx .r2-cv{display:flex;flex-direction:column;gap:2px;min-width:0}
+.r2-ctx .r2-cv b{font:600 15px var(--sans);color:var(--fg)}
+.r2-mcp-row{display:flex;align-items:center;gap:8px;padding:6px 0;font:var(--fs-body) var(--sans)}
+.r2-mcp-row .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.r2-mcp-row .st{font:11px var(--sans);color:var(--fg2)}
+.r2-mcp-row .mcpdot{flex:none}
+.r2-mcp-row button{flex:none}
+.r2-sw{position:relative;width:32px;height:18px;border-radius:999px;border:.5px solid var(--line);background:var(--hov);cursor:pointer;flex:none;padding:0;transition:background-color calc(.2s * var(--animd))}
+.r2-sw::after{content:'';position:absolute;top:2px;left:2px;width:13px;height:13px;border-radius:50%;background:var(--fg2);transition:transform calc(.2s * var(--animd)),background-color calc(.2s * var(--animd))}
+.r2-sw[aria-checked="true"]{background:var(--accent);border-color:var(--accent)}
+.r2-sw[aria-checked="true"]::after{transform:translateX(14px);background:#fff}
+/* full 权限模式只用于危险动作标签，沿用 danger token。 */
+.mi.danger{color:var(--danger-text)}
+.mi.danger small{color:color-mix(in srgb,var(--danger-text) 70%,var(--fg2))}
+.pkauto{margin-top:6px;border-top:.5px solid var(--line);padding-top:10px;cursor:default}
+.pkauto:hover{background:none}
+.pkauto div b{font:var(--fs-body) var(--sans);color:var(--fg)}
+
+/* —— 底部遥测条（高频数字 aria-live=off，视觉更新即可） —— */
+#r2-tel{display:flex;justify-content:center;gap:14px;flex-wrap:wrap;margin-top:6px;font:11px var(--sans);color:var(--fg2)}
+.r2-tel-i{display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
+.r2-tel-i b{color:var(--fg);font-weight:600}
+
+#tb .ib.on{background:var(--hov);color:var(--fg)}
+/* 窄屏：两面板转为 overlay 全屏抽屉，遮罩 + Esc 关闭。 */
+#r2-scr{display:none;position:absolute;inset:0;z-index:29;background:rgba(0,0,0,.35)}
+@media(max-width:1023px){
+  body.r2-any #r2-scr{display:block}
+  body.r2-ws-open #r2-ws,body.r2-env-open #r2-env{position:absolute;top:0;bottom:0;z-index:31;box-shadow:0 0 40px rgba(0,0,0,.2)}
+  body.r2-ws-open #r2-ws{left:0;width:min(280px,86vw)!important}
+  body.r2-env-open #r2-env{right:0;width:min(300px,86vw)!important}
+}
+@media(prefers-reduced-motion:reduce){
+  #r2-ws,#r2-env,.r2-ws-tab,.r2-sw,.r2-tw svg{transition:none!important;animation:none!important}
+}
 </style>
 </head>
 <body>
 <div id="win">
-  <div id="tb" data-tauri-drag-region="deep">
+  <header id="tb" aria-label="顶部工具栏" data-tauri-drag-region="deep">
     <button class="ib" id="tgl" data-ic="side"></button><button class="ib off" data-ic="back"></button><button class="ib off" data-ic="fwd"></button>
     <button class="ib" id="cmdbtn" data-ic="search" title="命令面板 Ctrl K"></button>
     <button class="ib" id="spbtn" data-ic="panel" title="侧边栏"></button>
-  </div>
+    <button class="ib" id="r2-ws-btn" data-ic="folder" title="工作区面板" aria-expanded="false" aria-controls="r2-ws"></button>
+    <button class="ib" id="r2-env-btn" data-ic="monitor" title="Environment 面板" aria-expanded="false" aria-controls="r2-env"></button>
+  </header>
   <!-- 无边框窗口的自绘控制键：只在桌面壳里显示（__PARABLE_DESKTOP 由
        initialization_script 注入），浏览器里没有系统按钮可替代，故隐藏。
        放在 #win 直属而不是 #tb 里 —— 设置等页面是盖住 #win 的覆盖层，
@@ -1708,7 +1804,8 @@ body.dragging #main{outline:2px dashed var(--accent);outline-offset:-8px}
   </div>
   <div id="body">
     <div id="scr"></div>
-    <aside id="side"><div id="sin">
+    <div id="r2-scr"></div>
+    <aside id="side" aria-label="会话列表"><div id="sin">
       <div class="nav" id="nc"><span class="np" data-ic="plus"></span><span data-i="new"></span></div>
       <div class="nav" data-pg="plugins"><span data-ic="plug"></span><span data-i="plugins"></span></div>
       <div class="nav" data-pg="auto"><span data-ic="clock"></span><span data-i="autom"></span></div>
@@ -1727,6 +1824,19 @@ body.dragging #main{outline:2px dashed var(--accent);outline-offset:-8px}
       <div id="rcs"><div id="rcp" class="rcg" hidden></div><div id="sbgroups"></div><div id="rca" class="rcg" hidden></div></div>
       <div class="nav" id="setnav"><span data-ic="tune"></span><span data-i="setnav"></span></div>
     </div></aside>
+    <aside id="r2-ws" aria-label="工作区文件面板">
+      <div class="r2-ws-head">
+        <span class="r2-title" data-i="r2_ws">工作区</span>
+        <span class="r2-root" id="r2-ws-root">—</span>
+        <button class="ib" id="r2-ws-ref" data-ic="refresh" title="刷新文件树"></button>
+      </div>
+      <div class="r2-ws-tabs" id="r2-ws-tabs" role="tablist" aria-label="已打开文件"></div>
+      <div class="r2-ws-tree" id="r2-ws-tree" role="tree"></div>
+      <div class="r2-ws-view" id="r2-ws-view" hidden>
+        <div class="r2-ws-meta" id="r2-ws-meta"></div>
+        <pre class="r2-ws-code" id="r2-ws-code"></pre>
+      </div>
+    </aside>
     <main id="main">
     <div id="dock">
       <div class="dbar">
@@ -1817,13 +1927,55 @@ body.dragging #main{outline:2px dashed var(--accent);outline-offset:-8px}
             </div>
           </button>
         </div>
+        <div id="r2-tel" aria-live="off">
+          <span class="r2-tel-i" id="r2-tel-turns" title="轮数 / 步数">—</span>
+          <span class="r2-tel-i" id="r2-tel-tps" title="输出速度（最近 10s 滑动窗口）">—</span>
+          <span class="r2-tel-i" id="r2-tel-cache" title="缓存命中率">—</span>
+          <span class="r2-tel-i" id="r2-tel-ctx" title="上下文占用">—</span>
+          <span class="r2-tel-i" id="r2-tel-elapsed" title="本轮耗时">—</span>
+        </div>
         <div class="disc" data-i="disc"></div>
       </div>
     </main>
-    <aside id="sdp">
+    <aside id="sdp" aria-label="工作台标签页">
       <button id="spdrag" title="拖动调整宽度 · 双击复位"></button>
       <div class="sptabs"><div class="sptl" id="sptl"></div><button class="spb" id="spadd" title="新标签页"></button></div>
       <div class="spbody" id="spbody"></div>
+    </aside>
+    <aside id="r2-env" aria-label="Environment 与连接器面板">
+      <div class="r2-env-scroll">
+        <section class="r2-sec">
+          <div class="r2-title" data-i="r2_host">主机</div>
+          <div class="r2-row" id="r2-env-host">—</div>
+          <div class="r2-meta" id="r2-env-os">—</div>
+        </section>
+        <section class="r2-sec">
+          <div class="r2-title" data-i="r2_wsdir">工作区</div>
+          <div class="r2-meta r2-path" id="r2-env-ws">—</div>
+        </section>
+        <section class="r2-sec">
+          <div class="r2-title" data-i="r2_ctx">上下文</div>
+          <div class="r2-ctx">
+            <svg id="r2-ctx-ring" width="56" height="56" viewBox="0 0 56 56" role="img" aria-label="上下文占用环">
+              <circle cx="28" cy="28" r="24" fill="none" stroke="var(--line)" stroke-width="5"/>
+              <circle id="r2-ctx-arc" cx="28" cy="28" r="24" fill="none" stroke="var(--accent)" stroke-width="5"
+                stroke-linecap="round" stroke-dasharray="150.8" stroke-dashoffset="150.8" transform="rotate(-90 28 28)"/>
+            </svg>
+            <div class="r2-cv">
+              <b id="r2-ctx-pct">—</b>
+              <span class="r2-meta" id="r2-ctx-meta">—</span>
+            </div>
+          </div>
+        </section>
+        <section class="r2-sec">
+          <div class="r2-title"><span data-i="r2_mcp">连接器</span><span class="r2-meta" id="r2-mcp-sum"></span></div>
+          <div id="r2-mcp-list"><div class="r2-empty">—</div></div>
+        </section>
+        <section class="r2-sec">
+          <div class="r2-title" data-i="r2_model">模型</div>
+          <div class="r2-meta" id="r2-env-model">—</div>
+        </section>
+      </div>
     </aside>
   </div>
 </div>
@@ -2217,6 +2369,9 @@ const L = {
     att_uploading:'上传中…', att_fail:'附件上传失败：', att_reveal:'点击打开文件所在位置',
     sysprev_empty:'（空 — 下一轮会话将没有 system 提示词）', sysprev_fail:'预览失败：',
     plan_mode:'计划模式', plan_mode_h:'先制定计划，经确认后再执行', plan_badge:'计划',
+    auto_model:'自动选模型', auto_model_h:'按任务能力自动匹配模型',
+    r2_ws:'工作区', r2_host:'主机', r2_wsdir:'工作区', r2_ctx:'上下文', r2_mcp:'连接器', r2_model:'模型',
+    r2_nofile:'从左侧选择文件查看', r2_loading:'加载中…',
     auto_no_chat:'当前没有会话，不能投递到当前对话', disc:'Parable 是 AI，可能会出错，请核实重要内容',
     sp_title:'新标签页', sp_title_h:'选择要打开的工具面板。',
     sp_files:'文件', sp_files_h:'浏览工作区目录与文件。',
@@ -2480,6 +2635,9 @@ const L = {
     att_uploading:'Uploading…', att_fail:'Attachment upload failed: ', att_reveal:'Open file location',
     sysprev_empty:'(empty — the next turn will have no system prompt)', sysprev_fail:'Preview failed: ',
     plan_mode:'Plan mode', plan_mode_h:'Draft a plan first and wait for approval before running', plan_badge:'Plan',
+    auto_model:'Auto model', auto_model_h:'Pick a model automatically by task capability',
+    r2_ws:'Workspace', r2_host:'Host', r2_wsdir:'Workspace', r2_ctx:'Context', r2_mcp:'Connectors', r2_model:'Model',
+    r2_nofile:'Select a file from the left to preview', r2_loading:'Loading…',
     auto_no_chat:'No active chat to deliver to', disc:'Parable is AI and can make mistakes. Please double-check important content',
     sp_title:'New tab', sp_title_h:'Choose a tool panel to open.',
     sp_files:'Files', sp_files_h:'Browse workspace files and folders.',
@@ -2539,7 +2697,7 @@ const DEF = {
   // settings.fontSize 对应：正文与界面分开，代码单独一档。
   uiSize:13, lineHeight:1.5, codeSize:13, density:'cozy', inkOn:true,
   speed:22, cd:650, blur:8, sf:1.5, anim:1, stream:true, think:true, toolThink:false, side:true,
-  prefs:'', systemPrompt:'', systemPromptRaw:'', model:'', perm:'ask', lvl:2,
+  prefs:'', systemPrompt:'', systemPromptRaw:'', model:'', perm:'ask', lvl:2, auto:false,
   searchKey:'', anysearchKey:'', spref:'auto', plan:false, mem:true, memAuto:true, followupMode:'queue',
   // 精装修新增：Agent 行为 / 通知 / 会话管理 / 代码块 / 网络与隐私 / 输入
   compactionEnabled:true, compactionPct:85, maxSteps:100, askAutoResolve:false, keepAwake:false, ctxWarnPct:80,
@@ -2661,7 +2819,7 @@ function apply(pushToServer) {
   $('#ta').placeholder = t(document.body.classList.contains('chat') ? 'ph2' : 'ph');
   $('#ml').textContent = modelLabel();
   $('#pml').textContent = t('p_' + S.perm);
-  $('#tb2').style.color = S.perm === 'full' ? '#c4553d' : '';
+  $('#tb2').style.color = S.perm === 'full' ? 'var(--danger-text)' : '';
   // 计划模式可见标识（输入框工具行上的小徽标）
   {
     const pf = $('#planflag');
@@ -2684,7 +2842,7 @@ function apply(pushToServer) {
         width: S.w, accent: S.accent, speed: S.speed, cd: S.cd, blur: S.blur,
         sf: S.sf, anim: S.anim, stream: S.stream, think: S.think, side: S.side,
         uiSize: S.uiSize, lineHeight: S.lineHeight, codeSize: S.codeSize, density: S.density,
-        prefs: S.prefs, systemPrompt: S.systemPrompt, systemPromptRaw: S.systemPromptRaw, model: S.model, permissionMode: S.perm, thinkingLevel: S.lvl, searchKey: S.searchKey, anysearchKey: S.anysearchKey, searchPref: S.spref, followupMode: S.followupMode,
+        prefs: S.prefs, systemPrompt: S.systemPrompt, systemPromptRaw: S.systemPromptRaw, model: S.model, permissionMode: S.perm, thinkingLevel: S.lvl, autoModel: S.auto, searchKey: S.searchKey, anysearchKey: S.anysearchKey, searchPref: S.spref, followupMode: S.followupMode,
         compactionEnabled: S.compactionEnabled, compactionPct: S.compactionPct, maxSteps: S.maxSteps,
         askAutoResolve: S.askAutoResolve, keepAwake: S.keepAwake, ctxWarnPct: S.ctxWarnPct,
         notify: S.notify, notifySound: S.notifySound, autoArchiveDays: S.autoArchiveDays,
@@ -9818,7 +9976,7 @@ $('#kbd').onclick = e => { if (e.target.id === 'kbd') $('#kbd').classList.remove
    ================================================================== */
 function tpRender() {
   $('#tp').innerHTML = '<div class="gl">' + t('permT') + '</div>' + PK.map(k =>
-    '<div class="mi" data-pk="' + k + '"><div>' + t('p_' + k) + '<small>' + t('d_' + k) + '</small></div>' +
+    '<div class="mi' + (k === 'full' ? ' danger' : '') + '" data-pk="' + k + '"><div>' + t('p_' + k) + '<small>' + t('d_' + k) + '</small></div>' +
     (S.perm === k ? ic('check') : '') + '</div>'
   ).join('') +
   '<div class="csep" style="margin:6px 7px"></div>' +
@@ -9868,8 +10026,8 @@ function modelLabel() {
 function refreshModelChip() {
   const el = $('#ml');
   if (!el) return;
-  el.textContent = modelLabel();
-  el.classList.toggle('todo', !modelOk());
+  el.textContent = (S.auto ? 'Auto · ' : '') + modelLabel();
+  el.classList.toggle('todo', !modelOk() && !S.auto);
 }
 function cycleModel() {
   if (!MODELS.length) { toast(t('noresult')); return; }
@@ -9937,6 +10095,8 @@ function pkHtml() {
       '<div class="pklv"><div class="pklt"><span>' + esc(t('lvlT')) + '</span><b data-pklvtx>' + esc(t('l' + S.lvl)) + '</b></div>' +
         '<input type="range" class="pkrange" min="0" max="3" step="1" value="' + S.lvl + '" data-pklv>' +
       '</div>' +
+      '<div class="mi pkauto" data-auto="1"><div><b>' + esc(t('auto_model')) + '</b><small>' + esc(t('auto_model_h')) + '</small></div>' +
+        '<button class="r2-sw" role="switch" aria-checked="' + (S.auto ? 'true' : 'false') + '" aria-label="' + esc(t('auto_model')) + '"></button></div>' +
     '</div></div>';
 }
 
@@ -9957,6 +10117,14 @@ function pkRenderInto(root) {
     }
     const p = e.target.closest('[data-pkp]');
     if (p) { PKP.sel = p.dataset.pkp; pkRenderInto(root); return; }
+    if (e.target.closest('[data-auto]')) {
+      S.auto = !S.auto;
+      apply();
+      refreshModelChip();
+      spChromeAll();
+      pkRenderInto(root);
+      return;
+    }
     const b = e.target.closest('[data-m]');
     if (!b) return;
     S.model = b.dataset.m;
@@ -13413,7 +13581,10 @@ async function spRenderReview(host, tab) {
       '<span class="chg-st">' + letter + '</span><span class="nm">' + esc(f.path) + '</span></div>';
   }).join('');
   list.querySelectorAll('[data-spgp]').forEach(r => {
-    r.onclick = () => spGitDiff(tab, r.dataset.spgp);
+    r.onclick = () => {
+      spGitDiff(tab, r.dataset.spgp);
+      if (window.r2OpenFile) window.r2OpenFile(r.dataset.spgp);
+    };
   });
 }
 
@@ -13452,6 +13623,7 @@ function paintReviewTree(list, box, tab, files) {
       list.querySelectorAll('[data-rvp]').forEach(x => x.classList.remove('on'));
       r.classList.add('on');
       reviewCheckpointDiff(box, tab, r.dataset.rvt, r.dataset.rvp);
+      if (window.r2OpenFile) window.r2OpenFile(r.dataset.rvp);
     };
   });
 }
@@ -15213,6 +15385,7 @@ async function boot() {
       model: c.model ?? local.model ?? S.model,
       perm: c.permission_mode ?? S.perm,
       lvl: c.thinking_level ?? S.lvl,
+      auto: c.auto_model ?? S.auto,
       uiSize: c.ui_size ?? S.uiSize,
       lineHeight: c.line_height ?? S.lineHeight,
       codeSize: c.code_size ?? S.codeSize,
@@ -15254,6 +15427,7 @@ async function boot() {
   resetStatus();
   dkInit();
   connectEvents();
+  r2Init();
   greetAnim();
   // 侧栏相对时间每分钟自动刷新（单页应用常驻即可）
   setInterval(refreshTimes, 60000);
@@ -15268,6 +15442,382 @@ async function boot() {
   if (SP.tabs.length) spRender();
   else spHide();
 }
+
+/* ==================================================================
+   ---- round2 ui ----
+   左工作区面板（文件树 + 只读预览 + 多 tab）、右 Environment 面板、
+   底部遥测条。新增状态集中在 R2；不改既有函数签名。
+   ================================================================== */
+const R2 = {
+  wsOpen: localStorage.getItem('parable.panel.ws') === '1',
+  envOpen: localStorage.getItem('parable.panel.env') === '1',
+  root: '',
+  treeCache: new Map(),
+  expanded: new Set(),
+  git: new Map(),
+  tabs: [],
+  active: null,
+  env: null,
+  telSid: null
+};
+
+function r2ApplyBody() {
+  document.body.classList.toggle('r2-ws-open', R2.wsOpen);
+  document.body.classList.toggle('r2-env-open', R2.envOpen);
+  document.body.classList.toggle('r2-any', R2.wsOpen || R2.envOpen);
+  const bw = $('#r2-ws-btn'), be = $('#r2-env-btn');
+  if (bw) { bw.setAttribute('aria-expanded', String(R2.wsOpen)); bw.classList.toggle('on', R2.wsOpen); }
+  if (be) { be.setAttribute('aria-expanded', String(R2.envOpen)); be.classList.toggle('on', R2.envOpen); }
+}
+
+function r2Toggle(which) {
+  R2[which + 'Open'] = !R2[which + 'Open'];
+  localStorage.setItem('parable.panel.' + which, R2[which + 'Open'] ? '1' : '0');
+  r2ApplyBody();
+  if (R2[which + 'Open']) { if (which === 'ws') r2WsEnsure(); else r2LoadEnv(); }
+}
+
+function r2CloseAll() {
+  R2.wsOpen = R2.envOpen = false;
+  localStorage.setItem('parable.panel.ws', '0');
+  localStorage.setItem('parable.panel.env', '0');
+  r2ApplyBody();
+}
+
+/* ---------- 左：工作区文件树 ---------- */
+async function r2StatusRoot() {
+  try {
+    const r = await api('/status');
+    if (r.workspace) {
+      R2.root = r.workspace;
+      const el = $('#r2-ws-root');
+      if (el) el.textContent = r.workspace;
+      // env 面板若已在 /status 之前展开，回退工作区路径需要随 root 回填重绘一次。
+      if (!R2.env) r2PaintEnv(null);
+    }
+  } catch (e) { /* 保持 — */ }
+}
+
+function r2GitColor(state) {
+  if (state === 'added' || state === 'untracked') return 'var(--diff-add)';
+  if (state === 'deleted') return 'var(--danger-text)';
+  return 'var(--accent)';
+}
+
+function r2TypeIcon(name) {
+  const ext = (name.split('.').pop() || '').toLowerCase();
+  const code = ['js', 'ts', 'tsx', 'jsx', 'py', 'rs', 'go', 'c', 'h', 'cpp', 'hpp', 'java', 'rb', 'php', 'sh', 'bash', 'zsh', 'sql', 'swift', 'kt', 'lua', 'r', 'm'];
+  const doc = ['md', 'txt', 'rst', 'adoc'];
+  const cfg = ['json', 'toml', 'yaml', 'yml', 'ini', 'cfg', 'env', 'xml', 'html', 'css', 'scss', 'svg'];
+  const img = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'ico', 'bmp'];
+  let key = 'file';
+  if (code.includes(ext)) key = 'edit';
+  else if (doc.includes(ext)) key = 'chat';
+  else if (cfg.includes(ext)) key = 'db';
+  else if (img.includes(ext)) key = 'globe';
+  return ic(key);
+}
+
+function r2TreeRows(dir, entries, depth) {
+  const sorted = [...entries].sort((a, b) => (a.is_dir === b.is_dir ? a.name.localeCompare(b.name) : a.is_dir ? -1 : 1));
+  let html = '';
+  for (const e of sorted) {
+    const pad = 6 + depth * 14;
+    if (e.is_dir) {
+      const open = R2.expanded.has(e.path);
+      html += '<div class="r2-tree-row dir' + (open ? '' : ' closed') + '" role="treeitem" tabindex="0" aria-expanded="' + open + '" data-dir="' + esc(e.path) + '" style="padding-left:' + pad + 'px">' +
+        '<span class="r2-tw">' + ic('chev') + '</span><span class="ic">' + ic('folder') + '</span><span class="nm">' + esc(e.name) + '</span></div>';
+      if (open) {
+        const kids = R2.treeCache.get(e.path);
+        html += '<div class="r2-children">' + (kids ? r2TreeRows(e.path, kids, depth + 1) : '<div class="r2-empty">' + esc(t('r2_loading')) + '</div>') + '</div>';
+      }
+    } else {
+      const g = R2.git.get(e.path);
+      const dot = g ? '<span class="dot" style="background:' + r2GitColor(g) + '"></span>' : '';
+      html += '<div class="r2-tree-row file" role="treeitem" tabindex="0" data-file="' + esc(e.path) + '" style="padding-left:' + pad + 'px">' +
+        '<span class="r2-tw"></span><span class="ic">' + r2TypeIcon(e.name) + '</span><span class="nm">' + esc(e.name) + '</span>' + dot +
+        '<span class="sz">' + fmtBytes(e.size || 0) + '</span></div>';
+    }
+  }
+  return html || '<div class="r2-empty">' + esc(t('sp_no_files')) + '</div>';
+}
+
+function r2BindTree(root) {
+  root.querySelectorAll('[data-dir]').forEach(r => {
+    r.onclick = () => r2ToggleDir(r.dataset.dir);
+    r.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); r2ToggleDir(r.dataset.dir); } };
+  });
+  root.querySelectorAll('[data-file]').forEach(r => {
+    r.onclick = () => r2OpenFile(r.dataset.file);
+    r.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); r2OpenFile(r.dataset.file); } };
+  });
+}
+
+async function r2ToggleDir(p) {
+  if (R2.expanded.has(p)) { R2.expanded.delete(p); }
+  else {
+    R2.expanded.add(p);
+    if (!R2.treeCache.has(p)) {
+      try { const res = await api('/fs/tree?path=' + encodeURIComponent(p)); R2.treeCache.set(p, res.entries || []); } catch (e) { /* 保留空态 */ }
+    }
+  }
+  r2WsLoad('');
+}
+
+async function r2WsLoad(dir) {
+  const tree = $('#r2-ws-tree');
+  if (!tree) return;
+  let entries = R2.treeCache.get(dir);
+  if (!entries) {
+    tree.innerHTML = '<div class="r2-empty">' + esc(t('r2_loading')) + '</div>';
+    try {
+      const res = await api('/fs/tree?path=' + encodeURIComponent(dir || ''));
+      entries = res.entries || [];
+      R2.treeCache.set(dir, entries);
+    } catch (e) {
+      tree.innerHTML = '<div class="r2-empty">' + esc(e.message) + '</div>';
+      return;
+    }
+  }
+  tree.innerHTML = r2TreeRows(dir, entries, 0);
+  r2BindTree(tree);
+}
+
+function r2WsEnsure() {
+  if (!R2.treeCache.size) r2WsLoad('');
+}
+
+async function r2GitLoad() {
+  try {
+    const res = await api('/git/status');
+    const st = res.status || {};
+    R2.git.clear();
+    (st.files || []).forEach(f => R2.git.set(f.path, f.state));
+    r2WsLoad('');
+  } catch (e) { /* 非 git 仓库或离线：不染色 */ }
+}
+
+/* ---------- 只读预览 + 多 tab ---------- */
+async function r2FetchTab(tab) {
+  if (tab.loaded) return;
+  tab.loading = true; r2PaintPreview();
+  try {
+    const res = await api('/fs/file?path=' + encodeURIComponent(tab.path));
+    const f = res.file || {};
+    tab.text = f.text || ''; tab.binary = !!f.binary; tab.size = f.size || 0; tab.totalLines = f.total_lines || 0;
+  } catch (e) { tab.error = e.message; }
+  tab.loaded = true; tab.loading = false;
+}
+
+async function r2OpenFile(path) {
+  if (!path) return;
+  if (!R2.wsOpen) { R2.wsOpen = true; localStorage.setItem('parable.panel.ws', '1'); r2ApplyBody(); }
+  let tab = R2.tabs.find(x => x.path === path);
+  if (!tab) {
+    tab = { path, name: path.slice(path.lastIndexOf('/') + 1) };
+    R2.tabs.push(tab);
+  }
+  R2.active = path;
+  await r2FetchTab(tab);
+  r2PaintTabs(); r2PaintPreview();
+}
+
+function r2PaintTabs() {
+  const bar = $('#r2-ws-tabs');
+  if (!bar) return;
+  bar.innerHTML = R2.tabs.map(x =>
+    '<button class="r2-ws-tab' + (x.path === R2.active ? ' on' : '') + '" role="tab" aria-selected="' + (x.path === R2.active) + '" data-tab="' + esc(x.path) + '">' +
+    '<span>' + esc(x.name) + '</span><span class="x" data-tabx="' + esc(x.path) + '">' + ic('x') + '</span></button>'
+  ).join('');
+  bar.querySelectorAll('[data-tab]').forEach(b => {
+    b.onclick = e => {
+      const x = e.target.closest('[data-tabx]');
+      if (x) {
+        const p = x.dataset.tabx;
+        R2.tabs = R2.tabs.filter(y => y.path !== p);
+        if (R2.active === p) R2.active = R2.tabs[0] ? R2.tabs[0].path : null;
+      } else {
+        R2.active = b.dataset.tab;
+      }
+      r2PaintTabs(); r2PaintPreview();
+    };
+  });
+}
+
+function r2PaintPreview() {
+  const view = $('#r2-ws-view'), meta = $('#r2-ws-meta'), code = $('#r2-ws-code');
+  if (!view) return;
+  const tab = R2.tabs.find(x => x.path === R2.active);
+  document.body.classList.toggle('r2-ws-file', !!tab);
+  if (!tab) { view.hidden = true; return; }
+  view.hidden = false;
+  if (tab.error) { meta.textContent = tab.path; code.innerHTML = '<div class="r2-empty">' + esc(tab.error) + '</div>'; return; }
+  if (tab.binary) { meta.textContent = tab.path; code.innerHTML = '<div class="r2-empty">—</div>'; return; }
+  meta.textContent = tab.path + (tab.totalLines ? ' · ' + tab.totalLines + ' 行' : '');
+  code.innerHTML = r2Highlight(tab.text || '');
+}
+
+/* 极简语法高亮：关键字 / 字符串 / 注释 / 数字四类，颜色全部取自现有主题变量。 */
+const R2_KW = new Set(('const let var function return if else for while do import export from class struct impl enum match switch case break continue try catch finally throw new delete typeof instanceof async await yield this self null None true False True false undefined nil Some Ok Err pub private static def end in is not and or of fn mut').split(' '));
+const R2_RE = /(\/\/.*$|#.*$|\/\*[\s\S]*?\*\/|<!--[\s\S]*?-->)|('(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|`(?:[^`\\]|\\.)*`)|\b(\d+(?:\.\d+)?)\b|\b([A-Za-z_]\w*)\b/g;
+
+function r2TokLine(line) {
+  let out = '', last = 0, m;
+  R2_RE.lastIndex = 0;
+  while ((m = R2_RE.exec(line))) {
+    if (m.index > last) out += esc(line.slice(last, m.index));
+    const tok = m[0];
+    if (m[1]) out += '<span class="tk-com">' + esc(tok) + '</span>';
+    else if (m[2]) out += '<span class="tk-str">' + esc(tok) + '</span>';
+    else if (m[3]) out += '<span class="tk-num">' + esc(tok) + '</span>';
+    else if (m[4] && R2_KW.has(m[4])) out += '<span class="tk-kw">' + esc(tok) + '</span>';
+    else out += esc(tok);
+    last = m.index + tok.length;
+  }
+  return out + esc(line.slice(last));
+}
+
+function r2Highlight(text) {
+  return text.split('\n').map((ln, i) =>
+    '<div class="r2-code-line"><span class="r2-ln">' + (i + 1) + '</span>' + r2TokLine(ln) + '</div>'
+  ).join('');
+}
+
+/* ---------- 右：Environment / Connectors ---------- */
+async function r2LoadEnv() {
+  let env = null;
+  try { env = await api('/environment'); } catch (e) { env = null; }
+  // 后端未上线时该路由回退到 SPA 首页 HTML（200），api() 会包成 {raw}；
+  // 这不是环境数据，按「无数据」处理，各段显 —，绝不拿假数据顶上。
+  if (env && typeof env === 'object' && 'raw' in env) env = null;
+  R2.env = env;
+  r2PaintEnv(env);
+  if (!env || !env.mcp || !env.mcp.servers) r2LoadMcpFallback();
+}
+
+function r2PaintEnv(env) {
+  const host = $('#r2-env-host'), os = $('#r2-env-os'), ws = $('#r2-env-ws'),
+    pctEl = $('#r2-ctx-pct'), metaEl = $('#r2-ctx-meta'), arc = $('#r2-ctx-arc'),
+    modelEl = $('#r2-env-model');
+  if (host) host.textContent = (env && env.hostname) || '—';
+  if (os) os.textContent = env ? [env.os, env.arch, env.version].filter(Boolean).join(' · ') : '—';
+  if (ws) ws.textContent = (env && env.workspace) || R2.root || '—';
+  const C = 2 * Math.PI * 24;
+  const ctx = env && env.context;
+  if (ctx && ctx.limit) {
+    const pct = Math.max(0, Math.min(1, ctx.pct != null ? ctx.pct : (ctx.used || 0) / ctx.limit));
+    const warn = (S.ctxWarnPct || 80) / 100;
+    if (arc) { arc.style.strokeDashoffset = C * (1 - pct); arc.style.stroke = pct >= warn ? '#c9a227' : 'var(--accent)'; }
+    if (pctEl) pctEl.textContent = Math.round(pct * 100) + '%';
+    if (metaEl) metaEl.textContent = kfmt(ctx.used || 0) + ' / ' + kfmt(ctx.limit);
+  } else {
+    if (arc) arc.style.strokeDashoffset = C;
+    if (pctEl) pctEl.textContent = '—';
+    if (metaEl) metaEl.textContent = '—';
+  }
+  if (modelEl) {
+    const md = env && env.model;
+    // /api/environment 未上线时显 —，不拿 /status 的模型名顶替（契约 §4 第 2 组）。
+    modelEl.textContent = md ? ((md.provider || '') + ' / ' + (md.label || md.model || '')) : '—';
+  }
+  if (env && env.mcp && env.mcp.servers) r2PaintMcp(env.mcp);
+}
+
+async function r2LoadMcpFallback() {
+  const list = $('#r2-mcp-list');
+  if (!list) return;
+  let d;
+  try { d = await api('/mcp'); } catch (e) { list.innerHTML = '<div class="r2-empty">—</div>'; return; }
+  const servers = d.servers || [], stMap = {};
+  (d.status || []).forEach(x => { stMap[x.id] = x; });
+  const mcp = {
+    connected: 0, failed: 0, total: servers.length,
+    servers: servers.map(sv => {
+      const st = stMap[sv.id] || {};
+      return { id: sv.id, name: sv.name, transport: 'stdio',
+        status: st.connected ? 'connected' : (sv.enabled ? 'connecting' : 'disabled'),
+        error: st.error || null };
+    })
+  };
+  mcp.connected = mcp.servers.filter(x => x.status === 'connected').length;
+  mcp.failed = mcp.servers.filter(x => x.status === 'disabled').length;
+  r2PaintMcp(mcp);
+}
+
+function r2PaintMcp(mcp) {
+  const list = $('#r2-mcp-list'), sum = $('#r2-mcp-sum');
+  if (!list) return;
+  const servers = mcp.servers || [];
+  if (sum) sum.textContent = servers.length ? (mcp.connected || 0) + '/' + (mcp.failed || 0) + '/' + mcp.total : '';
+  if (!servers.length) { list.innerHTML = '<div class="r2-empty">—</div>'; return; }
+  list.innerHTML = servers.map(sv => {
+    const st = sv.status || 'disabled';
+    const dotColor = st === 'connected' ? 'var(--diff-add)' : st === 'failed' ? 'var(--danger-text)' : 'var(--fg2)';
+    const canRe = st === 'failed' || st === 'connected';
+    return '<div class="r2-mcp-row" data-id="' + esc(sv.id) + '">' +
+      '<span class="mcpdot" style="background:' + dotColor + '"></span>' +
+      '<span class="nm">' + esc(sv.name || sv.id) + '</span>' +
+      '<span class="st">' + esc(st) + '</span>' +
+      (canRe ? '<button class="spbtn" data-mcp-r>' + esc(t('mcp_reconnect')) + '</button>' : '') +
+      '</div>';
+  }).join('');
+  list.querySelectorAll('[data-mcp-r]').forEach(b => {
+    b.onclick = async () => {
+      const id = b.closest('.r2-mcp-row').dataset.id;
+      try { await api('/mcp/connect', { method: 'POST', body: { id } }); r2LoadEnv(); }
+      catch (e) { toast(e.message); }
+    };
+  });
+}
+
+/* ---------- 底部遥测条（2s 轮询，会话切换自动重置） ---------- */
+function r2TelReset() {
+  ['turns', 'tps', 'cache', 'ctx', 'elapsed'].forEach(k => {
+    const el = $('#r2-tel-' + k);
+    if (el) el.textContent = '—';
+  });
+}
+
+async function r2TelPoll() {
+  const sid = (conv && conv.id) || null;
+  if (sid !== R2.telSid) { R2.telSid = sid; r2TelReset(); }
+  if (!sid) return;
+  let d;
+  try { d = await api('/telemetry?session=' + encodeURIComponent(sid)); }
+  catch (e) { r2TelReset(); return; }
+  // 路由未上线时回退 SPA HTML（{raw}）：按无数据处理，全部显 —。
+  if (!d || typeof d !== 'object' || 'raw' in d) { r2TelReset(); return; }
+  r2PaintTel(d);
+}
+
+function r2PaintTel(d) {
+  const set = (id, html) => { const el = $('#r2-tel-' + id); if (el) el.innerHTML = html; };
+  const t = d.turn || {}, tp = d.tps || {}, ca = d.cache || {}, cx = d.context || {};
+  set('turns', (t.rounds || 0) + ' 轮 · ' + (t.steps || 0) + ' 步');
+  set('tps', tp.value != null ? '<b>' + Number(tp.value).toFixed(1) + '</b> tok/s' : '—');
+  set('cache', ca.supported && ca.hitRate != null ? '<b>' + Math.round(ca.hitRate * 100) + '%</b>' : '—');
+  set('ctx', cx.limit ? '<b>' + Math.round((cx.pct != null ? cx.pct : (cx.used || 0) / cx.limit) * 100) + '%</b>' : '—');
+  set('elapsed', t.elapsedMs != null ? fmtMs(t.elapsedMs) : '—');
+}
+
+/* ---------- 初始化 ---------- */
+function r2Init() {
+  r2ApplyBody();
+  r2StatusRoot();
+  r2WsLoad('');
+  r2GitLoad();
+  setInterval(r2TelPoll, 2000);
+  r2TelPoll();
+}
+
+$('#r2-ws-btn').onclick = () => r2Toggle('ws');
+$('#r2-env-btn').onclick = () => r2Toggle('env');
+$('#r2-ws-ref').onclick = () => { R2.treeCache.clear(); R2.expanded.clear(); r2WsLoad(''); r2GitLoad(); };
+$('#r2-scr').onclick = r2CloseAll;
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && (R2.wsOpen || R2.envOpen)) r2CloseAll();
+});
+window.r2OpenFile = r2OpenFile;
 
 boot();
 
