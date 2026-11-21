@@ -579,6 +579,14 @@ impl HttpConn {
                 "http MCP 服务器缺少 `url` 配置".to_string(),
             ));
         }
+        // P3：scheme 白名单。reqwest 对 file://、ftp:// 等非法 scheme 的报错
+        // 又臭又长；这里给出明确错误，也避免配置里藏非 HTTP 目标。
+        let lower = url.to_ascii_lowercase();
+        if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+            return Err(HarnessError::Tool(format!(
+                "http MCP 服务器的 `url` 必须以 http:// 或 https:// 开头，当前: {url}"
+            )));
+        }
         let conn = Arc::new(Self {
             client: crate::config::http_client(),
             url,
@@ -740,6 +748,12 @@ impl Conn {
         self.live = None;
         self.tools.clear();
         if let Some(mut child) = self.child.take() {
+            // P3：整树击杀（复用 shell.rs 的 taskkill /T 同款实现）——stdio
+            // MCP 服务器常再拉自己的子进程（如 npx 起的 node），只
+            // start_kill 直接孩子会留孤儿进程。
+            if let Some(pid) = child.id() {
+                crate::tools::shell::kill_tree_pid(pid);
+            }
             let _ = child.start_kill();
             // 回收子进程（Unix 僵尸 / Windows 句柄），管道随之关闭，
             // 读行任务自行退出。

@@ -311,10 +311,41 @@ fn looks_binary(bytes: &[u8]) -> bool {
     ctrl * 10 > sample.len()
 }
 
+/// 写盘前的纵深复核（TOCTOU，P3）：resolve_within 的 symlink/junction 校验
+/// 发生在授权与读取之前——授权等待期间目标路径可能被换成链接。落盘前用
+/// `symlink_metadata`（**不跟随**）再查一次：最终分量是 symlink/junction
+/// 即拒绝。Windows 上 junction 是目录 reparse point，`is_symlink()` 不一定
+/// 为真，所以同时检查 FILE_ATTRIBUTE_REPARSE_POINT 才能两种都拦住。
+/// 这是纵深补丁，主校验仍是 resolve_within。
+fn reject_symlink_target(path: &Path) -> Result<(), HarnessError> {
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+            if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                return Err(HarnessError::Tool(format!(
+                    "拒绝写入 {}：落盘前复核发现目标是 symlink/junction（写盘前被替换？），已阻止",
+                    path.display()
+                )));
+            }
+        }
+        if meta.file_type().is_symlink() {
+            return Err(HarnessError::Tool(format!(
+                "拒绝写入 {}：落盘前复核发现目标是 symlink（写盘前被替换？），已阻止",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub fn write_file(path: &Path, content: &str) -> Result<ToolOutcome, HarnessError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    // TOCTOU 纵深复核：创建/覆盖前确认最终分量不是链接
+    reject_symlink_target(path)?;
     let existed = path.exists();
     let old = std::fs::read_to_string(path).ok().unwrap_or_default();
     std::fs::write(path, content)?;
@@ -375,6 +406,9 @@ pub fn edit_file(
     } else {
         text.replacen(old, new, 1)
     };
+    // TOCTOU 纵深复核：read_to_string 跟随了链接能读到内容，但写回会打穿
+    // 链接指向的外部文件——落盘前确认最终分量不是链接。
+    reject_symlink_target(path)?;
     std::fs::write(path, &updated)?;
     let (added, removed, lines) = diff_lines(&text, &updated);
     Ok(ToolOutcome {

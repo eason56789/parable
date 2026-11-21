@@ -236,25 +236,56 @@ fn zip_write_all(path: &Path, entries: &ZipEntries) -> Result<(), HarnessError> 
 
 // ===================================================================== 读取实现
 
+/// doc_read / 各提取路径的体积预检（P2）：pdf-extract、umya、calamine 都是
+/// 全量加载进内存再解析，超大文件会把进程内存打爆。统一 20MB 硬上限，
+/// 超限报明确错误，提示先转换或用 bash 分段提取。
+const DOC_READ_MAX_BYTES: u64 = 20 * 1024 * 1024;
+
+fn check_doc_size(path: &Path) -> Result<(), HarnessError> {
+    let meta = std::fs::metadata(path).map_err(HarnessError::Io)?;
+    if meta.len() > DOC_READ_MAX_BYTES {
+        return Err(HarnessError::Tool(format!(
+            "{} 是 {} 字节，超过文档读取上限 {DOC_READ_MAX_BYTES} 字节（20MB）——请先 doc_convert 转换/压缩，或用 bash 配合分段工具按需提取",
+            path.display(),
+            meta.len()
+        )));
+    }
+    Ok(())
+}
+
 /// pdf：pdf-extract 逐页文本（extract_text_by_pages 天然按页切，正好做分页标注）。
-fn extract_pdf(path: &Path) -> Result<(String, usize), HarnessError> {
+/// `max_chars` > 0 时按页累加即截：达到上限就停止后续页的提取与拼接，
+/// 不再把整份 PDF 的文本攒进内存（P2 资源上限）；0 = 不限。
+fn extract_pdf(path: &Path, max_chars: usize) -> Result<(String, usize), HarnessError> {
     let pages = pdf_extract::extract_text_by_pages(path).map_err(|e| {
         HarnessError::Tool(format!(
             "PDF 文本提取失败: {e}（可能是加密 PDF；扫描件没有文本层，请改用 computer/desktop 截图交给视觉模型读）"
         ))
     })?;
     let mut out = String::new();
+    let mut shown = 0usize;
     for (i, page) in pages.iter().enumerate() {
+        if max_chars > 0 && out.chars().count() >= max_chars {
+            break;
+        }
+        shown += 1;
         out.push_str(&format!("--- 第 {} 页 ---\n", i + 1));
         out.push_str(page.trim_end());
         out.push('\n');
     }
-    Ok((out, pages.len()))
+    if shown < pages.len() {
+        out.push_str(&format!(
+            "\n（已截断：全文共 {} 页，仅返回前 {shown} 页——已达 max_chars 上限；需要更多请调大 max_chars 或分段读取）\n",
+            pages.len()
+        ));
+    }
+    Ok((out, shown))
 }
 
 /// docx：zip 读 word/document.xml，quick-xml 抽取段落（w:t 拼接）与表格
 /// （行×单元格，` | ` 连接）。空段落跳过。
 fn extract_docx(path: &Path) -> Result<(String, usize, usize), HarnessError> {
+    check_doc_size(path)?;
     let bytes = zip_read_entry(path, "word/document.xml")?;
     let xml = String::from_utf8_lossy(&bytes);
     let (text, paragraphs, tables) = parse_docx_document_xml(&xml);
@@ -367,6 +398,7 @@ fn parse_docx_document_xml(xml: &str) -> (String, usize, usize) {
 
 /// pptx：按编号排序逐页抽 a:t 文本，标题占位符（ph type="title"）排前。
 fn extract_pptx(path: &Path) -> Result<(String, usize), HarnessError> {
+    check_doc_size(path)?;
     let mut archive = open_zip(path)?;
     let mut slides: Vec<(u32, String)> = archive
         .file_names()
@@ -514,6 +546,8 @@ fn extract_spreadsheet(
     path: &Path,
     sheet: Option<&str>,
 ) -> Result<(String, usize), HarnessError> {
+    // P2：calamine 是全量加载，超大工作簿先按体积预检拒收。
+    check_doc_size(path)?;
     let mut wb = calamine::open_workbook_auto(path)
         .map_err(|e| HarnessError::Tool(format!("表格打开失败: {e}")))?;
     let names = calamine::Reader::sheet_names(&mut wb);
@@ -2071,7 +2105,10 @@ pub async fn doc_read(a: &Value, ctx: &super::tools::ToolCtx) -> Result<super::t
         .and_then(|v| v.as_str())
         .ok_or_else(|| HarnessError::Tool("`path` is required".into()))?;
     let path = resolve_in_workspace(ctx, raw)?;
-    ctx.authorize("doc_read", &path.to_string_lossy(), crate::permission::Risk::Shell)
+    // Risk::ReadOnly（P3）：doc_read 是纯读取，之前标 Shell 会让只读白名单
+    // 之外的确认流把它当 shell 级操作弹框。permission.rs 的 ws 模式只读
+    // 白名单已含 doc_read，ws 模式行为不受影响。
+    ctx.authorize("doc_read", &path.to_string_lossy(), crate::permission::Risk::ReadOnly)
         .await?;
     if !path.exists() {
         return Err(HarnessError::Tool(format!(
@@ -2079,6 +2116,8 @@ pub async fn doc_read(a: &Value, ctx: &super::tools::ToolCtx) -> Result<super::t
             path.display()
         )));
     }
+    // P2 体积预检：分发前按 20MB 硬上限拒收超大文档（各提取路径是全量加载）。
+    check_doc_size(&path)?;
     let sheet = a.get("sheet").and_then(|v| v.as_str()).map(str::to_string);
     let max_chars = a
         .get("max_chars")
@@ -2090,7 +2129,8 @@ pub async fn doc_read(a: &Value, ctx: &super::tools::ToolCtx) -> Result<super::t
 
     let (body, stats, label) = match ext.as_str() {
         "pdf" => {
-            let (b, pages) = extract_pdf(&path)?;
+            // 按页累加即截：达到 max_chars 就停后续页（见 extract_pdf）。
+            let (b, pages) = extract_pdf(&path, max_chars)?;
             (b, format!("{pages} 页"), "PDF 文档")
         }
         "docx" => {
@@ -2304,7 +2344,17 @@ pub async fn doc_convert(a: &Value, ctx: &super::tools::ToolCtx) -> Result<super
         .ok_or_else(|| HarnessError::Tool("`to` is required（目标扩展名，如 docx）".into()))?
         .trim()
         .to_lowercase();
-    ctx.authorize("doc_convert", &format!("{} → {}", path.display(), to), crate::permission::Risk::Write)
+    // P3 风险分级：soffice 对已存在的输出文件是**静默覆盖**——覆盖用户已有
+    // 文件不可逆，输出路径命中已有文件时升级为 Destructive 送确认（ws/ask
+    // 弹框、full 直过）；目标不存在时维持普通 Write。（B-13 的避让命名在此
+    // 不适用：输出名由 soffice 按源文件名决定，harness 无法改，只能提级审批。）
+    let expected_out = path.with_extension(&to);
+    let risk = if expected_out.exists() {
+        crate::permission::Risk::Destructive
+    } else {
+        crate::permission::Risk::Write
+    };
+    ctx.authorize("doc_convert", &format!("{} → {}", path.display(), to), risk)
         .await?;
     if !path.exists() {
         return Err(HarnessError::Tool(format!("文件不存在：{}", path.display())));

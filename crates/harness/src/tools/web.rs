@@ -6,7 +6,7 @@
 use super::*;
 use futures::StreamExt;
 use serde_json::Value;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 
 /// 响应体硬上限:超过就停止下载,防止巨型响应拖垮内存。
 const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
@@ -25,19 +25,15 @@ pub async fn fetch(a: &Value, ctx: &ToolCtx) -> Result<ToolOutcome, HarnessError
 
     ctx.authorize("web_fetch", &url, Risk::Network).await?;
 
-    let client = crate::config::apply_proxy(reqwest::Client::builder())
-        .connect_timeout(std::time::Duration::from_secs(15))
-        .timeout(std::time::Duration::from_secs(45))
-        .user_agent("Parable-Harness/0.1")
-        // 关闭 reqwest 自动重定向:每一跳连网前都做 SSRF 复检。
-        // 事后只查最终 URL 拦不住——内网连接在中间跳已经发生。
-        .redirect(reqwest::redirect::Policy::none())
-        .build()?;
-
     let mut current = url.clone();
     let mut resp = None;
     for _ in 0..6 {
-        assert_remote_public(&current).await?;
+        // DNS 重绑定防线（P1）：每一跳都独立「解析 → 校验 → 钉住」。
+        // 只校验不钉住是不够的——reqwest 之后会再次独立解析,两次解析之间
+        // DNS 记录可以被换掉,连接就会落到内网。校验通过的 IP 直接注入
+        // client 的 resolve 覆盖表,连接只许落在已校验的地址上。
+        let (host, port, addrs) = resolve_public_addrs(&current).await?;
+        let client = pinned_client(&host, port, &addrs, 15, 45, "Parable-Harness/0.1")?;
         let r = client.get(&current).send().await?;
         let status = r.status();
         if status.is_redirection() {
@@ -124,15 +120,21 @@ async fn read_body_capped(
     Ok((String::from_utf8_lossy(&out).into_owned(), clipped))
 }
 
-/// SSRF 防护:解析 URL 主机并检查每个解析结果的 IP,环回/私网/链路本地/
-/// 未指定/唯一本地等一律拒绝;主机无法解析同样拒绝。DNS 放阻塞线程执行,
-/// 避免卡住异步运行时。
-async fn assert_remote_public(url: &str) -> Result<(), HarnessError> {
+/// SSRF 防护 + DNS 重绑定防线:解析 URL 主机并检查每个解析结果的 IP,
+/// 环回/私网/链路本地/未指定/唯一本地等一律拒绝;主机无法解析同样拒绝。
+/// 与旧版 [`assert_remote_public`] 的区别:校验通过的地址**带端口返回**,
+/// 调用方用 [`pinned_client`] 把它们注入 reqwest 的 resolve 覆盖表——
+/// 「校验」与「连接」必须用同一份地址,否则 reqwest 再次独立解析时 DNS
+/// 记录可被换掉(TOCTOU),连接就落到内网。DNS 放阻塞线程执行,避免卡住
+/// 异步运行时。
+async fn resolve_public_addrs(url: &str) -> Result<(String, u16, Vec<SocketAddr>), HarnessError> {
     let host = extract_host(url)
         .ok_or_else(|| HarnessError::Tool(format!("cannot parse host from {url}")))?;
+    let port = extract_port(url);
+    let value = host.clone();
     let addrs = tokio::task::spawn_blocking(move || {
         use std::net::ToSocketAddrs;
-        (host.as_str(), 0u16)
+        (value.as_str(), 0u16)
             .to_socket_addrs()
             .map(|it| it.map(|a| a.ip()).collect::<Vec<_>>())
     })
@@ -144,14 +146,71 @@ async fn assert_remote_public(url: &str) -> Result<(), HarnessError> {
             "host of {url} resolved to no addresses"
         )));
     }
-    for ip in addrs {
-        if !is_public_ip(ip) {
+    for ip in &addrs {
+        if !is_public_ip(*ip) {
             return Err(HarnessError::Tool(format!(
                 "refusing to fetch {url}: {ip} is a loopback/private/link-local address"
             )));
         }
     }
-    Ok(())
+    let pinned: Vec<SocketAddr> = addrs.into_iter().map(|ip| SocketAddr::new(ip, port)).collect();
+    Ok((host, port, pinned))
+}
+
+/// 用已校验地址构建 client:`resolve(host, addr)` 把 IP 写进 reqwest 的
+/// DNS 覆盖表,连接阶段不再自行解析。每跳重建 client(ClientBuilder 不可
+/// clone),超时/UA/关自动重定向等参数与原实现一致。
+fn pinned_client(
+    host: &str,
+    port: u16,
+    addrs: &[SocketAddr],
+    connect_secs: u64,
+    total_secs: u64,
+    ua: &str,
+) -> Result<reqwest::Client, HarnessError> {
+    let mut b = crate::config::apply_proxy(reqwest::Client::builder())
+        .connect_timeout(std::time::Duration::from_secs(connect_secs))
+        .timeout(std::time::Duration::from_secs(total_secs))
+        .user_agent(ua)
+        // 关闭 reqwest 自动重定向:每一跳连网前都做 SSRF 复检。
+        // 事后只查最终 URL 拦不住——内网连接在中间跳已经发生。
+        .redirect(reqwest::redirect::Policy::none());
+    for a in addrs {
+        // 端口统一换成本跳 URL 的端口:resolve 的 SocketAddr 必须指向真实
+        // 服务端口,解析返回的 0 端口只是占位。
+        b = b.resolve(host, SocketAddr::new(a.ip(), port));
+    }
+    Ok(b.build()?)
+}
+
+/// URL 的显式端口;缺省按 scheme 回退(http 80 / https 443)。
+fn extract_port(url: &str) -> u16 {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url);
+    let authority = rest
+        .split(|c| c == '/' || c == '?' || c == '#')
+        .next()
+        .unwrap_or("");
+    let authority = authority
+        .rsplit_once('@')
+        .map(|(_, h)| h)
+        .unwrap_or(authority);
+    if let Some(open) = authority.strip_prefix('[') {
+        if let Some(close) = open.find(']') {
+            if let Some(p) = open[close + 1..].strip_prefix(':') {
+                if let Ok(n) = p.parse() {
+                    return n;
+                }
+            }
+        }
+    } else if let Some((_, p)) = authority.rsplit_once(':') {
+        if let Ok(n) = p.parse() {
+            return n;
+        }
+    }
+    if url.starts_with("https") { 443 } else { 80 }
 }
 
 /// 从 URL 里取主机名:去 scheme/userinfo/端口;IPv6 字面量取方括号内的部分。
@@ -420,11 +479,12 @@ pub async fn multi_search(a: &Value, ctx: &ToolCtx) -> Result<ToolOutcome, Harne
         Vec::new()
     };
 
-    let client = crate::config::apply_proxy(reqwest::Client::builder())
+    // AnySearch 走固定 API 端点（不接受模型给的 URL），普通 client 即可；
+    // 各引擎抓取则改用与 web_fetch 相同的手动重定向循环 + 逐跳钉 IP
+    // （不再用 Policy::limited 自动跟随——那会让中间跳绕过 SSRF 复检）。
+    let api_client = crate::config::apply_proxy(reqwest::Client::builder())
         .connect_timeout(std::time::Duration::from_secs(6))
         .timeout(std::time::Duration::from_secs(30))
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36")
-        .redirect(reqwest::redirect::Policy::limited(5))
         .build()?;
 
     let total_platforms = engines.len() + usize::from(anysearch_on);
@@ -439,13 +499,14 @@ pub async fn multi_search(a: &Value, ctx: &ToolCtx) -> Result<ToolOutcome, Harne
     // 平台上。12s 是「弱网还能回」与「别让人干等」的折中；超时的源如实
     // 标注，其它平台的结果照常返回。
     const PER_PLATFORM_SECS: u64 = 12;
+    const ENGINE_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36";
 
     // AnySearch 与各引擎**并发**抓取：旧实现串行（AnySearch → 必应 → 百度
     // → …），6 个源各 1-3 秒就是十几秒的空等。现在同时发出，谁先回谁先落，
     // 总耗时 ≈ 最慢的那个（且被 12s 上限兜住）。
     let key = anysearch_key(ctx);
     let aq = query.clone();
-    let ac = client.clone();
+    let ac = api_client.clone();
     let anysearch_fut = async move {
         if !anysearch_on {
             return None;
@@ -459,47 +520,70 @@ pub async fn multi_search(a: &Value, ctx: &ToolCtx) -> Result<ToolOutcome, Harne
     };
 
     let engine_futs = engines.into_iter().map(|(label, url)| {
-        let client = client.clone();
         async move {
             let per = per_engine;
             let work = async {
-                match client.get(&url).send().await {
-                    Ok(resp) => {
-                        let status = resp.status();
-                        if !status.is_success() {
-                            return Err(format!("HTTP {status}"));
-                        }
-                        let ctype = resp
+                // 与 fetch 同一纪律：手动 6 跳重定向循环，每一跳独立
+                // 「解析 → 校验 → 钉住 IP」，响应体走 10MB 流式上限。
+                let mut current = url.clone();
+                let mut resp = None;
+                for _ in 0..6 {
+                    let (host, port, addrs) = resolve_public_addrs(&current)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    let client = pinned_client(&host, port, &addrs, 6, 30, ENGINE_UA)
+                        .map_err(|e| e.to_string())?;
+                    let r = client
+                        .get(&current)
+                        .send()
+                        .await
+                        .map_err(|e| format!("请求失败: {e}"))?;
+                    let status = r.status();
+                    if status.is_redirection() {
+                        let loc = r
                             .headers()
-                            .get("content-type")
+                            .get("location")
                             .and_then(|v| v.to_str().ok())
                             .unwrap_or("")
                             .to_string();
-                        match resp.text().await {
-                            Ok(body) => {
-                                let text = if ctype.contains("html")
-                                    || body.trim_start().starts_with('<')
-                                {
-                                    html_to_text(&body)
-                                } else {
-                                    body
-                                };
-                                if is_blocked(&text) {
-                                    return Err(
-                                        "该平台返回了反爬验证页，未取得结果".to_string()
-                                    );
-                                }
-                                let clipped = clip(&text, per);
-                                if clipped.trim().is_empty() {
-                                    return Err("无结果".to_string());
-                                }
-                                Ok(clipped)
-                            }
-                            Err(e) => Err(format!("读取失败: {e}")),
-                        }
+                        current = resolve_redirect(&current, &loc).ok_or_else(|| {
+                            format!("unsupported redirect target `{loc}` from {current}")
+                        })?;
+                        continue;
                     }
-                    Err(e) => Err(format!("请求失败: {e}")),
+                    resp = Some(r);
+                    break;
                 }
+                let resp =
+                    resp.ok_or_else(|| "重定向次数过多".to_string())?;
+                let status = resp.status();
+                if !status.is_success() {
+                    return Err(format!("HTTP {status}"));
+                }
+                let ctype = resp
+                    .headers()
+                    .get("content-type")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("")
+                    .to_string();
+                // P3 资源上限：响应体与 fetch 同一口径——10MB 流式截断，
+                // 不再 resp.text() 整份进内存。
+                let (body, _) = read_body_capped(resp, MAX_BODY_BYTES)
+                    .await
+                    .map_err(|e| format!("读取失败: {e}"))?;
+                let text = if ctype.contains("html") || body.trim_start().starts_with('<') {
+                    html_to_text(&body)
+                } else {
+                    body
+                };
+                if is_blocked(&text) {
+                    return Err("该平台返回了反爬验证页，未取得结果".to_string());
+                }
+                let clipped = clip(&text, per);
+                if clipped.trim().is_empty() {
+                    return Err("无结果".to_string());
+                }
+                Ok(clipped)
             };
             let res = match tokio::time::timeout(
                 std::time::Duration::from_secs(PER_PLATFORM_SECS),
@@ -940,6 +1024,17 @@ mod tests {
         assert_eq!(extract_host("http://[::1]:9000/x"), Some("::1".into()));
         assert_eq!(extract_host("ftp://example.com/"), None);
         assert_eq!(extract_host("https:///nohost"), None);
+    }
+
+    #[test]
+    fn extract_port_defaults_and_explicit() {
+        assert_eq!(extract_port("https://example.com/a"), 443);
+        assert_eq!(extract_port("http://example.com/"), 80);
+        assert_eq!(extract_port("http://example.com:8080/x"), 8080);
+        // IPv6 字面量的端口在方括号外
+        assert_eq!(extract_port("https://[::1]:9000/x"), 9000);
+        assert_eq!(extract_port("https://[::1]/x"), 443);
+        assert_eq!(extract_port("http://u:p@example.com:1234/"), 1234);
     }
 
     #[test]

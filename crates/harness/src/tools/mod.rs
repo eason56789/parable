@@ -317,6 +317,48 @@ impl ToolCtx {
     ) -> Result<(), HarnessError> {
         self.gate(tool, path, risk, None, reason, preview).await
     }
+
+    /// 权限总闸收口（P1）：信息型/控制型工具的轻量闸门。
+    ///
+    /// `GATED_INFO_TOOLS` 里的工具此前从不调用 authorize——plan 模式白名单与
+    /// permissions.toml 的 deny 规则对它们全部失效。这里统一补两道硬检查：
+    /// - plan 模式：与 [`gate`] 同一份白名单口径，白名单外直接拒绝；
+    /// - deny 规则：命中即硬拒（C-07 语义，不弹确认框）；
+    /// 放行时落一条 ReadOnly 审计（audit_auto），保证审计链不再漏掉这些工具。
+    ///
+    /// 刻意不走完整 [`gate`]：这些工具没有真实路径主体，ws/ask 模式下
+    /// auto_allow 必然落空，会把纯查询操作也送去弹确认框；而 ask_user /
+    /// todo_write 本身参与提问/计划流程，authorize 里再挂起等确认会与
+    /// 自己的面板互锁——所以本闸门只做拦截与审计，不挂起。
+    /// 控制型动作 `agent_interrupt` 不在名单里：它单独走完整 [`gate`] 按
+    /// Risk::Write 审批（见 execute_inner）。
+    async fn gate_info(&self, tool: &str) -> Result<(), HarnessError> {
+        if self.plan_mode
+            && !matches!(
+                tool,
+                "read_file" | "glob" | "grep" | "list_dir" | "todo_write" | "ask_user"
+                    | "read_skill"
+            )
+        {
+            return Err(HarnessError::PermissionDenied(
+                "plan mode is on: only read-only tools and planning are allowed".into(),
+            ));
+        }
+        // deny 规则是硬阻断（C-07）；这些工具没有路径主体，path 传空串，
+        // 只有 tool 维度（或 path=`*`）的规则才会命中。
+        if self.broker.rule_denied(tool, "", None).await {
+            self.broker.note_decision(&self.call_id, "deny").await;
+            return Err(HarnessError::PermissionDenied(format!(
+                "denied by rule: {tool}"
+            )));
+        }
+        // 审计落痕（不挂起）：decision 标 "auto"，与 gate 放行路径同口径。
+        self.broker
+            .audit_auto(&self.call_id, tool, "", Risk::ReadOnly)
+            .await;
+        self.broker.note_decision(&self.call_id, "auto").await;
+        Ok(())
+    }
 }
 
 // ------------------------------------------------------------------ schema helpers
@@ -603,6 +645,25 @@ fn read_image(path: &Path, mime: &str) -> Result<ToolOutcome, HarnessError> {
 
 // ------------------------------------------------------------------ registry
 
+/// 权限总闸收口（P1）：以下信息型/控制型工具的函数体从不调用
+/// `ctx.authorize`，plan 模式白名单与 permissions.toml 的 deny 规则对它们
+/// 失效。execute_inner 入口对名单内的工具统一补一次 [`ToolCtx::gate_info`]。
+/// 新增此类工具时必须同步加进名单（测试 `gated_info_tools_stay_declared`
+/// 只验证双向声明关系，拦不住漏登记）。
+const GATED_INFO_TOOLS: &[&str] = &[
+    "background_list",
+    "agent_list",
+    "schedule_list",
+    "schedule_view",
+    "team_task_list",
+    "team_task_get",
+    "settings_get",
+    "list_models",
+    "read_skill",
+    "todo_write",
+    "ask_user",
+];
+
 /// Process-wide memo for the tool schema list. Keyed by everything the
 /// schemas depend on (search preference, key presence, plugin count).
 fn specs_cache() -> &'static std::sync::Mutex<
@@ -812,7 +873,7 @@ impl Registry {
                     "path": str_prop("Directory to search (defaults to workspace root)"),
                     "glob": str_prop("Only search files matching this glob, e.g. **/*.rs"),
                     "ignore_case": bool_prop("Case-insensitive (default false)"),
-                    "max_results": int_prop("Cap on matches (default 200)"),
+                    "max_results": int_prop("Cap on matches (default 200, max 2000)"),
                 }), &["pattern"]),
             },
             ToolSpec {
@@ -821,7 +882,7 @@ impl Registry {
                 input_schema: obj(json!({
                     "command": str_prop("Command line to run"),
                     "cwd": str_prop("Working directory (defaults to workspace base)"),
-                    "timeout_ms": int_prop("Timeout in milliseconds (default 120000)"),
+                    "timeout_ms": int_prop("Timeout in milliseconds (default 120000, max 600000)"),
                     "background": bool_prop("Run in the background and return a job id immediately (default false) — use for long-running processes"),
                     "description": str_prop(DESC_PROMPT_BASH),
                 }), &["command"]),
@@ -1417,6 +1478,18 @@ skill matches the current request, then follow the steps it contains. Read-only.
     }
 
     async fn execute_inner(&self, name: &str, args: &Value, ctx: &ToolCtx) -> Result<ToolOutcome, HarnessError> {
+        // 权限总闸收口（P1）：信息型/控制型工具在入口统一过闸——plan 模式
+        // 拦截 + deny 规则 + ReadOnly 审计（见 gate_info，不挂起等确认）。
+        if GATED_INFO_TOOLS.contains(&name) {
+            ctx.gate_info(name).await?;
+        }
+        // 控制型例外：agent_interrupt（停止子代理）单独走完整审批链——
+        // full 模式直接过，ws/ask 弹确认，plan 模式拦截；id 作为路径主体。
+        // 它不参与提问流程，不存在 gate_info 注释里说的挂起互锁问题。
+        if name == "agent_interrupt" {
+            let id = args["id"].as_str().unwrap_or("").trim().to_string();
+            ctx.authorize("agent_interrupt", &id, Risk::Write).await?;
+        }
         let res: Result<ToolOutcome, HarnessError> = match name {
             "read_file" => self.read_file(args, ctx).await,
             "write_file" => self.write_file(args, ctx).await,
@@ -1674,7 +1747,9 @@ impl Registry {
             .await?;
         let glob_filter = a["glob"].as_str();
         let icase = a["ignore_case"].as_bool().unwrap_or(false);
-        let max = a["max_results"].as_u64().unwrap_or(200) as usize;
+        // P2 资源上限：模型可以随手写 max_results=10_000_000，扫描会在收满
+        // 前跑穿整个仓库。clamp 在入口处；search.rs 里另有绝对条数/字节上限兜底。
+        let max = a["max_results"].as_u64().unwrap_or(200).min(2000) as usize;
         search_impl::grep(&root, pattern, glob_filter, icase, max)
     }
 
@@ -1686,7 +1761,9 @@ impl Registry {
             Some(c) if !c.is_empty() && c != "." => self.resolve(c)?,
             _ => self.workspace.clone(),
         };
-        let timeout = a["timeout_ms"].as_u64().unwrap_or(120_000);
+        // P3 资源上限：timeout 与后台终端的 TERM_TIMEOUT_MS（600s）对齐，
+        // 模型传任意大值也不能把前台命令变成无限期占位。
+        let timeout = a["timeout_ms"].as_u64().unwrap_or(120_000).min(600_000);
         // 模型写的调用意图（可选）：进工具卡标题与 hooks 载荷。
         let description = a["description"].as_str().unwrap_or_default();
 
@@ -3360,5 +3437,122 @@ mod tests {
         // 搜索偏好变化：ETag 必须随之变化。
         let c = Registry::new(std::path::PathBuf::from(".")).with_search("deepseek", "", "");
         assert_ne!(a.schema_etag(), c.schema_etag());
+    }
+
+    // ---------------------------------------------------------------- 权限总闸
+
+    /// 测试专用最小 ToolCtx：只搭权限链需要的部件（broker/questions/store）。
+    fn gate_test_ctx(plan_mode: bool) -> ToolCtx {
+        ToolCtx {
+            workspace: std::path::PathBuf::from("."),
+            permission_mode: "ws".into(),
+            plan_mode,
+            broker: Arc::new(crate::permission::PermissionBroker::new(
+                crate::event::EventHub::new(),
+            )),
+            questions: Arc::new(crate::agent::QuestionBroker::new()),
+            hub: crate::event::EventHub::new(),
+            session_id: "sess-gate".into(),
+            call_id: "call-gate".into(),
+            schedule: None,
+            subagents: None,
+            store: Arc::new(crate::session::SessionStore::new()),
+            runtime: None,
+            search_key: String::new(),
+            anysearch_key: String::new(),
+            search_pref: "auto".into(),
+            computer: None,
+            desktop: None,
+            ask_timeout_ms: 0,
+            hooks: Arc::new(Vec::new()),
+            checkpoint: None,
+            turn_id: "turn-gate".into(),
+            mcp: None,
+            config: None,
+            terms: None,
+        }
+    }
+
+    /// 权限总闸收口（P1）：名单内的工具此前从不走 authorize，plan 模式拦不住。
+    /// 收口后 plan 模式下 execute 必须直接 PermissionDenied。
+    #[tokio::test]
+    async fn gated_info_tools_are_blocked_in_plan_mode() {
+        let _home = crate::testutil::TestHome::new("gate-info-plan");
+        let ctx = gate_test_ctx(true);
+        let reg = Registry::new(std::path::PathBuf::from("."));
+        for name in ["list_models", "settings_get", "background_list", "schedule_list"] {
+            let err = reg
+                .execute(name, &serde_json::json!({}), &ctx)
+                .await
+                .err()
+                .unwrap_or_else(|| panic!("{name} must be denied in plan mode"));
+            assert!(
+                matches!(err, HarnessError::PermissionDenied(_)),
+                "{name} must be PermissionDenied, got {err}"
+            );
+        }
+    }
+
+    /// 白名单内的 todo_write 在 plan 模式照常放行——闸门不得把参与计划/提问
+    /// 流程的工具搞成挂起或拒绝（gate_info 不挂起）。
+    #[tokio::test]
+    async fn todo_write_stays_plan_whitelisted() {
+        let _home = crate::testutil::TestHome::new("gate-info-todo");
+        let ctx = gate_test_ctx(true);
+        let reg = Registry::new(std::path::PathBuf::from("."));
+        let out = reg
+            .execute(
+                "todo_write",
+                &serde_json::json!({"todos":[{"id":"1","content":"x","status":"pending"}]}),
+                &ctx,
+            )
+            .await
+            .expect("todo_write must pass the gate in plan mode");
+        assert!(out.ok);
+    }
+
+    /// permissions.toml 的 deny 规则必须重新覆盖名单内的工具（此前失效）。
+    #[tokio::test]
+    async fn gated_info_tools_honor_deny_rules() {
+        let home = crate::testutil::TestHome::new("gate-info-deny");
+        std::fs::write(
+            home.root().join("permissions.toml"),
+            "[[deny]]\ntool = \"list_models\"\npath = \"*\"\naction = \"deny\"\n",
+        )
+        .unwrap();
+        let ctx = gate_test_ctx(false);
+        let reg = Registry::new(std::path::PathBuf::from("."));
+        let err = reg
+            .execute("list_models", &serde_json::json!({}), &ctx)
+            .await
+            .err()
+            .expect("deny rule must hard-block list_models");
+        assert!(
+            matches!(err, HarnessError::PermissionDenied(_)),
+            "got {err}"
+        );
+    }
+
+    /// 名单与注册表的双向一致性：名单里的工具必须真的声明过（防手滑写错名），
+    /// agent_interrupt 走完整 gate、不在轻量名单里但必须声明。
+    #[test]
+    fn gated_info_tools_stay_declared() {
+        let reg = Registry::new(std::path::PathBuf::from("."));
+        let names: Vec<String> = reg.build_specs().iter().map(|s| s.name.clone()).collect();
+        for t in GATED_INFO_TOOLS {
+            assert!(names.iter().any(|n| n == t), "gated tool {t} must be declared");
+        }
+        assert!(
+            !GATED_INFO_TOOLS.contains(&"agent_interrupt"),
+            "agent_interrupt goes through the full gate, not gate_info"
+        );
+        assert!(names.iter().any(|n| n == "agent_interrupt"));
+        // 名单内不允许出现声明了完整 authorize 的工具（防双重审批）。
+        for already_gated in ["bash", "read_file", "write_file", "background_kill"] {
+            assert!(
+                !GATED_INFO_TOOLS.contains(&already_gated),
+                "{already_gated} already authorizes itself"
+            );
+        }
     }
 }

@@ -984,7 +984,13 @@ impl Worker {
         let (uia, walker) = self.ensure_uia()?;
         unsafe {
             let elem = match hwnd.filter(|h| *h != 0) {
-                Some(h) => uia.ElementFromHandle(HWND(h as *mut _)).map_err(uia_err)?,
+                Some(h) => {
+                    // B-06 同款：显式 hwnd 必须命中最近一次窗口清单，防模型
+                    // 猜/遍历任意 hwnd 探测其他应用的窗口内容（与
+                    // window_show/window_close 的处理一致，无效即报错）。
+                    self.check_hwnd(h)?;
+                    uia.ElementFromHandle(HWND(h as *mut _)).map_err(uia_err)?
+                }
                 None => {
                     let fg = GetForegroundWindow();
                     if fg.0.is_null() {

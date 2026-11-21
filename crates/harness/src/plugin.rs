@@ -505,6 +505,28 @@ fn normalize_js_literal(s: &str) -> String {
     re_k.replace_all(&s2, "$1\"$2\":").into_owned()
 }
 
+/// Windows cmd.exe 元字符：参数值命中任一即拒绝（command 模板路径）。
+/// - `"`：shell_quote 的 `""` 翻倍是 MSVCRT 惯例，cmd.exe 不按它解析——cmd
+///   的引号是**状态开关**，参数里的 `"` 会把引号边界打翻，其后内容逃出
+///   引号成为命令语法（经典注入）；
+/// - `%`：cmd 在引号内仍展开 %VAR%（环境变量注入/泄露面）；
+/// - `& ^ | < >`：引号外是命令拼接/重定向元字符。保守做法：参数值含任一
+///   元字符直接拒绝，提示改用内联脚本 / env 传参模式（PARABLE_TOOL_ARGS）。
+const CMD_META_CHARS: &[char] = &['%', '"', '&', '^', '|', '<', '>'];
+
+/// 参数值命中的第一个 cmd 元字符（command 模板路径的 Windows 防线）。
+/// 独立成函数方便单测；非 Windows 平台恒 None。
+fn windows_unsafe_arg(v: &Value) -> Option<char> {
+    if !cfg!(target_os = "windows") {
+        return None;
+    }
+    let s = match v {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+    s.chars().find(|c| CMD_META_CHARS.contains(c))
+}
+
 /// Run a manifest tool's external command with `{{args.<param>}}` substitution.
 pub async fn run_plugin_tool(
     t: &PluginTool,
@@ -515,14 +537,29 @@ pub async fn run_plugin_tool(
     // 先渲染出真正要执行的命令,再进权限链:面板能看到原样命令(而不再只是
     // description),Always 规则也按渲染后的命令精确匹配。
     let mut cmd = t.command.clone();
+    // Windows 引号/元字符注入防线（P2）：只作用于 command 模板路径——内联
+    // 脚本工具的参数走 PARABLE_TOOL_ARGS 环境变量，不经 cmd.exe 解析。
+    // 只检查真正会被替换进模板的参数（占位符在模板里的才构成注入面）。
+    let mut blocked_arg: Option<(String, char)> = None;
     if let Some(obj) = args.as_object() {
         for (k, v) in obj {
             let s = match v {
                 Value::String(s) => s.clone(),
                 other => other.to_string(),
             };
-            cmd = cmd.replace(&format!("{{{{args.{k}}}}}"), &shell_quote(&s));
+            let placeholder = format!("{{{{args.{k}}}}}");
+            if t.script.is_empty() && t.command.contains(&placeholder) {
+                if let Some(c) = windows_unsafe_arg(v) {
+                    blocked_arg = Some((k.clone(), c));
+                }
+            }
+            cmd = cmd.replace(&placeholder, &shell_quote(&s));
         }
+    }
+    if let Some((k, c)) = blocked_arg {
+        return Err(HarnessError::Tool(format!(
+            "plugin 工具参数 `{k}` 含 cmd 元字符 `{c}`：Windows cmd.exe 的引号状态切换/变量展开会让它逃出引号边界拼接命令，已拒绝执行。请在插件里改用内联脚本（code）或 env 传参模式（PARABLE_TOOL_ARGS）"
+        )));
     }
     if !t.script.is_empty() {
         // 内联代码工具:权限面板展示真正会被执行的源码,而不是只有一句路径命令。
@@ -610,20 +647,59 @@ pub async fn run_plugin_tool(
         .env("PARABLE_TOOL_NAME", &t.name)
         .env("PARABLE_TOOL_WORKSPACE", &workspace)
         .kill_on_drop(true);
-    let out = match tokio::time::timeout(std::time::Duration::from_secs(120), command.output()).await
+    // P3：超时路径复用整树击杀——kill_on_drop 只杀直接孩子，npx/npm 起
+    // 的孙进程会残留。手动 spawn + 管道读（与 output() 同语义：stdin=null、
+    // stdout/stderr=piped），超时先 taskkill /T 再收尸。
+    let mut child = command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| HarnessError::Tool(format!("plugin tool failed to start: {e}")))?;
+    let mut stdout_pipe = child.stdout.take();
+    let mut stderr_pipe = child.stderr.take();
+    let out = match tokio::time::timeout(std::time::Duration::from_secs(120), async {
+        use tokio::io::AsyncReadExt;
+        let so = async {
+            let mut buf = Vec::new();
+            if let Some(p) = stdout_pipe.as_mut() {
+                let _ = p.read_to_end(&mut buf).await;
+            }
+            buf
+        };
+        let se = async {
+            let mut buf = Vec::new();
+            if let Some(p) = stderr_pipe.as_mut() {
+                let _ = p.read_to_end(&mut buf).await;
+            }
+            buf
+        };
+        let (so_b, se_b) = tokio::join!(so, se);
+        let status = child.wait().await;
+        (status, so_b, se_b)
+    })
+    .await
     {
-        Ok(r) => r,
+        Ok((Ok(status), so_b, se_b)) => (status, so_b, se_b),
+        Ok((Err(e), ..)) => {
+            return Err(HarnessError::Tool(format!("plugin tool failed: {e}")))
+        }
         Err(_) => {
+            // 整树击杀再收尸，孙进程不留残留
+            if let Some(pid) = child.id() {
+                crate::tools::shell::kill_tree_pid(pid);
+            }
+            let _ = child.start_kill();
+            let _ = child.wait().await;
             return Err(HarnessError::Tool(format!(
                 "plugin tool `{}` timed out after 120s",
                 t.name
-            )))
+            )));
         }
     };
-    let out =
-        out.map_err(|e| HarnessError::Tool(format!("plugin tool failed to start: {e}")))?;
-    let mut text = String::from_utf8_lossy(&out.stdout).to_string();
-    let err = String::from_utf8_lossy(&out.stderr);
+    let (status, stdout_bytes, stderr_bytes) = out;
+    let mut text = String::from_utf8_lossy(&stdout_bytes).to_string();
+    let err = String::from_utf8_lossy(&stderr_bytes);
     if !err.trim().is_empty() {
         text.push_str("\n[stderr]\n");
         text.push_str(&err);
@@ -636,7 +712,7 @@ pub async fn run_plugin_tool(
         text.truncate(end);
         text.push_str("\n…[truncated]");
     }
-    let ok = out.status.success();
+    let ok = status.success();
     Ok(crate::tools::ToolOutcome {
         ok,
         title: format!("{} · {}", t.name, if ok { "ok" } else { "failed" }),
@@ -705,6 +781,33 @@ export function apply(ctx) {
         } else {
             assert_eq!(shell_quote("a'b"), "'a'\\''b'");
         }
+    }
+
+    /// P2：command 模板参数里的 cmd 元字符必须被识别拒绝——`"` 打翻引号
+    /// 状态，% 在引号内仍展开，& ^ | < > 在引号外拼接/重定向。
+    #[test]
+    fn windows_unsafe_args_are_detected() {
+        if !cfg!(target_os = "windows") {
+            return;
+        }
+        for bad in [
+            "say \"hi\" & del /q *",
+            "100% done",
+            "a^b",
+            "a|b",
+            "a<b",
+            "a>b",
+            "normal\"quote",
+        ] {
+            assert!(
+                windows_unsafe_arg(&serde_json::json!(bad)).is_some(),
+                "{bad} must be flagged"
+            );
+        }
+        // 普通值与数字/布尔放行
+        assert_eq!(windows_unsafe_arg(&serde_json::json!("plain text")), None);
+        assert_eq!(windows_unsafe_arg(&serde_json::json!(123)), None);
+        assert_eq!(windows_unsafe_arg(&serde_json::json!(true)), None);
     }
 
     #[test]

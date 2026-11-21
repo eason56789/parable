@@ -7,6 +7,74 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 
 const MAX_OUTPUT: usize = 24_000;
 
+/// P3 资源上限：前台命令最久 10 分钟，与 term.rs 的 TERM_TIMEOUT_MS 对齐。
+/// 模型传任意大的 timeout_ms 也不能把前台命令变成无限期占位。
+const MAX_TIMEOUT_MS: u64 = 600_000;
+
+/// bash 子进程环境白名单（SEC-01 对齐，plugin.rs / mcp.rs 的 spawn 同款）。
+///
+/// bash 此前整份继承父进程环境——父进程里躺着 provider key / token
+/// （OPENAI_API_KEY、GH_TOKEN、ANYSEARCH_API_KEY 等），任何子进程都能整锅
+/// 端走。做法：
+/// 1. `env_clear()` 清空；
+/// 2. 回填 lib.rs 的 [`crate::CHILD_ENV_WHITELIST`]（pub 常量，直接引用，
+///    来源单一不漂移；与 plugin/mcp/hooks 的同步义务由该常量承担）；
+/// 3. 回填 [`BASH_ENV_TOOLCHAIN`]：bash 跑的是用户的构建命令，只留上面
+///    十几个变量会破坏 npx/cargo/node 等工具链——补充的都是无密钥性质的
+///    系统/路径/代理变量；
+/// 4. 敏感关键词过滤：变量名（大写）含 KEY|TOKEN|SECRET|PASSWORD|PASSWD|
+///    CREDENTIAL 的一律不注入——黑名单关键词法比枚举具体密钥名稳。
+///
+/// 范围说明：这里只管 spawn 时父进程传下去的环境；用户 shell 配置文件
+/// （~/.bashrc / profile）里设置的变量发生在子进程内部，不受此过滤。
+const BASH_ENV_TOOLCHAIN: &[&str] = &[
+    // Windows 系统标识（脚本与安装器常读）
+    "OS", "SystemDrive", "windir", "COMPUTERNAME", "USERNAME", "USERDOMAIN",
+    "USERDOMAIN_ROAMINGPROFILE", "PROCESSOR_ARCHITECTURE", "PROCESSOR_IDENTIFIER",
+    "PROCESSOR_LEVEL", "PROCESSOR_REVISION", "PATHEXT", "SESSIONNAME",
+    // Windows 公共安装根（node/python 安装器、MSVC 环境探测用）
+    "COMMONPROGRAMFILES", "COMMONPROGRAMFILES(X86)", "ProgramW6432",
+    "ALLUSERSPROFILE", "PUBLIC", "HOMEDRIVE", "HOMEPATH", "DriverData",
+    // Git Bash / MSYS 自身依赖（/etc/profile 按 MSYSTEM 选 PATH 套件）
+    "MSYSTEM",
+    // 网络（非密钥）：cargo/git/npm/pip 走代理必需
+    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
+    // 证书链（企业 CA / 自签场景）
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "CURL_CA_BUNDLE", "REQUESTS_CA_BUNDLE",
+    // 常见工具链根目录（非密钥）
+    "CARGO_HOME", "RUSTUP_HOME", "JAVA_HOME", "GRADLE_HOME", "MAVEN_HOME", "M2_HOME",
+    "ANDROID_HOME", "ANDROID_SDK_ROOT", "NDK_HOME", "PNPM_HOME", "PYTHONHOME",
+    "PYTHONPATH", "VIRTUAL_ENV", "GOPATH", "GOROOT", "GOMODCACHE",
+];
+
+/// 敏感变量名关键词：命中即不注入子进程环境。
+const SENSITIVE_ENV_KEYWORDS: &[&str] =
+    &["KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL"];
+
+fn is_sensitive_env_name(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    SENSITIVE_ENV_KEYWORDS.iter().any(|k| upper.contains(k))
+}
+
+/// env_clear 后按白名单回填（敏感关键词过滤优先于白名单命中）。
+fn apply_child_env(cmd: &mut tokio::process::Command) {
+    cmd.env_clear();
+    let mut inject = |name: &str| {
+        if is_sensitive_env_name(name) {
+            return;
+        }
+        if let Ok(v) = std::env::var(name) {
+            cmd.env(name, v);
+        }
+    };
+    for key in crate::CHILD_ENV_WHITELIST {
+        inject(key);
+    }
+    for key in BASH_ENV_TOOLCHAIN {
+        inject(key);
+    }
+}
+
 fn shell_pair() -> (String, Vec<String>) {
     // Git Bash / MSYS on Windows keeps `grep`, `ls`, `cargo` etc. usable; cmd.exe
     // does not. Prefer bash when it is on the PATH or in the usual install spots.
@@ -41,7 +109,9 @@ fn shell_pair() -> (String, Vec<String>) {
 /// 终止整个进程树。Windows 用 `taskkill /F /T`(递归杀掉孙进程);Unix 上
 /// 孩子在独立进程组里(spawn 前设置了 process_group(0)),对负 PID 发
 /// SIGKILL 整组清掉。外部工具失败时回退 start_kill,至少杀掉直接孩子。
-fn kill_tree_pid(pid: u32) {
+/// pub(crate)：mcp.rs 的 teardown 与 plugin.rs 的超时路径复用同一把
+/// 整树击杀,不再各自只 start_kill 直接孩子留孙进程。
+pub(crate) fn kill_tree_pid(pid: u32) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -134,8 +204,14 @@ pub async fn bash(
     cid: &str,
     description: &str,
 ) -> Result<ToolOutcome, HarnessError> {
+    // P3：timeout 双端 clamp——调用方（mod.rs）已对模型入参 min(600_000)，
+    // 这里兜住 term.rs 等其它调用路径；下限 1s 防止 0/负值让 select 立即超时。
+    let timeout_ms = timeout_ms.clamp(1_000, MAX_TIMEOUT_MS);
     let (prog, args) = shell_pair();
     let mut cmd = tokio::process::Command::new(&prog);
+    // SEC-01：清空继承环境再按白名单回填（见 BASH_ENV_TOOLCHAIN 注释），
+    // provider key / token 不再随 bash 子进程出走。
+    apply_child_env(&mut cmd);
     cmd.args(&args)
         .arg(command)
         .current_dir(cwd)
@@ -387,6 +463,29 @@ mod tests {
     #[test]
     fn clamp_short_passes_through() {
         assert_eq!(clamp("abc", 100), "abc");
+    }
+
+    /// SEC-01：敏感关键词过滤优先于白名单命中——KEY/TOKEN/SECRET/PASSWORD/
+    /// CREDENTIAL 系变量名绝不进子进程环境。
+    #[test]
+    fn sensitive_env_names_are_rejected() {
+        for name in [
+            "OPENAI_API_KEY",
+            "GH_TOKEN",
+            "ANYSEARCH_API_KEY",
+            "AWS_SECRET_ACCESS_KEY",
+            "DB_PASSWORD",
+            "MYSQL_PASSWD",
+            "GOOGLE_CREDENTIALS",
+            "ssh_key",
+            "refresh_token",
+        ] {
+            assert!(is_sensitive_env_name(name), "{name} must be filtered");
+        }
+        // 无密钥性质的工具链/系统变量放行
+        for name in ["PATH", "COMPUTERNAME", "CARGO_HOME", "HTTP_PROXY", "MSYSTEM"] {
+            assert!(!is_sensitive_env_name(name), "{name} must pass");
+        }
     }
 
     #[test]
