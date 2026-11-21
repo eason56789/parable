@@ -1708,6 +1708,8 @@ body.r2-env-open #r2-env{width:300px;opacity:1;border-left:1px solid var(--line)
   background:none;border:0;border-radius:6px;padding:3px 6px;cursor:pointer;text-align:left}
 .r2-ws-head .r2-root:hover{background:var(--hov);color:var(--fg)}
 #r2-ws-ref,#r2-ws-expand{width:26px;height:26px;flex:none}
+/* 文件预览已移到右侧「文件」工作台标签：左侧只留目录树，浮层入口不再可达。 */
+#r2-ws-expand{display:none}
 .r2-ws-tabs{flex:none;display:flex;gap:2px;padding:0 8px;overflow-x:auto;scrollbar-width:none}
 .r2-ws-tabs::-webkit-scrollbar{display:none}
 .r2-ws-tab{display:flex;align-items:center;gap:6px;max-width:132px;border:0;background:none;color:var(--fg2);font:12px var(--sans);padding:5px 7px;border-radius:8px;cursor:pointer;white-space:nowrap}
@@ -5502,7 +5504,20 @@ function openInFilesPane(path) {
   const norm = String(path).replace(/\\/g, '/');
   const slash = norm.lastIndexOf('/');
   const dir = slash >= 0 ? norm.slice(0, slash) : '';
-  const tab = spOpen('files', { path: dir });
+  // 复用同一个「文件」标签，避免每点一次文件就多开一个同名标签。
+  const ex = SP.tabs.find(x => x.kind === 'files');
+  let tab;
+  if (ex) {
+    tab = ex;
+    document.body.classList.remove('sp0');
+    SP.open = true;
+    SP.active = tab.id;
+    tab.st.path = dir;
+    tab.st.q = '';
+    spRender();
+  } else {
+    tab = spOpen('files', { path: dir });
+  }
   // spFilesOpen 需要目录树就绪后才能选中文件，放到下一帧再调。
   setTimeout(() => { try { spFilesOpen(tab, norm); } catch (e) { /* 目录还没加载好就算了 */ } }, 60);
   return tab;
@@ -13506,7 +13521,7 @@ async function spFilesOpen(tab, path) {
   box.innerHTML = '<div class="spfmeta">' + esc(f.path) + ' · ' + fmtBytes(f.size) +
     (f.total_lines ? ' · ' + f.total_lines + ' 行' : '') + '</div>' +
     '<div class="spfile">' + (f.binary ? '<div class="spempty">' + esc(t('sp_empty_fs')) + '</div>'
-      : '<pre>' + esc(f.text) + '</pre>') + '</div>';
+      : '<pre>' + r2Highlight(f.text || '') + '</pre>') + '</div>';
 }
 
 /* ------------------------------------------------------------ 审查面板 */
@@ -13571,8 +13586,7 @@ async function spRenderChanges(host, tab) {
         '<span class="btns"><button class="spbtn" data-a="open">' + esc(t('sp_changes_open')) + '</button></span>' +
       '</div><div class="spch-body"><div class="spempty">…</div></div>';
     view.querySelector('[data-a="open"]').onclick = () => {
-      const t2 = spOpen('files', { path: norm.slice(0, norm.lastIndexOf('/')) });
-      spFilesOpen(t2, active);
+      openInFilesPane(active);
     };
     const body = view.querySelector('.spch-body');
     try {
@@ -13669,8 +13683,8 @@ async function spRenderReview(host, tab) {
   }).join('');
   list.querySelectorAll('[data-spgp]').forEach(r => {
     r.onclick = () => {
+      // 右侧审查面板自己显示 diff；不要再把文件塞进左侧工作区预览。
       spGitDiff(tab, r.dataset.spgp);
-      if (window.r2OpenFile) window.r2OpenFile(r.dataset.spgp);
     };
   });
 }
@@ -13709,8 +13723,8 @@ function paintReviewTree(list, box, tab, files) {
     r.onclick = () => {
       list.querySelectorAll('[data-rvp]').forEach(x => x.classList.remove('on'));
       r.classList.add('on');
+      // 审查留在右侧面板：显示 checkpoint diff，不再打开左侧预览。
       reviewCheckpointDiff(box, tab, r.dataset.rvt, r.dataset.rvp);
-      if (window.r2OpenFile) window.r2OpenFile(r.dataset.rvp);
     };
   });
 }
@@ -15660,8 +15674,10 @@ function r2BindTree(root) {
     r.oncontextmenu = e => { e.preventDefault(); r2CtxShow(r, e.clientX, e.clientY); };
   });
   root.querySelectorAll('[data-file]').forEach(r => {
-    r.onclick = () => r2OpenFile(r.dataset.file);
-    r.onkeydown = keys(r, () => r2OpenFile(r.dataset.file));
+    // 文件点击 → 右侧工作台「文件」侧栏打开（不在左侧工作区面板底部挤一块预览）。
+    // 左侧只负责目录树；右键菜单仍提供「添加到对话 / 在文件夹中显示」。
+    r.onclick = () => openInFilesPane(r.dataset.file);
+    r.onkeydown = keys(r, () => openInFilesPane(r.dataset.file));
     r.oncontextmenu = e => { e.preventDefault(); r2CtxShow(r, e.clientX, e.clientY); };
   });
 }
