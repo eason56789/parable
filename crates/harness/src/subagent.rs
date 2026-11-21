@@ -1253,7 +1253,12 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_beyond_the_depth_cap_is_refused() {
-        let svc = SubagentService::new(EventHub::new());
+        // 注入隔离根的 store：否则 spawn 回退 `SessionStore::new()`，会把
+        // 子会话 stub 写进用户真实的 `~/.parable/sessions`。
+        let dir = std::env::temp_dir().join("parable-subagent-depth-cap");
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Arc::new(crate::session::SessionStore::with_root(dir.clone()));
+        let svc = SubagentService::new(EventHub::new()).with_store(store);
         // A starter that never runs: the spawn call itself is what we test.
         struct NoopStarter;
         #[async_trait::async_trait]
@@ -1317,6 +1322,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("depth limit"), "got: {err}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

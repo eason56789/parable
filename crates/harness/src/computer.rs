@@ -2066,6 +2066,9 @@ mod tests {
     #[tokio::test]
     async fn navigate_target_routes() {
         let hub = crate::event::EventHub::new();
+        // store 根指向临时目录：即便后续工具链路触发建会话，也不落真实 home。
+        let store_dir = std::env::temp_dir().join("parable-computer-nav");
+        let _ = std::fs::remove_dir_all(&store_dir);
         let ctx = super::super::tools::ToolCtx {
             workspace: std::path::PathBuf::from("."),
             permission_mode: "full".into(),
@@ -2077,7 +2080,7 @@ mod tests {
             call_id: "c".into(),
             schedule: None,
             subagents: None,
-            store: Arc::new(crate::session::SessionStore::new()),
+            store: Arc::new(crate::session::SessionStore::with_root(store_dir.clone())),
             runtime: None,
             search_key: String::new(),
             anysearch_key: String::new(),
@@ -2112,6 +2115,7 @@ mod tests {
         // file:// 在任何 target 下都被 URL 白名单挡下
         let err = navigate(&json!({"url": "file:///C:/Windows", "target": "system"}), &ctx).await;
         assert!(err.is_err(), "file:// must stay blocked");
+        let _ = std::fs::remove_dir_all(&store_dir);
     }
 
     /// ensure_lock 的语义：并发的 ensure() 只有一个能进入建连区，其余

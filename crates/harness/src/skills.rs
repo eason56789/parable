@@ -427,54 +427,20 @@ fn write_disabled(dir: &Path, list: &[String]) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use crate::testutil::TestHome;
 
     /// Every test here points the *user* scope at its own scratch dir through
-    /// `PARABLE_HOME`, which is process-wide. Without this lock the tests race
+    /// `PARABLE_HOME`, which is process-wide. The env lock / restore / cleanup
+    /// live in the shared [`TestHome`] helper; without the lock the tests race
     /// on that variable and see each other's skills.
-    fn env_lock() -> &'static Mutex<()> {
-        static L: OnceLock<Mutex<()>> = OnceLock::new();
-        L.get_or_init(|| Mutex::new(()))
-    }
-
-    struct Scratch {
-        root: PathBuf,
-        /// What `PARABLE_HOME` was before this test claimed it.
-        prev: Option<std::ffi::OsString>,
-        _guard: MutexGuard<'static, ()>,
-    }
-
-    impl Drop for Scratch {
-        /// Restore the process-wide variable so an unrelated test that runs
-        /// after this one does not resolve `~/.parable` to a deleted tmp dir.
-        fn drop(&mut self) {
-            match self.prev.take() {
-                Some(v) => std::env::set_var("PARABLE_HOME", v),
-                None => std::env::remove_var("PARABLE_HOME"),
-            }
-        }
-    }
+    struct Scratch(TestHome);
 
     impl Scratch {
         fn new(tag: &str) -> Self {
-            let guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
-            let root = std::env::temp_dir().join(format!(
-                "parable-skills-{tag}-{}-{}",
-                std::process::id(),
-                crate::event::now_ms()
-            ));
-            std::fs::create_dir_all(&root).unwrap();
-            // Point the user scope at the scratch dir.
-            let prev = std::env::var_os("PARABLE_HOME");
-            std::env::set_var("PARABLE_HOME", &root);
-            Self {
-                root,
-                prev,
-                _guard: guard,
-            }
+            Self(TestHome::new(tag))
         }
         fn ws(&self) -> PathBuf {
-            self.root.join("ws")
+            self.0.root().join("ws")
         }
     }
 

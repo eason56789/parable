@@ -1358,52 +1358,29 @@ pub type SharedStore = Arc<SessionStore>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use crate::testutil::TestHome;
 
-    /// PARABLE_HOME 是进程级环境变量，相关测试必须串行持锁，避免互相串目录。
-    fn env_lock() -> &'static Mutex<()> {
-        static L: OnceLock<Mutex<()>> = OnceLock::new();
-        L.get_or_init(|| Mutex::new(()))
-    }
-
-    struct Scratch {
-        root: PathBuf,
-        prev: Option<std::ffi::OsString>,
-        _guard: MutexGuard<'static, ()>,
-    }
-
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            match self.prev.take() {
-                Some(v) => std::env::set_var("PARABLE_HOME", v),
-                None => std::env::remove_var("PARABLE_HOME"),
-            }
-            let _ = std::fs::remove_dir_all(&self.root);
-        }
-    }
-
-    impl Scratch {
-        fn new(tag: &str) -> Self {
-            let guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
-            let root = std::env::temp_dir().join(format!(
-                "parable-session-home-{tag}-{}-{}",
-                std::process::id(),
-                crate::event::now_ms()
-            ));
-            std::fs::create_dir_all(&root).unwrap();
-            let prev = std::env::var_os("PARABLE_HOME");
-            std::env::set_var("PARABLE_HOME", &root);
-            Self { root, prev, _guard: guard }
-        }
+    /// 列出目录下全部 `.json` 文件名（排序），用于快照比对真实 home 是否被写入。
+    fn session_file_names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .map(|rd| {
+                rd.filter_map(|e| e.ok())
+                    .filter(|e| e.file_name().to_string_lossy().ends_with(".json"))
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        names.sort();
+        names
     }
 
     /// PARABLE_HOME 隔离：`SessionStore::new()` 的根必须跟随环境变量，
     /// 新建会话落到临时目录，且不写进真实 `~/.parable/sessions`。
     #[tokio::test]
     async fn new_store_follows_parable_home() {
-        let sc = Scratch::new("isolated");
+        let home = TestHome::new("isolated");
         let store = SessionStore::new();
-        let expected_root = sc.root.join("sessions");
+        let expected_root = home.sessions_dir();
         assert_eq!(store.root, expected_root);
 
         let s = store.create(".", "isolated-stub").await;
@@ -1418,6 +1395,35 @@ mod tests {
                 "会话不得绕过 PARABLE_HOME 写进真实 home"
             );
         }
+    }
+
+    /// 回归断言：在隔离 home 下建会话，真实 `~/.parable/sessions` 的文件集合必须不变。
+    /// 历史上有测试未注入隔离根，每跑一次套件就往用户真实目录写空 stub。
+    #[tokio::test]
+    async fn isolated_create_does_not_touch_real_home() {
+        let real = dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".parable")
+            .join("sessions");
+        let before = session_file_names(&real);
+
+        let home = TestHome::new("real-home-guard");
+        let store = SessionStore::new();
+        let created = store.create(".", "real-home-guard").await;
+        // 隔离会话必须落在临时目录，而不是真实 home。
+        assert!(
+            home.sessions_dir()
+                .join(format!("{}.json", created.meta.id))
+                .exists(),
+            "隔离会话必须落在 PARABLE_HOME 下"
+        );
+        drop(home);
+
+        let after = session_file_names(&real);
+        assert_eq!(
+            before, after,
+            "在隔离 home 建会话不得在真实 ~/.parable/sessions 新增文件"
+        );
     }
 
     /// 导入必须保留消息与统计，且拒绝覆盖同 ID 的本地会话。

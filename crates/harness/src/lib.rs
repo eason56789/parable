@@ -34,6 +34,10 @@ pub mod wsfs;
 #[cfg(test)]
 mod perf;
 
+/// Test-only isolated `PARABLE_HOME` helper. Only compiled under `cfg(test)`.
+#[cfg(test)]
+pub(crate) mod testutil;
+
 pub use error::HarnessError;
 pub type Result<T> = std::result::Result<T, HarnessError>;
 
