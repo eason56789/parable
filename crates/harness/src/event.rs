@@ -95,18 +95,30 @@ impl EventHub {
     /// with `seq > since`. Ordering matters: subscribing first guarantees that
     /// anything published between the snapshot and the stream is still
     /// delivered (duplicates are dropped by the client's `seq` watermark).
+    ///
+    /// `session` 为 `Some` 时只回放该会话的事件（B-42：backlog 按会话维度过滤，
+    /// 避免重连时把其他会话的历史事件一并推到当前页）；`None` 维持全局回放旧行为。
     pub fn subscribe_since(&self, since: u64) -> (Vec<Event>, broadcast::Receiver<Event>) {
+        self.subscribe_since_scoped(since, None)
+    }
+
+    pub fn subscribe_since_scoped(
+        &self,
+        since: u64,
+        session: Option<&str>,
+    ) -> (Vec<Event>, broadcast::Receiver<Event>) {
         let rx = self.tx.subscribe();
+        let matches = |e: &Event| session.map(|s| e.session_id == s).unwrap_or(true);
         let mut backlog = match self.ring.lock() {
             Ok(ring) => ring
                 .iter()
-                .filter(|e| e.seq > since)
+                .filter(|e| e.seq > since && matches(e))
                 .cloned()
                 .collect::<Vec<_>>(),
             Err(poisoned) => poisoned
                 .into_inner()
                 .iter()
-                .filter(|e| e.seq > since)
+                .filter(|e| e.seq > since && matches(e))
                 .cloned()
                 .collect(),
         };
@@ -190,6 +202,24 @@ mod tests {
         assert_eq!(backlog[0].kind, "reasoning.delta");
         assert_eq!(backlog[2].kind, "turn.end", "turn.end must survive a gap");
         assert!(backlog.iter().all(|e| e.seq > seen));
+    }
+
+    #[test]
+    fn scoped_replay_filters_by_session() {
+        let hub = EventHub::new();
+        hub.publish("s1", "turn.end", serde_json::json!({}));
+        let seen = hub.latest_seq();
+        hub.publish("s1", "text.delta", serde_json::json!({"text": "one"}));
+        hub.publish("s2", "text.delta", serde_json::json!({"text": "two"}));
+        hub.publish("s1", "turn.end", serde_json::json!({}));
+
+        let (backlog, _rx) = hub.subscribe_since_scoped(seen, Some("s1"));
+        assert!(backlog.iter().all(|e| e.session_id == "s1"));
+        assert_eq!(backlog.len(), 2);
+
+        // 缺省会话过滤 = 全局回放旧行为。
+        let (all, _) = hub.subscribe_since(seen);
+        assert_eq!(all.len(), 3);
     }
 
     #[test]

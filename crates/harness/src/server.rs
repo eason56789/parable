@@ -411,6 +411,9 @@ struct EventsQuery {
     /// `seq > since` 的事件补发一遍，再进入实时流。缺省 = 首次连接，不回放。
     #[serde(default)]
     since: Option<u64>,
+    /// B-42：可选会话维度。带上后 backlog 与实时流只推该会话事件；缺省维持全局。
+    #[serde(default)]
+    session: Option<String>,
 }
 
 async fn sse_events(
@@ -423,14 +426,16 @@ async fn sse_events(
     }
     // 先订阅再取快照：两步之间发布的事件会同时躺在 backlog 和 channel 里，
     // 客户端按 seq 去重，宁可重复不可丢失。
+    let sid = q.session.clone().unwrap_or_default();
+    // 先订阅再取快照：两步之间发布的事件会同时躺在 backlog 和 channel 里，
+    // 客户端按 seq 去重，宁可重复不可丢失。
     let (mut rx, backlog) = match q.since {
         Some(since) if since > 0 => {
-            let (b, r) = state.hub.subscribe_since(since);
+            let (b, r) = state.hub.subscribe_since_scoped(since, if sid.is_empty() { None } else { Some(&sid) });
             (r, b)
         }
         _ => (state.hub.subscribe(), Vec::new()),
     };
-    let sid = String::new();
     let state2 = state.clone();
     let replay = backlog.len();
     // 请求的 since 比环形缓冲里最老的一条还旧：中间那段已经蒸发了，光补发
@@ -1593,10 +1598,11 @@ async fn new_session(
     if !check_auth(&headers, None, &state) {
         return unauthorized();
     }
+    let fallback_ws = state.config.read().await.workspace.clone();
     let ws = if r.workspace.is_empty() {
-        state.config.read().await.workspace.clone()
+        fallback_ws.clone()
     } else {
-        r.workspace
+        resolve_requested_workspace(&r.workspace, &fallback_ws)
     };
     let s = state.store.create(&ws, &r.title).await;
     state.hub.publish(&s.meta.id, "session.start", json!({
@@ -3008,6 +3014,28 @@ async fn workspace_of(state: &SharedState) -> std::path::PathBuf {
         std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
     } else {
         std::path::PathBuf::from(w)
+    }
+}
+
+/// C-21：规范化并校验会话工作区。相对路径按当前目录解析；不存在/不可读则回退默认工作区，
+/// 避免把一个拼错或已删除的路径串写进会话元数据，导致后续工具在错误根目录下运行。
+fn resolve_requested_workspace(requested: &str, fallback: &str) -> String {
+    let raw = requested.trim();
+    if raw.is_empty() {
+        return fallback.to_string();
+    }
+    let p = std::path::PathBuf::from(raw);
+    let abs = if p.is_absolute() {
+        p
+    } else {
+        std::env::current_dir().unwrap_or_default().join(p)
+    };
+    match abs.canonicalize() {
+        Ok(real) if real.is_dir() => real.to_string_lossy().into_owned(),
+        _ => {
+            tracing::warn!("workspace `{raw}` 不存在或不可读，回退默认工作区");
+            fallback.to_string()
+        }
     }
 }
 
