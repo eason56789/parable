@@ -295,6 +295,18 @@ impl SessionStore {
         self.root.join(format!("{id}.json"))
     }
 
+    /// 外部传入 id 的入口（load/delete/exists/insert_full…）必须走这里：
+    /// id 过不了校验就返回 None，绝不拼路径——否则含 `/`、`\`、`..` 的
+    /// 恶意/异常 id 会借 `path_for` 拼出 store 根之外的路径，读写删都越界。
+    /// `path_for` 本身保留给内部自生成 id 的调用（persist 用 s.meta.id）。
+    fn checked_path_for(&self, id: &str) -> Option<PathBuf> {
+        if is_valid_session_id(id) {
+            Some(self.path_for(id))
+        } else {
+            None
+        }
+    }
+
     pub async fn create(&self, workspace: &str, title: &str) -> Session {
         let id = format!("s_{}", uuid::Uuid::new_v4().simple().to_string()[..12].to_string());
         let meta = SessionSummary {
@@ -341,6 +353,11 @@ impl SessionStore {
 
     /// 原子落盘：临时文件 + rename（见 `crate::atomic_write`），失败返回错误由
     /// 调用方记录——静默丢写会让重载后的会话回退到旧状态。
+    ///
+    /// 调用纪律：所有「cache 锁内改内存」的写路径必须在**持有 cache 锁期间**
+    /// 调用本方法（tokio Mutex 持锁跨 await 安全，persist 内部不碰 cache），
+    /// 把「读-改-写-落盘」整体串行化——否则两个并发写方交错时，后完成内存
+    /// 改动的一方可能拿着旧快照落盘，把磁盘上新快照回滚掉。
     async fn persist(&self, s: &Session) -> Result<(), HarnessError> {
         let p = self.path_for(&s.meta.id);
         let json = serde_json::to_string_pretty(s)
@@ -357,7 +374,9 @@ impl SessionStore {
                 return Some(s.clone());
             }
         }
-        let p = self.path_for(id);
+        // 非法 id（含路径分隔符/点等）直接当「不存在」：不碰磁盘，也不会
+        // 走到下面的 .corrupt 备份逻辑去动 store 根之外的文件。
+        let p = self.checked_path_for(id)?;
         let text = std::fs::read_to_string(&p).ok()?;
         match serde_json::from_str::<Session>(&text) {
             Ok(s) => {
@@ -395,7 +414,9 @@ impl SessionStore {
         if self.cache.lock().await.contains_key(id) {
             return true;
         }
-        self.path_for(id).exists()
+        self.checked_path_for(id)
+            .map(|p| p.exists())
+            .unwrap_or(false)
     }
 
     /// dsh's archived-session gate: cheap check used by start_turn so an
@@ -516,11 +537,14 @@ impl SessionStore {
             .ok_or_else(|| HarnessError::NotFound(format!("session {id}")))?;
         s.messages.push(msg);
         s.meta.updated_at = crate::event::now_ms();
+        // 持锁落盘：不提前 drop(cache)，把「读-改-写-落盘」整段放进同一把
+        // cache 锁里——两个并发写方再怎么交错，最后完成写的快照必然最后
+        // 落盘，磁盘不会被旧快照回滚。tokio Mutex 持锁跨 await 是安全的
+        // （persist 内部不再碰 cache，无死锁）。persist 失败上抛，与
+        // insert_pending 一致；调用方 agent.rs 按 saved.is_ok() 决定是否
+        // 发 step.persisted，落盘失败不发事件。
         let snapshot = s.clone();
-        drop(cache);
-        if let Err(e) = self.persist(&snapshot).await {
-            tracing::error!("session {id}: persist failed: {e}");
-        }
+        self.persist(&snapshot).await?;
         Ok(())
     }
 
@@ -563,8 +587,8 @@ impl SessionStore {
             s.pending.push(item);
         }
         s.meta.updated_at = crate::event::now_ms();
+        // 持锁落盘（同 append_message 的串行化纪律），失败照旧上抛。
         let snapshot = s.clone();
-        drop(cache);
         self.persist(&snapshot).await?;
         Ok(())
     }
@@ -591,8 +615,9 @@ impl SessionStore {
             return taken;
         }
         s.meta.updated_at = crate::event::now_ms();
+        // 持锁落盘。返回类型是 Vec 无法上抛错误，失败仍记日志——但落盘
+        // 已与改内存串行化，不会再被并发写方回滚。
         let snapshot = s.clone();
-        drop(cache);
         if let Err(e) = self.persist(&snapshot).await {
             tracing::error!("session {id}: persist pending take failed: {e}");
         }
@@ -608,8 +633,8 @@ impl SessionStore {
         let pos = s.pending.iter().position(|p| p.id == pending_id)?;
         let item = s.pending.remove(pos);
         s.meta.updated_at = crate::event::now_ms();
+        // 持锁落盘（返回 Option 无法上抛，失败仍记日志）。
         let snapshot = s.clone();
-        drop(cache);
         if let Err(e) = self.persist(&snapshot).await {
             tracing::error!("session {id}: persist pending removal failed: {e}");
         }
@@ -631,8 +656,8 @@ impl SessionStore {
         item.text = text.to_string();
         let updated = item.clone();
         s.meta.updated_at = crate::event::now_ms();
+        // 持锁落盘（返回 Option 无法上抛，失败仍记日志）。
         let snapshot = s.clone();
-        drop(cache);
         if let Err(e) = self.persist(&snapshot).await {
             tracing::error!("session {id}: persist pending edit failed: {e}");
         }
@@ -661,8 +686,8 @@ impl SessionStore {
             return changed;
         }
         s.meta.updated_at = crate::event::now_ms();
+        // 持锁落盘（返回 Vec 无法上抛，失败仍记日志）。
         let snapshot = s.clone();
-        drop(cache);
         if let Err(e) = self.persist(&snapshot).await {
             tracing::error!("session {id}: persist steer fallback failed: {e}");
         }
@@ -678,6 +703,13 @@ impl SessionStore {
         let id = s.meta.id.trim().to_string();
         if id.is_empty() {
             return Err(HarnessError::Other("session id is empty".into()));
+        }
+        // 导入的 id 是外部输入：过不了路径校验（含分隔符/点等）一律拒绝，
+        // 否则 persist 会把整份会话写到 store 根之外。
+        if !is_valid_session_id(&id) {
+            return Err(HarnessError::Other(format!(
+                "session id {id:?} contains characters that are not allowed"
+            )));
         }
         if self.path_for(&id).exists() {
             return Err(HarnessError::Other(format!(
@@ -709,11 +741,10 @@ impl SessionStore {
             .ok_or_else(|| HarnessError::NotFound(format!("session {id}")))?;
         f(&mut s.meta);
         s.meta.updated_at = crate::event::now_ms();
+        // 持锁落盘，失败上抛：meta 改动（归档/置顶/未读点等）静默丢失同样
+        // 会让重载后的会话回退到旧状态。
         let snapshot = s.clone();
-        drop(cache);
-        if let Err(e) = self.persist(&snapshot).await {
-            tracing::error!("session {id}: persist failed: {e}");
-        }
+        self.persist(&snapshot).await?;
         Ok(())
     }
 
@@ -735,8 +766,9 @@ impl SessionStore {
             if ctx_used > 0 {
                 s.usage.ctx_used = ctx_used;
             }
+            // 持锁落盘（返回 () 无法上抛，失败仍记日志；内存侧已累计，
+            // 下一次成功写会把补上后的总量一并落盘）。
             let snapshot = s.clone();
-            drop(cache);
             if let Err(e) = self.persist(&snapshot).await {
                 tracing::error!("session {id}: persist failed: {e}");
             }
@@ -745,7 +777,11 @@ impl SessionStore {
 
     pub async fn delete(&self, id: &str) -> Result<(), HarnessError> {
         self.cache.lock().await.remove(id);
-        let p = self.path_for(id);
+        // 非法 id 不可能对应本 store 里的文件：按「删除不存在的会话」处理
+        // 返回 Ok（与现有语义一致），同时杜绝把路径拼到 store 根之外误删。
+        let Some(p) = self.checked_path_for(id) else {
+            return Ok(());
+        };
         if p.exists() {
             std::fs::remove_file(p)?;
         }
@@ -820,11 +856,9 @@ impl SessionStore {
         }
         // `displays` stays: the tool cards keep their rendered content.
         s.meta.updated_at = crate::event::now_ms();
+        // 持锁落盘，失败上抛（编辑是用户显式动作，静默丢失等于丢字）。
         let snapshot = s.clone();
-        drop(cache);
-        if let Err(e) = self.persist(&snapshot).await {
-            tracing::error!("session {id}: persist failed: {e}");
-        }
+        self.persist(&snapshot).await?;
         Ok(())
     }
 
@@ -989,11 +1023,9 @@ impl SessionStore {
 
         s.messages.splice(idx..end, rebuilt);
         s.meta.updated_at = crate::event::now_ms();
+        // 持锁落盘，失败上抛（同 edit_message_text）。
         let snapshot = s.clone();
-        drop(cache);
-        if let Err(e) = self.persist(&snapshot).await {
-            tracing::error!("session {id}: persist failed: {e}");
-        }
+        self.persist(&snapshot).await?;
         Ok(())
     }
 
@@ -1019,6 +1051,9 @@ impl SessionStore {
     /// Drop every message in `[from, to)`. `to = None` means "to the end" —
     /// the truncate-from-here case used when re-running from a point. An empty
     /// or out-of-bounds range is a no-op.
+    ///
+    /// from/end 先做组边界对齐（见 `align_split`/`align_split_end`）：
+    /// 裁剪后的历史永远不出现 dangling tool_use / orphan tool_result。
     pub async fn delete_range(
         &self,
         id: &str,
@@ -1037,13 +1072,15 @@ impl SessionStore {
             .ok_or_else(|| HarnessError::NotFound(format!("session {id}")))?;
         let end = to.unwrap_or(s.messages.len()).min(s.messages.len());
         if from < end {
+            // 组对齐：from 回退到组头、end 前扩到组尾，绝不在
+            // tool_use/tool_result 组中间落刀。
+            let from = align_split(&s.messages, from);
+            let end = align_split_end(&s.messages, end);
             s.messages.drain(from..end);
             s.meta.updated_at = crate::event::now_ms();
+            // 持锁落盘，失败上抛。
             let snapshot = s.clone();
-            drop(cache);
-            if let Err(e) = self.persist(&snapshot).await {
-                tracing::error!("session {id}: persist failed: {e}");
-            }
+            self.persist(&snapshot).await?;
         }
         Ok(())
     }
@@ -1055,6 +1092,11 @@ impl SessionStore {
 
     /// Replace the first `keep_from` messages with one summary message — the
     /// persistence half of context compaction. Returns how many were folded.
+    ///
+    /// `keep_from` 由调用方按内存里折叠后的中性格式消息算出，而
+    /// `neutral_messages` 会跳过解析失败的消息，两边下标本就可能错位；
+    /// 落刀前先做组边界对齐（见 `align_split`），保证 tool_use/tool_result
+    /// 组不从中切开。返回对齐后真正折进摘要的条数。
     pub async fn compact_store(
         &self,
         id: &str,
@@ -1072,6 +1114,9 @@ impl SessionStore {
             .get_mut(id)
             .ok_or_else(|| HarnessError::NotFound(format!("session {id}")))?;
         let keep_from = keep_from.min(s.messages.len());
+        // 组对齐：切分点落在 tool_result 组中间/组尾，或上一条是含 ToolUse
+        // 的 assistant 时，回退到组头——整组要么全折进摘要、要么全保留。
+        let keep_from = align_split(&s.messages, keep_from);
         if keep_from == 0 {
             return Ok(0);
         }
@@ -1089,11 +1134,9 @@ impl SessionStore {
             },
         );
         s.meta.updated_at = crate::event::now_ms();
+        // 持锁落盘，失败上抛。
         let snapshot = s.clone();
-        drop(cache);
-        if let Err(e) = self.persist(&snapshot).await {
-            tracing::error!("session {id}: persist failed: {e}");
-        }
+        self.persist(&snapshot).await?;
         Ok(keep_from)
     }
 
@@ -1115,11 +1158,10 @@ impl SessionStore {
             .ok_or_else(|| HarnessError::NotFound(format!("session {id}")))?;
         s.goal = goal;
         s.meta.updated_at = crate::event::now_ms();
+        // 持锁落盘，失败上抛：goal 状态机（轮次预算/停滞计数）回退会导致
+        // 自动续跑判断失真。
         let snapshot = s.clone();
-        drop(cache);
-        if let Err(e) = self.persist(&snapshot).await {
-            tracing::error!("session {id}: persist failed: {e}");
-        }
+        self.persist(&snapshot).await?;
         Ok(())
     }
 
@@ -1160,8 +1202,8 @@ impl SessionStore {
             .ok_or_else(|| HarnessError::NotFound(format!("session {id}")))?;
         s.team = team;
         s.meta.updated_at = crate::event::now_ms();
+        // 持锁落盘（本就上抛，只补上与其它写路径一致的持锁纪律）。
         let snapshot = s.clone();
-        drop(cache);
         self.persist(&snapshot).await?;
         Ok(())
     }
@@ -1211,10 +1253,11 @@ impl SessionStore {
     /// When the budget is exceeded the least-recently-used entries are
     /// dropped, so the hot sessions stay hot and the cold ones are re-read.
     async fn session_text_index(&self, id: &str) -> Vec<(usize, String, String)> {
+        // id 与 load 同一道校验闸：过不了的 id（异常文件名的 stem 等）
+        // 不做 stat、也不进索引。
         let stamp = self
-            .path_for(id)
-            .metadata()
-            .ok()
+            .checked_path_for(id)
+            .and_then(|p| p.metadata().ok())
             .and_then(|m| {
                 let t = m.modified().ok()?;
                 let d = t.duration_since(std::time::UNIX_EPOCH).ok()?;
@@ -1281,8 +1324,27 @@ impl SessionStore {
 /// `messages`, then `usage`. We read only the prefix up to the `messages`
 /// key and deserialize that as a `SessionSummary` — a long chat's message
 /// array (megabytes) never enters the parser.
+///
+/// `"messages"` 必须处于对象键位置才认：元数据字符串值里出现字面量
+/// `"messages"`（比如标题/工作区路径提到它）不能切——判定办法是向前找
+/// 最近一个非空白字符，只有 `{`（首键）或 `,`（后续键）才是键位置的合法
+/// 前导；否则跳过这处匹配继续往后找真正的键。
 fn parse_summary_head(text: &str) -> Option<SessionSummary> {
-    let cut = text.find("\"messages\"")?;
+    const NEEDLE: &str = "\"messages\"";
+    let bytes = text.as_bytes();
+    let mut from = 0;
+    let cut = loop {
+        let pos = text[from..].find(NEEDLE)? + from;
+        let prev = bytes[..pos]
+            .iter()
+            .rev()
+            .find(|b| !b.is_ascii_whitespace())?;
+        if *prev == b'{' || *prev == b',' {
+            break pos;
+        }
+        // 字符串值里的字面量：跳过它继续找下一处。
+        from = pos + NEEDLE.len();
+    };
     // Walk back over the comma separating it from the previous field, then
     // close the object we cut in half.
     let head = text[..cut].trim_end().trim_end_matches(',');
@@ -1362,6 +1424,71 @@ fn keep_non_text(arr: Vec<Value>) -> Vec<Value> {
     arr.into_iter()
         .filter(|p| !(p.is_string() || p.get("Text").is_some()))
         .collect()
+}
+
+/// 会话 id 合法性：`^[A-Za-z0-9_-]{1,80}$`。
+///
+/// 不含路径分隔符与点——把 `path_for` 的拼接面锁死在 store 根目录内的
+/// 一个普通文件名上，`../`、`..\`、URL 编码等穿越写法全都过不了这道闸。
+/// 全 ASCII 判定，多字节字符（中文 id 等）一律拒绝。
+fn is_valid_session_id(id: &str) -> bool {
+    (1..=80).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// assistant 消息里是否带着未收尾的 tool_use（中性格式：ToolUse 部件）。
+fn has_tool_use(m: &StoredMessage) -> bool {
+    m.role == "assistant"
+        && m.parts
+            .get("Assistant")
+            .and_then(|v| v.as_array())
+            .map_or(false, |arr| arr.iter().any(|p| p.get("ToolUse").is_some()))
+}
+
+/// user 消息里是否带着 tool_result（中性格式：ToolResult 部件）。
+fn has_tool_result(m: &StoredMessage) -> bool {
+    m.role == "user"
+        && m.parts
+            .get("User")
+            .and_then(|v| v.as_array())
+            .map_or(false, |arr| arr.iter().any(|p| p.get("ToolResult").is_some()))
+}
+
+/// 切分点对齐：把拟切分下标向回挪，直到边界不会把
+/// 「assistant(tool_use) + 紧随其后的全部 tool_result 用户消息」组切开——
+/// 组要么整体落在切分点之后（保留侧），要么整体落在之前（裁掉侧）。
+///
+/// 与 agent.rs 的 `align_compact_split` 同一语义（那边作用于内存里的
+/// provider Msg，这边作用于 store 的 StoredMessage）。两步走：
+/// 1. 边界右侧以 tool_result 开头 → 一路回退越过整段结果消息；
+/// 2. 上一条是含 ToolUse 的 assistant → 再回退一步把组头并进同一侧。
+fn align_split(messages: &[StoredMessage], mut idx: usize) -> usize {
+    while idx < messages.len() && idx > 0 && has_tool_result(&messages[idx]) {
+        idx -= 1;
+    }
+    if idx < messages.len() && idx > 0 && has_tool_use(&messages[idx - 1]) {
+        idx -= 1;
+    }
+    idx
+}
+
+/// 删除区间终点对齐：终点落在组中间时向后扩到组尾——
+/// 区间末尾是含 ToolUse 的 assistant（其结果组紧跟其后）或下一条是
+/// tool_result 用户消息（其组头在区间内）时都继续扩，保证裁剪后
+/// 不出现 dangling tool_use / orphan tool_result。
+fn align_split_end(messages: &[StoredMessage], mut end: usize) -> usize {
+    while end < messages.len() {
+        if end > 0 && has_tool_use(&messages[end - 1]) {
+            end += 1;
+        } else if has_tool_result(&messages[end]) {
+            end += 1;
+        } else {
+            break;
+        }
+    }
+    end
 }
 
 pub type SharedStore = Arc<SessionStore>;
@@ -1714,5 +1841,301 @@ mod tests {
         assert_eq!(store.pending(&s.meta.id).await[1].kind, "queue");
         assert!(store.remove_pending(&s.meta.id, "p2").await.is_some());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ---------- id 路径校验 ----------
+
+    #[test]
+    fn valid_session_ids_follow_the_pattern() {
+        // 合法：字母/数字/下划线/连字符，1..=80 位。
+        for ok in ["s_abc", "A-b_9", "0"] {
+            assert!(is_valid_session_id(ok), "{ok} must be valid");
+        }
+        // 非法：空串、路径分隔符、点、URL 编码、多字节字符、超长。
+        let too_long = "x".repeat(81);
+        for bad in [
+            "",
+            "a.b",
+            "../../evil",
+            "..%2F..%2Fevil",
+            "a/b",
+            "a\\b",
+            "..",
+            "会话",
+            too_long.as_str(),
+        ] {
+            assert!(!is_valid_session_id(bad), "{bad} must be rejected");
+        }
+    }
+
+    /// 穿越防护：load/exists/delete 拿到恶意 id 时不得碰 store 根之外的
+    /// 文件——`../evil` 恰好指到根旁的 victim 文件，修复前 delete 会把它删掉。
+    #[tokio::test]
+    async fn traversal_ids_never_touch_files_outside_the_store() {
+        let base = std::env::temp_dir().join(format!(
+            "parable-pathcheck-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let store_root = base.join("store");
+        let _ = std::fs::create_dir_all(&store_root);
+        let victim = base.join("evil.json");
+        std::fs::write(&victim, b"{}").expect("plant victim file");
+
+        let store = SessionStore::with_root(store_root);
+        for bad in ["../evil", "../../evil", "..%2F..%2Fevil", "a.b", ""] {
+            assert!(store.load(bad).await.is_none(), "load({bad}) must be None");
+            assert!(!store.exists(bad).await, "exists({bad}) must be false");
+            store
+                .delete(bad)
+                .await
+                .unwrap_or_else(|e| panic!("delete({bad}) must stay a no-op: {e}"));
+        }
+        assert!(victim.exists(), "store 根旁的文件不得被穿越 id 触碰");
+
+        // 合法 id 的完整生命周期不受影响。
+        let s = store.create("w", "t").await;
+        assert!(store.load(&s.meta.id).await.is_some());
+        assert!(store.exists(&s.meta.id).await);
+        store.delete(&s.meta.id).await.unwrap();
+        assert!(!store.exists(&s.meta.id).await);
+
+        // 导入入口同样拒绝非法 id。
+        let mut evil = Session {
+            meta: SessionSummary { id: "../evil".into(), ..Default::default() },
+            messages: Vec::new(),
+            pending: Vec::new(),
+            usage: UsageTotals::default(),
+            goal: None,
+            team: None,
+        };
+        assert!(store.insert_full(evil.clone()).await.is_err());
+        evil.meta.id = "s_import_ok".into();
+        assert!(store.insert_full(evil).await.is_ok());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ---------- 裁剪的组对齐 ----------
+
+    /// 测试消息工厂：user 纯文本 / assistant 带 ToolUse / user 带 ToolResult。
+    fn user_text(t: &str) -> StoredMessage {
+        StoredMessage {
+            role: "user".into(),
+            parts: serde_json::json!({"User": [{"Text": t}]}),
+            displays: Vec::new(),
+            turn: String::new(),
+            hidden: false,
+            created_at: 1,
+        }
+    }
+
+    fn assistant_tool_use(id: &str) -> StoredMessage {
+        StoredMessage {
+            role: "assistant".into(),
+            parts: serde_json::json!({"Assistant": [
+                {"ToolUse": {"id": id, "name": "bash", "args": {}}}
+            ]}),
+            displays: Vec::new(),
+            turn: String::new(),
+            hidden: false,
+            created_at: 1,
+        }
+    }
+
+    fn user_tool_result(id: &str) -> StoredMessage {
+        StoredMessage {
+            role: "user".into(),
+            parts: serde_json::json!({"User": [
+                {"ToolResult": {"id": id, "content": "ok", "is_error": false}}
+            ]}),
+            displays: Vec::new(),
+            turn: String::new(),
+            hidden: false,
+            created_at: 1,
+        }
+    }
+
+    /// 断言历史里没有 dangling tool_use / orphan tool_result：
+    /// 含 ToolUse 的 assistant 之后必须紧跟配对的 tool_result 组，
+    /// 含 ToolResult 的 user 之前必须有含 ToolUse 的 assistant。
+    fn assert_no_dangling(msgs: &[StoredMessage]) {
+        for (i, m) in msgs.iter().enumerate() {
+            if has_tool_use(m) {
+                assert!(
+                    i + 1 < msgs.len() && has_tool_result(&msgs[i + 1]),
+                    "message {i}: tool_use without its tool_result right after"
+                );
+            }
+            if has_tool_result(m) {
+                assert!(
+                    i > 0 && has_tool_use(&msgs[i - 1]),
+                    "message {i}: orphan tool_result without its tool_use before"
+                );
+            }
+        }
+    }
+
+    /// 造一个 store，写入 [user, assistant(tool_use), user(tool_result), user]。
+    async fn store_with_tool_group() -> (SessionStore, String, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "parable-align-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let store = SessionStore::with_root(root.clone());
+        let id = "s_align_grp".to_string();
+        store
+            .insert_full(Session {
+                meta: SessionSummary { id: id.clone(), ..Default::default() },
+                messages: vec![
+                    user_text("hi"),
+                    assistant_tool_use("c1"),
+                    user_tool_result("c1"),
+                    user_text("next"),
+                ],
+                pending: Vec::new(),
+                usage: UsageTotals::default(),
+                goal: None,
+                team: None,
+            })
+            .await
+            .expect("seed messages");
+        (store, id, root)
+    }
+
+    #[test]
+    fn align_split_pulls_boundaries_to_group_heads() {
+        let msgs = vec![
+            user_text("hi"),
+            assistant_tool_use("c1"),
+            user_tool_result("c1"),
+            user_text("next"),
+        ];
+        // 落在 tool_result 上（组头在切分点之前）→ 回退到组头 assistant。
+        assert_eq!(align_split(&msgs, 2), 1);
+        // 组尾之后的干净边界（整组都在切分点之前）→ 不动。
+        assert_eq!(align_split(&msgs, 3), 3);
+        // 组头本身 → 不动（组整体落在保留侧）。
+        assert_eq!(align_split(&msgs, 1), 1);
+        // 干净边界（首条 user）→ 不动。
+        assert_eq!(align_split(&msgs, 0), 0);
+        // 末尾边界（= len）→ 不动。
+        assert_eq!(align_split(&msgs, 4), 4);
+    }
+
+    #[test]
+    fn align_split_end_extends_to_group_tails() {
+        let msgs = vec![
+            user_text("hi"),
+            assistant_tool_use("c1"),
+            user_tool_result("c1"),
+            user_text("next"),
+        ];
+        // 终点在含 ToolUse 的 assistant 之后 → 扩到把 tool_result 一并纳入。
+        assert_eq!(align_split_end(&msgs, 2), 3);
+        // 终点在 tool_result 上（组头在删除区间内）→ 扩到组尾。
+        assert_eq!(align_split_end(&msgs, 3), 3);
+        // 干净边界 → 不动。
+        assert_eq!(align_split_end(&msgs, 1), 1);
+        // 末尾边界 → 不动。
+        assert_eq!(align_split_end(&msgs, 4), 4);
+    }
+
+    /// from=2（tool_result 处）删除：必须回退到组头，整组一起删，
+    /// 留下的历史没有孤儿 tool_result。
+    #[tokio::test]
+    async fn delete_range_aligns_from_out_of_a_tool_group() {
+        let (store, id, root) = store_with_tool_group().await;
+        store.delete_range(&id, 2, None).await.unwrap();
+        let msgs = store.messages(&id).await;
+        assert_eq!(msgs.len(), 1, "整组回退后只剩开头的 user 消息");
+        assert_eq!(msgs[0].role, "user");
+        assert_no_dangling(&msgs);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// end=2（含 ToolUse 的 assistant 之后）删除：必须扩到把 tool_result
+    /// 一并删掉，留下的历史没有 dangling tool_use。
+    #[tokio::test]
+    async fn delete_range_aligns_end_over_a_tool_group() {
+        let (store, id, root) = store_with_tool_group().await;
+        store.delete_range(&id, 0, Some(2)).await.unwrap();
+        let msgs = store.messages(&id).await;
+        assert_eq!(msgs.len(), 1, "end 对齐后只剩最后的 user 消息");
+        assert_eq!(msgs[0].role, "user");
+        assert_no_dangling(&msgs);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 只删 tool_result 那一条（from=2, end=3）：from 回退到组头后
+    /// 变成删整组，干净边界上的 user 消息原样保留。
+    #[tokio::test]
+    async fn delete_range_single_tool_result_still_removes_the_group() {
+        let (store, id, root) = store_with_tool_group().await;
+        store.delete_range(&id, 2, Some(3)).await.unwrap();
+        let msgs = store.messages(&id).await;
+        assert_eq!(msgs.len(), 2, "剩下的两条都是干净的 user 消息");
+        assert!(msgs.iter().all(|m| !has_tool_use(m) && !has_tool_result(m)));
+        assert_no_dangling(&msgs);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 删首条 user（from=0, end=1）是干净边界：tool 组完整保留，不动。
+    #[tokio::test]
+    async fn delete_range_on_a_clean_boundary_keeps_the_group() {
+        let (store, id, root) = store_with_tool_group().await;
+        store.delete_range(&id, 0, Some(1)).await.unwrap();
+        let msgs = store.messages(&id).await;
+        assert_eq!(msgs.len(), 3);
+        assert!(has_tool_use(&msgs[0]) && has_tool_result(&msgs[1]));
+        assert_no_dangling(&msgs);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// compact_store 的 keep_from 落在组中间时回退到组头：摘要消息在最前，
+    /// 其后第一组 tool_use/tool_result 完整保留。
+    #[tokio::test]
+    async fn compact_store_aligns_keep_from_to_group_head() {
+        let (store, id, root) = store_with_tool_group().await;
+        let folded = store.compact_store(&id, 2, "摘要").await.unwrap();
+        assert_eq!(folded, 1, "对齐后真正折进摘要的是 1 条（组头前的那条 user）");
+        let msgs = store.messages(&id).await;
+        assert_eq!(msgs.len(), 4, "摘要 + tool 组 + 末尾 user");
+        assert_eq!(message_text(&msgs[0].parts).as_deref(), Some("摘要"));
+        assert!(has_tool_use(&msgs[1]));
+        assert!(has_tool_result(&msgs[2]));
+        assert_no_dangling(&msgs);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// keep_from 落在干净边界（组尾之后）时不回退：整组折进摘要。
+    #[tokio::test]
+    async fn compact_store_keeps_clean_boundaries() {
+        let (store, id, root) = store_with_tool_group().await;
+        let folded = store.compact_store(&id, 3, "摘要").await.unwrap();
+        assert_eq!(folded, 3);
+        let msgs = store.messages(&id).await;
+        assert_eq!(msgs.len(), 2, "摘要 + 末尾 user");
+        assert_no_dangling(&msgs);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ---------- parse_summary_head ----------
+
+    /// 元数据字符串值里出现 "messages" 字面量（值恰好等于它、或以它结尾），
+    /// 头部解析必须跳过这些假键位置，切在真正的对象键上。
+    #[test]
+    fn summary_head_ignores_messages_literals_inside_strings() {
+        let tricky = r#"{
+  "id": "s_tricky",
+  "title": "以 \"messages\" 结尾的标题",
+  "workspace": "messages",
+  "created_at": 1,
+  "updated_at": 2,
+  "messages": [{"role": "user", "parts": {"User": [{"Text": "hi"}]}}],
+  "usage": {"input_tokens": 1}
+}"#;
+        let s = parse_summary_head(tricky).expect("must cut at the real key");
+        assert_eq!(s.id, "s_tricky");
+        assert_eq!(s.created_at, 1);
+        assert_eq!(s.updated_at, 2);
     }
 }
