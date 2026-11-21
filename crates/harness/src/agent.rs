@@ -108,6 +108,9 @@ impl QuestionBroker {
 
 // ---------------------------------------------------------------- stats
 
+/// 遥测 TPS 滑动窗口长度（毫秒）：/api/telemetry 按最近 10s 真实输出速率算。
+const TPS_WINDOW_MS: u64 = 10_000;
+
 #[derive(Debug, Clone, Default)]
 pub struct SessStats {
     pub turns: u64,
@@ -124,6 +127,48 @@ pub struct SessStats {
     pub tool_ms: u64,
     /// 首 token 延迟（ms，取本会话第一次观测值）。
     pub ttft_ms: u64,
+    /// 最近 10s 输出 token 采样环 `(ms 时间戳, 本次 delta 估算 token)`。
+    /// 只在内存里按时间窗剪枝，不参与持久化，也不覆盖上面的 EMA `tps`。
+    recent: std::collections::VecDeque<(u64, u64)>,
+}
+
+impl SessStats {
+    /// 记一条输出采样，并顺手剪掉窗口外的旧样本。
+    pub fn push_output_sample(&mut self, now_ms: u64, tokens: u64) {
+        self.recent.push_back((now_ms, tokens));
+        let cutoff = now_ms.saturating_sub(TPS_WINDOW_MS);
+        while let Some(&(ts, _)) = self.recent.front() {
+            if ts >= cutoff {
+                break;
+            }
+            self.recent.pop_front();
+        }
+    }
+
+    /// 最近 10s 滑动窗口内的真实输出速率（tok/s）。
+    ///
+    /// 返回 `(tps, samples)`；窗口内无样本或样本 token 为 0 时 `tps = None`，
+    /// 前端据此显示 `—`，而不是拿 0 或字符估算冒充实测。
+    pub fn tps_window(&self, now_ms: u64) -> (Option<f64>, usize) {
+        let cutoff = now_ms.saturating_sub(TPS_WINDOW_MS);
+        let mut total: u64 = 0;
+        let mut oldest: Option<u64> = None;
+        let mut n = 0usize;
+        for &(ts, tok) in &self.recent {
+            if ts < cutoff {
+                continue;
+            }
+            total += tok;
+            n += 1;
+            oldest = Some(oldest.map_or(ts, |o| o.min(ts)));
+        }
+        if n == 0 || total == 0 {
+            return (None, 0);
+        }
+        let span = now_ms.saturating_sub(oldest.unwrap_or(now_ms)).max(1);
+        let tps = total as f64 * 1000.0 / span as f64;
+        (Some(tps), n)
+    }
 }
 
 // ---------------------------------------------------------------- runtime
@@ -134,6 +179,9 @@ pub struct TurnControl {
     /// 本 turn 的选项快照：SubagentService 经由 `current_turn_options` 读取，
     /// 让子代理继承父 turn 的 permission_mode / thinking_level 等。
     pub opts: TurnOptions,
+    /// 本 turn 进入 running 槽位的时刻（ms epoch），供 /api/telemetry 算
+    /// 当前轮已耗时；不在运行时由会话创建时间兜底。
+    pub started_at_ms: u64,
 }
 
 #[derive(Clone)]
@@ -392,6 +440,16 @@ impl AgentRuntime {
             .await
             .get(session_id)
             .map(|c| c.opts.clone())
+    }
+
+    /// 运行中 turn 的启动时刻（ms epoch）；不在运行返回 None。
+    /// /api/telemetry 用它算当前轮 elapsedMs。
+    pub async fn turn_started_at(&self, session_id: &str) -> Option<u64> {
+        self.running
+            .lock()
+            .await
+            .get(session_id)
+            .map(|c| c.started_at_ms)
     }
 
 
@@ -730,6 +788,7 @@ impl AgentRuntime {
                     turn_id: turn_id.clone(),
                     cancel: cancel.clone(),
                     opts: opts.clone(),
+                    started_at_ms: crate::event::now_ms(),
                 },
             );
         }
@@ -1676,7 +1735,16 @@ your plugins with `plugin_list`, `plugin_edit`, `plugin_toggle`, and `plugin_del
                                         out_first_at = Some(now);
                                     }
                                     out_last_at = Some(now);
-                                    out_tokens_this_turn += crate::token::estimate(&t) as u64;
+                                    let est = crate::token::estimate(&t) as u64;
+                                    out_tokens_this_turn += est;
+                                    // 10s 滑动窗口采样：/api/telemetry 据此算真实
+                                    // 输出速率。采样走当前会话内存统计，不落盘。
+                                    {
+                                        let mut st = self.stats.lock().await;
+                                        st.entry(session_id.to_string())
+                                            .or_default()
+                                            .push_output_sample(crate::event::now_ms(), est);
+                                    }
                                     self.hub.publish(session_id, "text.delta",
                                         json!({"turnId": turn_id, "text": t}));
                                     text_buf.push_str(&t);

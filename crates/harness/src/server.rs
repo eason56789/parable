@@ -233,6 +233,8 @@ pub fn build_router(state: SharedState) -> Router {
         // 新回答追加在会话末尾 —— 不删除、不改写任何既有消息。
         .route("/sessions/{id}/messages/{idx}/retry", post(retry_message))
         .route("/status", get(status))
+        .route("/environment", get(environment))
+        .route("/telemetry", get(telemetry))
         .route("/usage", get(get_usage))
         .route("/tools", get(tools))
         .route("/schedule", get(list_tasks).post(create_task))
@@ -3908,6 +3910,239 @@ async fn status(State(state): State<SharedState>, headers: HeaderMap) -> Respons
     .into_response()
 }
 
+/// 真实主机名：优先 `COMPUTERNAME`（Windows），退 `HOSTNAME`，再退 `unknown`。
+/// 不引入 hostname crate 这类重依赖。
+fn real_hostname() -> String {
+    std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .unwrap_or_else(|_| "unknown".to_string())
+}
+
+/// GET /api/environment —— Environment 面板的只读环境快照（契约 §2.1）。
+///
+/// 全部取真实值：主机名 / 系统 / 架构 / 版本 / pid / workspace / home 都来自
+/// 运行时与 `Config`；`context.used` 取最近活动会话最后一次真实 usage 累计，
+/// 无会话为 0 且 `estimated:false`，不用字符估算冒充实测；`mcp.*` 与
+/// `GET /api/mcp` 同源（同一份 `list_status()`），不另建计数。
+async fn environment(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(q): Query<TokenQuery>,
+) -> Response {
+    if !check_auth(&headers, q.token.as_deref(), &state) {
+        return unauthorized();
+    }
+    let (model_json, ctx_limit, workspace, permission_mode, sandbox_mode) = {
+        let cfg = state.config.read().await;
+        let (model_json, limit) = match cfg.active_model() {
+            Some((p, m)) => (
+                json!({
+                    "provider": p.id,
+                    "model": m.id,
+                    "label": m.name,
+                    "thinkingLevel": cfg.thinking_level,
+                    "contextLimit": m.context,
+                }),
+                m.context,
+            ),
+            None => (
+                json!({
+                    "provider": "",
+                    "model": "",
+                    "label": "",
+                    "thinkingLevel": cfg.thinking_level,
+                    "contextLimit": 0,
+                }),
+                0u64,
+            ),
+        };
+        (
+            model_json,
+            limit,
+            cfg.workspace.clone(),
+            cfg.permission_mode.clone(),
+            cfg.sandbox.mode.clone(),
+        )
+    };
+
+    // context.used：最近活动会话（list 已按置顶 + updated_at 倒序）的真实累计。
+    let recent = state.store.list("").await.into_iter().next();
+    let used: u64 = match recent {
+        Some(s) => match state.store.load(&s.id).await {
+            Some(full) => full.usage.input_tokens + full.usage.output_tokens,
+            None => 0,
+        },
+        None => 0,
+    };
+    let pct = if ctx_limit > 0 {
+        used as f64 / ctx_limit as f64
+    } else {
+        0.0
+    };
+
+    // MCP：与 /api/mcp 同一份状态表，按 id 对齐配置与运行状态。
+    let servers_cfg = state.config.read().await.mcp_servers.clone();
+    let status = state.agent.mcp.list_status().await;
+    let mut connected = 0u64;
+    let mut failed = 0u64;
+    let mut out_servers = Vec::with_capacity(servers_cfg.len());
+    for s in &servers_cfg {
+        let st = status.iter().find(|x| x.id == s.id);
+        let (status_str, error) = if !s.enabled {
+            ("disabled", Value::Null)
+        } else {
+            match st {
+                Some(x) if x.connected => {
+                    connected += 1;
+                    ("connected", Value::Null)
+                }
+                // list_status 在握手锁未抢到/进行中时填 "(连接中…)"。
+                Some(x) if x.error == "(连接中…)" => ("connecting", Value::Null),
+                Some(x) => {
+                    failed += 1;
+                    let err = if x.error.is_empty() {
+                        Value::Null
+                    } else {
+                        Value::String(x.error.clone())
+                    };
+                    ("failed", err)
+                }
+                // 已启用但尚未登记连接（启动后还没握手）：归为 connecting。
+                None => ("connecting", Value::Null),
+            }
+        };
+        out_servers.push(json!({
+            "id": s.id,
+            "name": s.name,
+            "transport": "stdio",
+            "status": status_str,
+            "error": error,
+        }));
+    }
+
+    Json(json!({
+        "hostname": real_hostname(),
+        "os": std::env::consts::OS,
+        "arch": std::env::consts::ARCH,
+        "version": env!("CARGO_PKG_VERSION"),
+        "pid": std::process::id(),
+        "workspace": workspace,
+        "home": Config::home_dir(),
+        "model": model_json,
+        "context": {"used": used, "limit": ctx_limit, "pct": pct, "estimated": false},
+        "mcp": {
+            "connected": connected,
+            "failed": failed,
+            "total": servers_cfg.len(),
+            "servers": out_servers,
+        },
+        "permissionMode": permission_mode,
+        "sandbox": {"mode": sandbox_mode, "policy": "v1"},
+        // Auto 路由开关与备用链在 Phase 2 接入 config；此处先按契约默认值输出。
+        "auto": {"enabled": false, "fallbackChain": json!([])},
+    }))
+    .into_response()
+}
+
+/// GET /api/telemetry?session=<id> —— 单会话遥测（契约 §2.2）。
+///
+/// 会话不存在 / 未开始也返回 200（全零 + tps.value=null），不 500。TPS 取最近
+/// 10s 滑动窗口内的真实输出采样；cache 仅在 provider usage 真给过读/写字段
+/// （累计 > 0）时 `supported:true`，否则前端显示 `—`。
+async fn telemetry(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(q): Query<SessionQuery>,
+) -> Response {
+    if !check_auth(&headers, q.token.as_deref(), &state) {
+        return unauthorized();
+    }
+    let sid = q.session.unwrap_or_default();
+    let now = crate::event::now_ms();
+
+    let exists = !sid.is_empty() && state.store.exists(&sid).await;
+    let sess = if exists { state.store.load(&sid).await } else { None };
+    let live = state.agent.stats_snapshot(&sid).await;
+    let running = state.agent.is_running(&sid).await;
+    let started_at = state
+        .agent
+        .turn_started_at(&sid)
+        .await
+        .or_else(|| sess.as_ref().map(|s| s.meta.created_at))
+        .unwrap_or(0);
+
+    let u = sess.as_ref().map(|s| &s.usage);
+    let prompt = u.map(|x| x.input_tokens).unwrap_or(0) + live.tokens.input_tokens;
+    let completion = u.map(|x| x.output_tokens).unwrap_or(0) + live.tokens.output_tokens;
+    let cache_read = u.map(|x| x.cache_read).unwrap_or(0) + live.tokens.cache_read_input_tokens;
+    let cache_write = u.map(|x| x.cache_write).unwrap_or(0) + live.tokens.cache_creation_input_tokens;
+    let rounds = live.turns.max(u.map(|x| x.turns).unwrap_or(0));
+    let steps = live.steps.max(u.map(|x| x.steps).unwrap_or(0));
+    let elapsed_ms = if running {
+        now.saturating_sub(started_at)
+    } else {
+        u.map(|x| x.wall_ms).unwrap_or(0)
+    };
+
+    let (tps_value, samples) = live.tps_window(now);
+
+    // cache：只有累计读到过读/写字段才算支持；hitRate = read/(prompt+read+write)。
+    let cache_supported = cache_read > 0 || cache_write > 0;
+    let cache_hit_rate = if cache_supported {
+        let denom = prompt + cache_read + cache_write;
+        if denom > 0 {
+            Some(cache_read as f64 / denom as f64)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let (ctx_limit, model_json) = {
+        let cfg = state.config.read().await;
+        let limit = cfg.active_model().map(|(_, m)| m.context).unwrap_or(0);
+        let sel = sess
+            .as_ref()
+            .map(|s| s.meta.model.as_str())
+            .filter(|m| !m.is_empty())
+            .unwrap_or(cfg.model.as_str());
+        let model_json = match cfg.resolve_model(sel) {
+            Some((p, m)) => json!({"provider": p.id, "model": m.id}),
+            None => json!({"provider": "", "model": ""}),
+        };
+        (limit, model_json)
+    };
+    let used = prompt + completion;
+    let pct = if ctx_limit > 0 {
+        used as f64 / ctx_limit as f64
+    } else {
+        0.0
+    };
+
+    Json(json!({
+        "session": sid,
+        "turn": {
+            "rounds": rounds,
+            "steps": steps,
+            "startedAt": started_at,
+            "elapsedMs": elapsed_ms,
+            "running": running,
+        },
+        "tokens": {"prompt": prompt, "completion": completion, "total": prompt + completion},
+        "tps": {"value": tps_value, "windowSec": 10, "samples": samples},
+        "cache": {
+            "hitRate": cache_hit_rate,
+            "read": cache_read,
+            "write": cache_write,
+            "supported": cache_supported,
+        },
+        "context": {"used": used, "limit": ctx_limit, "pct": pct},
+        "model": model_json,
+    }))
+    .into_response()
+}
+
 /// Aggregate usage statistics for the 设置 → 使用统计 page.
 ///
 /// `range` scopes the chart series (`all` | `7d` | `30d`); the summary
@@ -4760,5 +4995,109 @@ mod regression {
             .unwrap();
         assert_eq!(res.status(), 200);
         restore(backup);
+    }
+
+    #[tokio::test]
+    async fn environment_reports_real_fields_and_mcp_matches_mcp_endpoint() {
+        let (base, token) = spawn_server("env").await;
+        // 鉴权：坏 token 401。
+        let res = reqwest::get(format!("{base}/api/environment?token=wrong"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 401);
+
+        let res = reqwest::get(format!("{base}/api/environment?token={token}"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        let env: Value = res.json().await.unwrap();
+
+        // 契约 §2.1 顶层字段存在性。
+        for key in ["hostname", "os", "arch", "version", "pid", "workspace", "home"] {
+            assert!(env.get(key).is_some(), "environment missing `{key}`");
+        }
+        assert!(env["hostname"].as_str().is_some(), "hostname must be a real string");
+        assert!(env["pid"].as_u64().unwrap_or(0) > 0, "pid must be real");
+        assert!(env["model"].get("provider").is_some());
+        assert!(env["model"].get("model").is_some());
+        assert!(env["context"].get("used").is_some());
+        assert!(env["context"].get("limit").is_some());
+        assert!(env["context"].get("pct").is_some());
+        assert_eq!(env["context"]["estimated"], false, "fresh server has no real usage");
+        assert!(env["sandbox"].get("mode").is_some());
+        assert_eq!(env["sandbox"]["policy"], "v1");
+        assert!(env["permissionMode"].as_str().is_some());
+        assert!(env["auto"].get("enabled").is_some());
+        assert!(env["auto"].get("fallbackChain").is_some());
+
+        // mcp.* 必须与 GET /api/mcp 同源计数（/api/mcp 只认 header token）。
+        let cli = reqwest::Client::new();
+        let mcp: Value = cli
+            .get(format!("{base}/api/mcp"))
+            .header("x-parable-token", &token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let servers = mcp["servers"].as_array().cloned().unwrap_or_default();
+        let status = mcp["status"].as_array().cloned().unwrap_or_default();
+        let connected = status.iter().filter(|s| s["connected"] == true).count() as u64;
+        assert_eq!(env["mcp"]["total"].as_u64(), Some(servers.len() as u64));
+        assert_eq!(env["mcp"]["connected"].as_u64(), Some(connected));
+        // environment 逐服务器条目与配置清单一一对应。
+        let out = env["mcp"]["servers"].as_array().unwrap();
+        assert_eq!(out.len(), servers.len());
+        for entry in out {
+            assert!(entry.get("id").is_some());
+            assert!(entry.get("transport").is_some());
+            assert!(["connected", "failed", "connecting", "disabled"]
+                .contains(&entry["status"].as_str().unwrap_or("")));
+        }
+    }
+
+    #[tokio::test]
+    async fn telemetry_unknown_session_is_200_without_500() {
+        let (base, token) = spawn_server("telemetry").await;
+        // 鉴权：坏 token 401。
+        let res = reqwest::get(format!("{base}/api/telemetry?session=s_none&token=wrong"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 401);
+
+        // 不存在的会话：仍 200，全零 + tps.value=null，不许 500。
+        let res = reqwest::get(format!("{base}/api/telemetry?session=s_none&token={token}"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        let v: Value = res.json().await.unwrap();
+        assert_eq!(v["session"], "s_none");
+        assert_eq!(v["turn"]["rounds"].as_u64(), Some(0));
+        assert_eq!(v["turn"]["steps"].as_u64(), Some(0));
+        assert_eq!(v["turn"]["running"], false);
+        assert_eq!(v["tokens"]["prompt"].as_u64(), Some(0));
+        assert_eq!(v["tokens"]["completion"].as_u64(), Some(0));
+        assert_eq!(v["tokens"]["total"].as_u64(), Some(0));
+        assert!(v["tps"]["value"].is_null(), "no samples → tps.value null");
+        assert_eq!(v["tps"]["windowSec"].as_u64(), Some(10));
+        assert_eq!(v["tps"]["samples"].as_u64(), Some(0));
+        assert_eq!(v["cache"]["supported"], false);
+        assert!(v["cache"]["hitRate"].is_null());
+        assert_eq!(v["cache"]["read"].as_u64(), Some(0));
+        assert_eq!(v["cache"]["write"].as_u64(), Some(0));
+        assert!(v["context"].get("used").is_some());
+        assert!(v["context"].get("limit").is_some());
+        assert!(v["model"].get("provider").is_some());
+        assert!(v["model"].get("model").is_some());
+
+        // 不带 session 参数同样 200（空会话不 500）。
+        let res = reqwest::get(format!("{base}/api/telemetry?token={token}"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        let v: Value = res.json().await.unwrap();
+        assert_eq!(v["tokens"]["total"].as_u64(), Some(0));
+        assert!(v["tps"]["value"].is_null());
     }
 }
