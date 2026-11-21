@@ -1790,6 +1790,24 @@ body.r2-ws-drag #r2-ws{transition:none}
 .r2-tel-i{display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
 .r2-tel-i b{color:var(--fg);font-weight:600}
 
+/* —— 文件树右键菜单（自绘，不用系统菜单） —— */
+#r2-ctx-menu{position:fixed;z-index:90;min-width:208px;padding:6px;border-radius:11px;
+  background:color-mix(in srgb,var(--bg) 94%,transparent);backdrop-filter:blur(12px);
+  border:.5px solid var(--line);box-shadow:0 12px 34px rgba(0,0,0,.26);
+  opacity:0;transform:translateY(-3px) scale(.985);transform-origin:top left;pointer-events:none;
+  transition:opacity calc(.13s * var(--animd)),transform calc(.13s * var(--animd))}
+#r2-ctx-menu.on{opacity:1;transform:none;pointer-events:auto}
+.r2-mi{display:flex;align-items:center;gap:10px;width:100%;padding:8px 9px;border:0;border-radius:7px;
+  background:none;color:var(--fg);font:12.5px var(--sans);text-align:left;cursor:pointer;
+  transition:background-color calc(.12s * var(--animd))}
+.r2-mi:hover,.r2-mi:focus-visible{background:var(--hov);outline:0}
+.r2-mi svg{width:14px;height:14px;flex:none;color:var(--fg2)}
+.r2-mi small{margin-left:auto;padding-left:10px;color:var(--fg2);font:10.5px var(--mono);
+  max-width:92px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.r2-mi[disabled]{opacity:.45;cursor:default}
+/* 右键命中的行：给一点停留反馈，避免菜单遮住不知道点的是哪一条 */
+.r2-tree-row.ctx{background:var(--hov);border-radius:7px}
+
 #tb .ib.on{background:var(--hov);color:var(--fg)}
 #tb #r2-ws-btn,#tb #r2-env-btn{border:1px solid transparent}
 #tb #r2-ws-btn.on,#tb #r2-env-btn.on{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 38%,transparent);background:color-mix(in srgb,var(--accent) 10%,transparent)}
@@ -2407,6 +2425,8 @@ const L = {
     auto_model:'自动选模型', auto_model_h:'按任务能力自动匹配模型',
     r2_ws:'工作区', r2_host:'主机', r2_wsdir:'工作区', r2_ctx:'上下文', r2_mcp:'连接器', r2_mcp0:'0 个服务器', r2_model:'模型',
     r2_nofile:'从左侧选择文件查看', r2_loading:'加载中…',
+    r2_env_local:'本机', r2_env_idle:'未开始会话', r2_env_nomodel:'未配置模型', r2_env_off:'服务未连接',
+    r2_add_chat:'添加到对话', r2_reveal:'在文件夹中显示', r2_added:'已添加到对话', r2_add_full:'附件已达 6 个上限',
     auto_no_chat:'当前没有会话，不能投递到当前对话', disc:'Parable 是 AI，可能会出错，请核实重要内容',
     sp_title:'新标签页', sp_title_h:'选择要打开的工具面板。',
     sp_files:'文件', sp_files_h:'浏览工作区目录与文件。',
@@ -2673,6 +2693,8 @@ const L = {
     auto_model:'Auto model', auto_model_h:'Pick a model automatically by task capability',
     r2_ws:'Workspace', r2_host:'Host', r2_wsdir:'Workspace', r2_ctx:'Context', r2_mcp:'Connectors', r2_mcp0:'0 servers', r2_model:'Model',
     r2_nofile:'Select a file from the left to preview', r2_loading:'Loading…',
+    r2_env_local:'This machine', r2_env_idle:'No active session', r2_env_nomodel:'No model configured', r2_env_off:'Service offline',
+    r2_add_chat:'Add to chat', r2_reveal:'Show in folder', r2_added:'Added to chat', r2_add_full:'Attachment limit reached (6)',
     auto_no_chat:'No active chat to deliver to', disc:'Parable is AI and can make mistakes. Please double-check important content',
     sp_title:'New tab', sp_title_h:'Choose a tool panel to open.',
     sp_files:'Files', sp_files_h:'Browse workspace files and folders.',
@@ -6241,6 +6263,7 @@ function startTurnUI() {
   turnT0 = Date.now();
   stick = true;
   follow();
+  tidyTurnFooters();
 }
 
 /** Handle one server event. */
@@ -6900,6 +6923,9 @@ function dispatch(ev) {
       // 否则“后台任务在本会话跑”时会直接冒出没有提问的回答。
       expectBubble = false;
       sync();
+      // 收尾控件只留在本轮最后一个气泡：切回会话时先重放出的那段不再是
+      // 「回答末尾」，按钮和时间不能悬在正文中间。
+      tidyTurnFooters();
       // 问答等待中若本轮被中断/结束，立即收回底部问答面板。
       if (QBOX.active && !QBOX.closing) qsReset(true);
       // 后台通知（设置 → 通用）：页面隐藏时 turn 结束弹系统通知
@@ -8625,6 +8651,30 @@ function finishTurnBubble(a, dur) {
 }
 
 /**
+ * 同一轮被拆成多个 .a 气泡时不把收尾控件留在中间。
+ *
+ * 触发场景（用户实测）：切到别的页面/会话，再切回仍在跑的会话——历史重放
+ * 先画出一个已完成气泡（restamp 会点亮它的操作条和时间），在途尾巴随后
+ * 又新建一个气泡；turn.end 给新气泡盖上「已工作」和操作条。结果第一条
+ * 气泡的按钮 + 时间悬在整段回答中间，看起来像回答被拦腰截断。
+ *
+ * 判据只看 DOM：两个 .a 紧邻（中间没有 .u 提问 / .wakeline 分隔）就是同一
+ * 轮的分段，只有最后一个该显示收尾控件。
+ */
+function tidyTurnFooters() {
+  if (!feed) return;
+  const bubs = [...feed.querySelectorAll(':scope > .a')];
+  bubs.forEach((b, i) => {
+    const next = bubs[i + 1];
+    const split = !!(next && b.nextElementSibling === next);
+    const row = b.querySelector('.arow');
+    const wk = b.querySelector('.wktop');
+    if (row) row.style.display = split ? 'none' : '';
+    if (wk) wk.style.display = split ? 'none' : '';
+  });
+}
+
+/**
  * 一轮在别的会话里跑完、之后才切回来的补正：给那个气泡盖「已工作 x 秒」
  * 开合头并折叠过程。回答侧的时间戳保持可见——它是「输出完毕才出现」的
  * 完成态标记，与实时跑完的视图一致（setActs 收尾时显形）。
@@ -9169,6 +9219,7 @@ async function restamp() {
     if (ac) ac.classList.add('show');
     n.querySelectorAll('.acts .ib.off').forEach(b => b.classList.remove('off'));
   });
+  tidyTurnFooters();
 }
 
 /**
@@ -15537,6 +15588,7 @@ function r2Toggle(which) {
   localStorage.setItem('parable.panel.' + which, R2[which + 'Open'] ? '1' : '0');
   r2ApplyBody();
   if (R2[which + 'Open']) { if (which === 'ws') r2WsEnsure(); else r2LoadEnv(); }
+  else if (which === 'env') clearTimeout(R2.envT);
 }
 
 function r2CloseAll() {
@@ -15587,7 +15639,7 @@ function r2TreeRows(dir, entries, depth) {
     const pad = 6 + depth * 14;
     if (e.is_dir) {
       const open = R2.expanded.has(e.path);
-      html += '<div class="r2-tree-row dir' + (open ? '' : ' closed') + '" role="treeitem" tabindex="0" aria-expanded="' + open + '" data-dir="' + esc(e.path) + '" style="padding-left:' + pad + 'px">' +
+      html += '<div class="r2-tree-row dir' + (open ? '' : ' closed') + '" role="treeitem" tabindex="0" aria-expanded="' + open + '" aria-haspopup="menu" data-dir="' + esc(e.path) + '" data-name="' + esc(e.name) + '" style="padding-left:' + pad + 'px">' +
         '<span class="r2-tw">' + ic('chev') + '</span><span class="ic">' + ic('folder') + '</span><span class="nm">' + esc(e.name) + '</span></div>';
       if (open) {
         const kids = R2.treeCache.get(e.path);
@@ -15596,7 +15648,7 @@ function r2TreeRows(dir, entries, depth) {
     } else {
       const g = R2.git.get(e.path);
       const dot = g ? '<span class="dot" style="background:' + r2GitColor(g) + '"></span>' : '';
-      html += '<div class="r2-tree-row file" role="treeitem" tabindex="0" data-file="' + esc(e.path) + '" style="padding-left:' + pad + 'px">' +
+      html += '<div class="r2-tree-row file" role="treeitem" tabindex="0" aria-haspopup="menu" data-file="' + esc(e.path) + '" data-name="' + esc(e.name) + '" data-size="' + (e.size || 0) + '" style="padding-left:' + pad + 'px">' +
         '<span class="r2-tw"></span><span class="ic">' + r2TypeIcon(e.name) + '</span><span class="nm">' + esc(e.name) + '</span>' + dot +
         '<span class="sz">' + fmtBytes(e.size || 0) + '</span></div>';
     }
@@ -15605,14 +15657,132 @@ function r2TreeRows(dir, entries, depth) {
 }
 
 function r2BindTree(root) {
+  const keys = (row, act) => e => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); act(); return; }
+    if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) {
+      const r = row.getBoundingClientRect();
+      r2CtxShow(row, r.left + 14, r.bottom - 2, true);
+    }
+  };
   root.querySelectorAll('[data-dir]').forEach(r => {
     r.onclick = () => r2ToggleDir(r.dataset.dir);
-    r.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); r2ToggleDir(r.dataset.dir); } };
+    r.onkeydown = keys(r, () => r2ToggleDir(r.dataset.dir));
+    r.oncontextmenu = e => { e.preventDefault(); r2CtxShow(r, e.clientX, e.clientY); };
   });
   root.querySelectorAll('[data-file]').forEach(r => {
     r.onclick = () => r2OpenFile(r.dataset.file);
-    r.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); r2OpenFile(r.dataset.file); } };
+    r.onkeydown = keys(r, () => r2OpenFile(r.dataset.file));
+    r.oncontextmenu = e => { e.preventDefault(); r2CtxShow(r, e.clientX, e.clientY); };
   });
+}
+
+/* ---------- 文件树右键菜单：添加到对话 / 在文件夹中显示 ---------- */
+const R2_CTX_ICON = {
+  chat: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"><path d="M2.7 3.3h10.6v6.9H7.5L4.3 12.9v-2.7H2.7z"/></svg>',
+  folder: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"><path d="M2.2 4.3h3.9l1.25 1.5h6.45v6.9H2.2z"/></svg>'
+};
+
+/** 把工作区相对路径拼成绝对路径：后端 reveal 校验的是真实存在且落在工作区内的路径。 */
+function r2AbsPath(p) {
+  if (!p) return p;
+  if (/^([A-Za-z]:[\\/]|\\\\|\/)/.test(p)) return p;
+  const root = (R2.root || '').replace(/[\\/]+$/, '');
+  if (!root) return p;
+  return root + (root.includes('\\') ? '\\' : '/') + p.replace(/^[\\/]+/, '');
+}
+
+function r2CtxEl() {
+  let m = $('#r2-ctx-menu');
+  if (m) return m;
+  m = document.createElement('div');
+  m.id = 'r2-ctx-menu';
+  m.setAttribute('role', 'menu');
+  m.hidden = true;
+  document.body.appendChild(m);
+  document.addEventListener('mousedown', e => {
+    const el = $('#r2-ctx-menu');
+    if (el && el.classList.contains('on') && !el.contains(e.target)) r2CtxHide();
+  }, true);
+  document.addEventListener('keydown', e => {
+    const el = $('#r2-ctx-menu');
+    if (!el || !el.classList.contains('on')) return;
+    if (e.key === 'Escape') { e.preventDefault(); r2CtxHide(true); return; }
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      const items = [...el.querySelectorAll('.r2-mi:not([disabled])')];
+      const i = items.indexOf(document.activeElement);
+      const n = e.key === 'ArrowDown' ? (i + 1) % items.length : (i <= 0 ? items.length - 1 : i - 1);
+      if (items[n]) items[n].focus();
+    }
+  });
+  window.addEventListener('blur', r2CtxHide);
+  window.addEventListener('resize', r2CtxHide);
+  return m;
+}
+
+function r2CtxHide(refocus) {
+  const m = $('#r2-ctx-menu');
+  if (!m || !m.classList.contains('on')) return;
+  m.classList.remove('on');
+  m.hidden = true;
+  const row = R2.ctxRow;
+  if (row) { row.classList.remove('ctx'); R2.ctxRow = null; }
+  if (refocus && row) row.focus();
+}
+
+/** 以某一行为锚点打开菜单：相对路径来自 data-file/data-dir。fromKey=键盘触发。 */
+function r2CtxShow(row, x, y, fromKey) {
+  const isDir = row.dataset.dir != null;
+  const path = isDir ? row.dataset.dir : row.dataset.file;
+  if (!path) return;
+  R2.ctxKey = !!fromKey;
+  r2CtxHide();
+  row.classList.add('ctx');
+  R2.ctxRow = row;
+  const info = { path, name: row.dataset.name || path.split(/[\\/]/).pop(), size: +(row.dataset.size || 0), isDir };
+  const m = r2CtxEl();
+  const item = (label, icon, hint, fn) => {
+    const b = document.createElement('button');
+    b.className = 'r2-mi';
+    b.type = 'button';
+    b.setAttribute('role', 'menuitem');
+    b.innerHTML = icon + '<span></span>' + (hint ? '<small>' + esc(hint) + '</small>' : '');
+    b.querySelector('span').textContent = label;
+    b.onclick = () => { const k = R2.ctxKey; r2CtxHide(k); fn(); };
+    m.appendChild(b);
+    return b;
+  };
+  m.innerHTML = '';
+  let first = null;
+  if (!isDir) first = item(t('r2_add_chat'), R2_CTX_ICON.chat, info.size ? fmtBytes(info.size) : '', () => r2Attach(info));
+  const f2 = item(t('r2_reveal'), R2_CTX_ICON.folder, '', () => revealFile(r2AbsPath(info.path)));
+  first = first || f2;
+  m.hidden = false;
+  m.style.left = '0px';
+  m.style.top = '0px';
+  m.classList.add('on');
+  // 视口边界收边：右下放不下就翻到指针左/上方。
+  const w = m.offsetWidth, h = m.offsetHeight, pad = 8;
+  const vw = window.innerWidth, vh = window.innerHeight;
+  const left = Math.min(Math.max(pad, x), Math.max(pad, vw - w - pad));
+  const top = y + h + pad > vh ? Math.max(pad, y - h) : y;
+  m.style.left = left + 'px';
+  m.style.top = top + 'px';
+  if (first && R2.ctxKey) first.focus();
+}
+
+/** 把工作区文件直接挂进本条消息的附件（不走上传接口，不复制文件）。 */
+function r2Attach(info) {
+  if (typeof ATTS === 'undefined') return;
+  const abs = r2AbsPath(info.path);
+  if (ATTS.some(a => a.path === abs)) { toast(t('r2_added')); return; }
+  if (ATTS.length >= 6) { toast(t('r2_add_full')); return; }
+  ATTS.push({ path: abs, name: info.name, size: info.size || 0, type: '', kind: 'file', loading: false, url: null });
+  renderAtts();
+  if (typeof sync === 'function') sync();
+  toast(t('r2_added'));
+  const inp = $('#inp');
+  if (inp && typeof inp.focus === 'function') inp.focus();
 }
 
 async function r2ToggleDir(p) {
@@ -15802,32 +15972,47 @@ async function r2LoadEnv() {
   R2.env = env;
   r2PaintEnv(env);
   if (!env || !env.mcp || !env.mcp.servers) r2LoadMcpFallback();
+  // 面板开着就低频续拉：上下文占用会随会话推进变化，只在展开时取一次会一直停在旧值。
+  clearTimeout(R2.envT);
+  if (R2.envOpen) R2.envT = setTimeout(() => { if (R2.envOpen) r2LoadEnv(); }, 10000);
 }
 
 function r2PaintEnv(env) {
   const host = $('#r2-env-host'), os = $('#r2-env-os'), ws = $('#r2-env-ws'),
     pctEl = $('#r2-ctx-pct'), metaEl = $('#r2-ctx-meta'), arc = $('#r2-ctx-arc'),
     modelEl = $('#r2-env-model');
-  if (host) host.textContent = (env && env.hostname) || '—';
-  if (os) os.textContent = env ? [env.os, env.arch, env.version].filter(Boolean).join(' · ') : '—';
+  // 四段数据都来自 /api/environment（与会话无关），服务不可达时才退化成占位，
+  // 但占位文案要说明「为什么空」，而不是四个孤零零的破折号。
+  if (host) host.textContent = env ? (env.hostname || t('r2_env_local')) : '—';
+  if (os) os.textContent = env ? ([env.os, env.arch].filter(Boolean).join(' · ') || '—') : '—';
   if (ws) ws.textContent = (env && env.workspace) || R2.root || '—';
   const C = 2 * Math.PI * 24;
-  const ctx = env && env.context;
+  // 上下文占用是「当前对话」的指标：首页/没选中会话时显示未开始，
+  // 不能把上一个会话接近上限的读数搬到新对话首页上（会看着像已爆满）。
+  const active = !!(typeof conv !== 'undefined' && conv && conv.id);
+  const ctx = active && env && env.context;
   if (ctx && ctx.limit) {
-    const pct = Math.max(0, Math.min(1, ctx.pct != null ? ctx.pct : (ctx.used || 0) / ctx.limit));
+    const used = ctx.used || 0;
+    const pct = Math.max(0, Math.min(1, ctx.pct != null ? ctx.pct : used / ctx.limit));
     const warn = (S.ctxWarnPct || 80) / 100;
-    if (arc) { arc.style.strokeDashoffset = C * (1 - pct); arc.style.stroke = pct >= warn ? '#c9a227' : 'var(--accent)'; }
+    if (arc) {
+      arc.style.strokeDashoffset = C * (1 - pct);
+      arc.style.stroke = used > 0 && pct >= warn ? 'var(--danger-text)' : 'var(--accent)';
+    }
     if (pctEl) pctEl.textContent = Math.round(pct * 100) + '%';
-    if (metaEl) metaEl.textContent = kfmt(ctx.used || 0) + ' / ' + kfmt(ctx.limit);
+    // 还没聊过：环画 0%，右侧写清状态，避免 "0 / 200,000" 这种像故障的读数。
+    if (metaEl) metaEl.textContent = used > 0 ? kfmt(used) + ' / ' + kfmt(ctx.limit) : t('r2_env_idle');
   } else {
-    if (arc) arc.style.strokeDashoffset = C;
+    if (arc) { arc.style.strokeDashoffset = C; arc.style.stroke = 'var(--line)'; }
     if (pctEl) pctEl.textContent = '—';
-    if (metaEl) metaEl.textContent = '—';
+    if (metaEl) metaEl.textContent = env ? t('r2_env_idle') : t('r2_env_off');
   }
   if (modelEl) {
     const md = env && env.model;
     // /api/environment 未上线时显 —，不拿 /status 的模型名顶替（契约 §4 第 2 组）。
-    modelEl.textContent = md ? ((md.provider || '') + ' / ' + (md.label || md.model || '')) : '—';
+    modelEl.textContent = md && (md.model || md.label)
+      ? ((md.provider ? md.provider + ' / ' : '') + (md.label || md.model))
+      : t('r2_env_nomodel');
   }
   if (env && env.mcp && env.mcp.servers) r2PaintMcp(env.mcp);
 }
@@ -15836,7 +16021,7 @@ async function r2LoadMcpFallback() {
   const list = $('#r2-mcp-list');
   if (!list) return;
   let d;
-  try { d = await api('/mcp'); } catch (e) { list.innerHTML = '<div class="r2-empty">—</div>'; return; }
+  try { d = await api('/mcp'); } catch (e) { list.hidden = false; list.innerHTML = '<div class="r2-empty">—</div>'; return; }
   const servers = d.servers || [], stMap = {};
   (d.status || []).forEach(x => { stMap[x.id] = x; });
   const mcp = {
@@ -15857,8 +16042,11 @@ function r2PaintMcp(mcp) {
   const list = $('#r2-mcp-list'), sum = $('#r2-mcp-sum');
   if (!list) return;
   const servers = mcp.servers || [];
-  if (sum) sum.textContent = (mcp.connected || 0) + '/' + (mcp.failed || 0) + '/' + (mcp.total || servers.length);
-  if (!servers.length) { list.innerHTML = '<div class="r2-empty">' + esc(t('r2_mcp0')) + '</div>'; return; }
+  if (sum) sum.textContent = mcp.total
+    ? (mcp.connected || 0) + '/' + mcp.total
+    : t('r2_mcp0');
+  list.hidden = !servers.length;
+  if (!servers.length) { list.innerHTML = ''; return; }
   list.innerHTML = servers.map(sv => {
     const st = sv.status || 'disabled';
     const dotColor = st === 'connected' ? 'var(--diff-add)' : st === 'failed' ? 'var(--danger-text)' : 'var(--fg2)';
@@ -15916,6 +16104,10 @@ function r2Init() {
   r2StatusRoot();
   r2WsLoad('');
   r2GitLoad();
+  // 面板状态是持久化的：上次退出时 Environment 是展开的，这次一进来就得
+  // 拉一次数据。原先只有点击开关（r2Toggle）才会 fetch，重开页面后整栏
+  // 停在占位文案，看上去像「数据全空」。
+  if (R2.envOpen) r2LoadEnv();
   setInterval(r2TelPoll, 2000);
   r2TelPoll();
 }

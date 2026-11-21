@@ -989,6 +989,14 @@ async fn reveal_file(
             allowed_roots.push(std::path::PathBuf::from(s.workspace));
         }
     }
+    // 当前配置的工作区即使还没开过任何会话，也要允许定位：文件树右键
+    // 「在文件夹中显示」在首会话之前就可用，否则会以「不在工作区」被拒。
+    {
+        let cfg = state.config.read().await;
+        if !cfg.workspace.is_empty() {
+            allowed_roots.push(std::path::PathBuf::from(&cfg.workspace));
+        }
+    }
     let within = allowed_roots
         .iter()
         .any(|root| crate::permission::inside_workspace(root, &p));
