@@ -18,9 +18,12 @@
 @media(prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#262624;--side:#1f1e1d;--fg:#faf9f5;--fg2:#9c9a92;--line:rgba(222,220,209,.15);--input:#30302e;--bubble:#141413;--hov:rgba(222,220,209,.08);--accent-focus:#e8896b;--danger-text:#ff6b5e;--diff-add:#46bf72;--diff-del:#ff5c5c;--uch1:#4099ff;--uch2:#46bf72;--uch3:#7b5ce5;--uch4:#ff5c5c;--uch5:#ff8a30;--uch6:#42c8c8}}
 :root[data-theme="dark"]{--bg:#262624;--side:#1f1e1d;--fg:#faf9f5;--fg2:#9c9a92;--line:rgba(222,220,209,.15);--input:#30302e;--bubble:#141413;--hov:rgba(222,220,209,.08);--accent-focus:#e8896b;--danger-text:#ff6b5e;--diff-add:#46bf72;--diff-del:#ff5c5c;--uch1:#4099ff;--uch2:#46bf72;--uch3:#7b5ce5;--uch4:#ff5c5c;--uch5:#ff8a30;--uch6:#42c8c8}
 *{box-sizing:border-box}
-/* 键盘焦点环：图标按钮 / 分段 / 视图切换等全控件统一可见；:focus-visible 保证
-   鼠标点击不画环，只在 Tab 等键盘聚焦时出现。 */
-:focus-visible{outline:2px solid var(--accent-focus);outline-offset:2px;border-radius:inherit}
+/* 键盘焦点环：只覆盖按钮 / 链接 / 下拉 / 复选·单选·滑杆 / 自定义可聚焦控件；
+   :focus-visible 保证鼠标点击不画环，只在 Tab 等键盘聚焦时出现。
+   文本输入类（textarea，以及 text/search/url/password/number/email 等 input）
+   不在选择器内：其焦点只由各自的 :focus 边框/阴影或 .box:focus-within 表达，不套 outline。
+   用 :where() 压低权重，避免与既有单条规则（如 .tn:focus-visible i）打架。 */
+:where(button, a[href], select, [role="button"], input[type="checkbox"], input[type="radio"], input[type="range"], [tabindex]):focus-visible{outline:2px solid var(--accent-focus);outline-offset:2px;border-radius:inherit}
 html,body{height:100%;margin:0}
 body{font:var(--ui,13px)/1.45 var(--sans);background:var(--side);color:var(--fg);overflow:hidden;transition:background-color calc(.6s * var(--animd)),color calc(.6s * var(--animd));-webkit-font-smoothing:antialiased}
 button{font:inherit;color:inherit}
