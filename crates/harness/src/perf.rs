@@ -334,3 +334,72 @@ fn perf_serialize_typed_vs_value() {
     }
     report("value_to_typed_100msg", iters, t0.elapsed());
 }
+
+/// B1：沙箱闸门三检（cwd / 命令路径 / 联网动词）单次端到端判定耗时，
+/// 分 off / enforce-放行 / enforce-拒绝 三档，N=20，报 p50/p95。闸门本身是
+/// 纯内存字符串/路径比较，不含子进程 spawn；子进程与 HTTP 往返另在 gate-overhead.md 记录。
+#[test]
+fn perf_sandbox_gate_overhead() {
+    use crate::permission::SandboxPolicy;
+
+    let ws = std::env::temp_dir().join("parable-perf-gate");
+    let _ = std::fs::remove_dir_all(&ws);
+    std::fs::create_dir_all(&ws).unwrap();
+    let cwd = ws.clone();
+
+    let outside = if cfg!(windows) {
+        "C:\\Windows\\win.ini"
+    } else {
+        "/etc/hostname"
+    };
+    let deny_cmd = if cfg!(windows) {
+        format!("type {outside}")
+    } else {
+        format!("cat {outside}")
+    };
+
+    let arms: [(&str, SandboxPolicy, &str, &std::path::Path); 3] = [
+        ("gate_off", SandboxPolicy::off(), "echo hi", &cwd),
+        (
+            "gate_enforce_allow",
+            SandboxPolicy { mode: "enforce".into(), network_allow: Vec::new() },
+            "echo hi",
+            &cwd,
+        ),
+        (
+            "gate_enforce_deny",
+            SandboxPolicy { mode: "enforce".into(), network_allow: Vec::new() },
+            &deny_cmd,
+            &cwd,
+        ),
+    ];
+
+    for (name, policy, cmd, dir) in arms {
+        let n = 20u32;
+        let mut samples: Vec<f64> = Vec::with_capacity(n as usize);
+        let mut deny_seen = false;
+        for _ in 0..n {
+            let t0 = Instant::now();
+            for verdict in [
+                policy.check_cwd(&ws, dir),
+                policy.check_command_paths(&ws, cmd),
+                policy.check_network_command(cmd),
+            ] {
+                use crate::permission::SandboxVerdict;
+                if let SandboxVerdict::Deny { .. } = verdict {
+                    deny_seen = true;
+                }
+                std::hint::black_box(&verdict);
+            }
+            samples.push(t0.elapsed().as_secs_f64() * 1e6);
+        }
+        samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let p50 = samples[samples.len() / 2];
+        let p95 = samples[(samples.len() - 1).min((samples.len() as f64 * 0.95) as usize)];
+        let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+        println!(
+            "PERF {name}\titers={n}\tmean_us={mean:.3}\tp50_us={p50:.3}\tp95_us={p95:.3}\tdeny={deny_seen}",
+        );
+    }
+    let _ = std::fs::remove_dir_all(&ws);
+}
