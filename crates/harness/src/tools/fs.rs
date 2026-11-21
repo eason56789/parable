@@ -24,8 +24,9 @@ pub fn resolve_within(workspace: &Path, raw: &str) -> Result<PathBuf, HarnessErr
     let normalized = normalize(&candidate);
 
     // Reject anything that climbs out of the workspace via `..`.
+    // C-12：组件级前缀比较与 permission 网关共用同一套 Windows 大小写口径。
     let ws_norm = normalize(&workspace.to_path_buf());
-    if !normalized.starts_with(&ws_norm) {
+    if !crate::permission::lexical_inside(&ws_norm, &normalized) {
         // Allow absolute paths outside the workspace only if the caller passes
         // them explicitly and the permission layer has been consulted; still we
         // flag the escape here so the agent cannot silently wander the disk.

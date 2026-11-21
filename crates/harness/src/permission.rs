@@ -287,6 +287,12 @@ pub fn inside_workspace(workspace: &Path, path: &Path) -> bool {
     )
 }
 
+/// C-12：组件级前缀比较（不做 canonicalize），供 fs 层与网关共用同一套
+/// Windows 大小写不敏感口径，避免两边对 `Foo`/`foo` 判定分叉。
+pub fn lexical_inside(parent: &Path, child: &Path) -> bool {
+    norm_prefix(parent, child)
+}
+
 // ------------------------------------------------------------------ 阶段四·沙箱 v1
 
 /// 沙箱判定结果。`off` 模式下恒为 [`SandboxVerdict::Allow`]，既有行为不变。
