@@ -5514,9 +5514,11 @@ function openInFilesPane(path) {
     SP.active = tab.id;
     tab.st.path = dir;
     tab.st.q = '';
+    // 复用标签时也切到「只看正文」：从工作区打开的文件不需要侧栏文件列表。
+    tab.st.previewOnly = true;
     spRender();
   } else {
-    tab = spOpen('files', { path: dir });
+    tab = spOpen('files', { path: dir, previewOnly: true });
   }
   // spFilesOpen 需要目录树就绪后才能选中文件，放到下一帧再调。
   setTimeout(() => { try { spFilesOpen(tab, norm); } catch (e) { /* 目录还没加载好就算了 */ } }, 60);
@@ -13418,6 +13420,12 @@ function spRenderLauncher(host) {
 function spRenderFiles(host, tab) {
   const st = tab.st;
   st.path = st.path || '';
+  // 从工作区文件树点进来的文件：侧栏只放文件正文，不再重复一棵文件列表
+  // （左侧工作区已经是目录树，右侧再列一遍既占高度又容易点错）。
+  if (st.previewOnly) {
+    host.innerHTML = '<div id="spf-file"></div>';
+    return;
+  }
   host.innerHTML = '<div class="spbar"><input id="spf-q" placeholder="' + esc(t('sp_search_hint')) +
     '" spellcheck="false" autocomplete="off"><button class="spbtn" id="spf-up">↑</button></div>' +
     '<div class="sptree" id="spf-tree"></div><div id="spf-file"></div>';
