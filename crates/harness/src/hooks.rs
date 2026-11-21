@@ -380,6 +380,19 @@ mod tests {
         )
     }
 
+    /// 这两个测试依赖 spawn 真实的 `powershell`：PATH 上没有它时跳过，
+    /// 而不是让整套测试在精简环境（CI 容器 / Git Bash 沙箱）里挂掉。
+    fn powershell_available() -> bool {
+        std::process::Command::new("powershell")
+            .arg("-NoProfile")
+            .arg("-Command")
+            .arg("$null")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok()
+    }
+
     // ---------- 纯逻辑：matcher / 截断 / 决策矩阵 ----------
 
     #[test]
@@ -561,6 +574,10 @@ mod tests {
 
     #[tokio::test]
     async fn payload_json_reaches_stdin() {
+        if !powershell_available() {
+            eprintln!("skip: powershell not on PATH");
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("stdin.json");
         let command = capture_command(&out);
@@ -583,6 +600,10 @@ mod tests {
 
     #[tokio::test]
     async fn payload_merge_fills_tool_and_args() {
+        if !powershell_available() {
+            eprintln!("skip: powershell not on PATH");
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("stdin.json");
         let command = capture_command(&out);

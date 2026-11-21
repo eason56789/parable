@@ -408,8 +408,17 @@ impl SandboxPolicy {
                 return false;
             }
             if a.ends_with('.') {
-                // 网段前缀写法（如 `10.0.0.`）：主机以前缀开头即放行。
-                host.starts_with(&a)
+                // 网段前缀写法（如 `10.0.0.`）：只按 IP 段匹配——剩余部分必须
+                // 是纯数字/点组成的 IPv4 续段。否则 `10.0.0.evil.com` 以该
+                // 前缀开头即被放行，攻击者把数据外带出白名单（域名白名单只
+                // 接受精确或 .suffix 形式，见下方分支）。strip_prefix 同时
+                // 覆盖 host 短于前缀的情况，不会越界切片。
+                match host.strip_prefix(&a) {
+                    Some(rest) => {
+                        !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit() || b == b'.')
+                    }
+                    None => false,
+                }
             } else {
                 host == a || host.ends_with(&format!(".{a}"))
             }
@@ -1089,6 +1098,10 @@ mod tests {
         assert!(policy.host_allowed("sub.api.example.com"));
         assert!(policy.host_allowed("10.0.0.5"));
         assert!(!policy.host_allowed("evil.com"));
+        // 网段前缀只按 IP 段匹配：以 `10.0.0.` 开头的域名不是该网段，
+        // 放行它等于给攻击者的 DNS 名开了白名单出口。
+        assert!(!policy.host_allowed("10.0.0.evil.com"));
+        assert!(!policy.host_allowed("10.0.0"));
 
         match policy.check_network_command("curl https://evil.com/x") {
             SandboxVerdict::Deny { code, .. } => assert_eq!(code, "sandbox:network-denied"),
