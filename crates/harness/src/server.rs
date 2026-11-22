@@ -971,18 +971,38 @@ struct OpenUrlReq {
 ///（`user:pass@host`）的形似回环地址，避免 `http://127.0.0.1:80@evil.com/`
 /// 这类前缀绕过。
 fn is_loopback_url(url: &str) -> bool {
-    let Some(rest) = url.strip_prefix("http://") else {
+    let Some(rest) = url.strip_prefix("http://").or_else(|| url.strip_prefix("https://")) else {
         return false;
     };
-    let authority = rest.split('/').next().unwrap_or(rest);
+    // authority 到第一个 /、?、# 结束（"?token=..." 直接跟在 host:port 后时
+    // 没有 path，旧实现 split('/') 会把 query 一起算进 authority）。
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
     if authority.contains('@') {
         return false;
     }
-    let host = authority
-        .strip_prefix('[')
-        .and_then(|h| h.split(']').next())
-        .unwrap_or_else(|| authority.rsplit(':').next().unwrap_or(authority));
-    matches!(host, "127.0.0.1" | "localhost" | "::1")
+    // 剥端口：旧实现 rsplit(':').next() 取到的是端口号而不是主机名——
+    // 桌面壳的 location.origin 永远带端口（127.0.0.1:7789），于是 host 被
+    // 解析成 "7789"，回环校验恒失败，「在浏览器中打开」点了没反应。
+    let host = if let Some(stripped) = authority.strip_prefix('[') {
+        stripped.split(']').next().unwrap_or(stripped).to_string()
+    } else {
+        match authority.rsplit_once(':') {
+            Some((h, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => {
+                h.to_string()
+            }
+            _ => authority.to_string(),
+        }
+    };
+    let host = host.to_ascii_lowercase();
+    matches!(host.as_str(), "localhost" | "::1")
+        || host
+            .parse::<std::net::Ipv4Addr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false)
+        || host
+            .parse::<std::net::Ipv6Addr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false)
 }
 
 async fn service_open(
@@ -4986,6 +5006,28 @@ pub async fn serve_in(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 回环校验必须经得起「origin 永远带端口」：桌面壳的 location.origin 是
+    /// 127.0.0.1:7789，旧实现 rsplit(':') 把端口当主机名 → 恒不匹配 →
+    /// 「在浏览器中打开」400 被拒（用户实测点按钮毫无反应）。
+    #[test]
+    fn loopback_url_accepts_port_and_query() {
+        assert!(is_loopback_url("http://127.0.0.1:7789/?token=abc"));
+        assert!(is_loopback_url("http://127.0.0.1:59182"));
+        assert!(is_loopback_url("http://127.0.0.1"));
+        assert!(is_loopback_url("http://localhost:3000/x"));
+        assert!(is_loopback_url("http://LOCALHOST"));
+        assert!(is_loopback_url("http://[::1]:8080/"));
+        assert!(is_loopback_url("http://127.0.0.2:1/"));
+        assert!(is_loopback_url("https://127.0.0.1:7789/"));
+        // 非回环 / 伪造（userinfo、十进制 IP 变体、外网域名）一律拒绝。
+        assert!(!is_loopback_url("http://evil.com:7789/"));
+        assert!(!is_loopback_url("http://127.0.0.1.evil.com/"));
+        assert!(!is_loopback_url("http://user@127.0.0.1:7789/"));
+        assert!(!is_loopback_url("http://192.168.1.5:4000/"));
+        assert!(!is_loopback_url("file:///C:/x"));
+        assert!(!is_loopback_url(""));
+    }
 
     #[test]
     fn origin_whitelist() {

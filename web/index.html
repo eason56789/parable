@@ -10129,12 +10129,23 @@ function closeChatMenu() {
   document.querySelectorAll('.rc.menu').forEach(e => e.classList.remove('menu'));
 }
 
-/* 全局屏蔽原生右键菜单：桌面壳里弹出系统浏览器的右键（Edge 风格、带
-   域名/检查等项）非常割裂。应用自己的右键面（会话行 openChatMenu、
-   工作区文件 r2CtxShow、侧栏最大化 #spbtn）都在 target/bubble 阶段各自
-   处理并展示页内菜单，capture 阶段的 preventDefault 不影响它们执行；
-   其余区域右键一律无操作。文本粘贴走 Ctrl+V / Ctrl+C，不受影响。 */
-document.addEventListener('contextmenu', e => { e.preventDefault(); }, true);
+/* 原生右键菜单：之前全局 capture 阶段一律 preventDefault，导致输入框里
+   无法右键「粘贴」、选中文字后无法右键「复制」——这是桌面壳里最常用的两个
+   操作，屏蔽收益远小于代价。现在按上下文精准放行：
+   - 输入框 / 文本域 / contenteditable 内：放行原生菜单（粘贴、拼写检查）；
+   - 已有非空选区（聊天正文、代码块、工具输出）：放行原生菜单（复制）；
+   - 其余空白/背景区域：仍然屏蔽，避免弹出系统浏览器的「检查/另存为」等
+     割裂菜单。应用自己的右键面（会话行 openChatMenu、工作区文件 r2CtxShow、
+    #spbtn）各自 preventDefault + 展示页内菜单，不受影响。 */
+document.addEventListener('contextmenu', e => {
+  const t = e.target;
+  const editable = t && t.closest &&
+    t.closest('input, textarea, [contenteditable=""], [contenteditable="true"], [contenteditable="plaintext-only"]');
+  const sel = window.getSelection && window.getSelection();
+  const hasSel = !!(sel && !sel.isCollapsed && String(sel).trim());
+  if (editable || hasSel) return; // 放行原生菜单：粘贴 / 复制
+  e.preventDefault();
+}, true);
 
 /** 文件回退：列出该会话的检查点，一键恢复该轮改动前的文件状态。 */
 async function openRewind(c) {
@@ -11656,7 +11667,10 @@ function panel() {
           const url = location.origin + '/?token=' + encodeURIComponent(TOKEN);
           api('/service/open', { method: 'POST', body: { url } })
             .then(() => toast(t('srv_opened')))
-            .catch(() => { try { window.open(url, '_blank', 'noopener'); } catch (e) { copyText(url); } });
+            // 失败必须可见：window.open 在 Tauri（无 new-window handler）里
+            // 会被 SetHandled(true) 静默吞掉——曾经的失败路径就是这里，
+            // 用户看到的「点了没反应」。改为复制链接 + 提示。
+            .catch(() => { copyText(url); toast(t('link_copied')); });
         };
         ct.querySelector('[data-srvstop]').onclick = async () => {
           if (!(await confirmBox(t('srv_stopq'), { danger: true }))) return;
