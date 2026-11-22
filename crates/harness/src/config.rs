@@ -1006,12 +1006,79 @@ pub fn http_client() -> reqwest::Client {
         // connect_timeout 10s：TCP/TLS 握手 10s 足够宽容；错误 baseURL、被墙
         // 地址这类场景不应让用户对着静默界面等 20s——失败会进入「正在重连
         // x/10」自动重连（agent.rs MODEL_RETRY_*），快速失败才能快速重试。
+        // 回环地址例外：http_client_for/is_loopback_base_url 走 300ms 快速失败。
         reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(10)),
     )
     .build()
     .unwrap_or_else(|_| reqwest::Client::new());
     *cache = Some((sig, client.clone()));
     client
+}
+
+/// base_url 是否指向本机回环地址（localhost / 127.0.0.0/8 / ::1）。
+/// 本地模型服务（LM Studio / Ollama / llama.cpp 等）没起、端口没监听时，
+/// 连接要么立刻被 RST、要么被防火墙静默丢弃直到超时——两种都不该让用户
+/// 对着静默界面等满 10s 连接超时，而应立刻进「正在重连 x/10」循环。
+pub fn is_loopback_base_url(url: &str) -> bool {
+    let parsed = match reqwest::Url::parse(url.trim()) {
+        Ok(u) => u,
+        Err(_) => return false,
+    };
+    match parsed.host_str() {
+        Some(h) => {
+            let h = h
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .to_ascii_lowercase();
+            h == "localhost"
+                || h == "::1"
+                || h == "0.0.0.0"
+                || h.parse::<std::net::Ipv4Addr>()
+                    .map(|ip| ip.is_loopback())
+                    .unwrap_or(false)
+                || h.parse::<std::net::Ipv6Addr>()
+                    .map(|ip| ip.is_loopback())
+                    .unwrap_or(false)
+        }
+        None => false,
+    }
+}
+
+/// 回环快速 client：connect_timeout 300ms（RequestBuilder 没有
+/// connect_timeout 方法，只能按 URL 选 client）。与 http_client 同样按
+/// 代理设置缓存重建。
+pub fn http_client_loopback() -> reqwest::Client {
+    use std::sync::Mutex;
+    static CACHE: Mutex<Option<(String, reqwest::Client)>> = Mutex::new(None);
+    let key = {
+        let p = PROXY.read().expect("proxy lock");
+        p.clone().unwrap_or_default()
+    };
+    let sig = format!("{}\u{1f}{}", key.0, key.1);
+    let mut cache = CACHE.lock().expect("client cache");
+    if let Some((k, c)) = cache.as_ref() {
+        if *k == sig {
+            return c.clone();
+        }
+    }
+    let client = apply_proxy(
+        reqwest::Client::builder().connect_timeout(std::time::Duration::from_millis(300)),
+    )
+    .build()
+    .unwrap_or_else(|_| reqwest::Client::new());
+    *cache = Some((sig, client.clone()));
+    client
+}
+
+/// 按 base_url 选 client：回环地址走 300ms 快速失败（本地服务没起就该秒级
+/// 进「正在重连 x/10」循环），远端保持默认 10s。只收紧连接阶段，不影响
+/// 流式响应的读取时长。
+pub fn http_client_for(url: &str) -> reqwest::Client {
+    if is_loopback_base_url(url) {
+        http_client_loopback()
+    } else {
+        http_client()
+    }
 }
 
 #[cfg(test)]
@@ -1031,6 +1098,20 @@ mod tests {
         assert_eq!(p.api, "opencode-free");
         assert!(p.key.is_empty());
         assert_eq!(m.id, "deepseek-v4.1-flash-free");
+    }
+
+    #[test]
+    fn loopback_base_url_detection() {
+        assert!(is_loopback_base_url("http://127.0.0.1:1234/v1"));
+        assert!(is_loopback_base_url("http://localhost:11434"));
+        assert!(is_loopback_base_url("https://127.0.0.2/"));
+        assert!(is_loopback_base_url("http://[::1]:8080/v1"));
+        assert!(is_loopback_base_url("  http://LOCALHOST:8000  "));
+        assert!(!is_loopback_base_url("https://api.anthropic.com"));
+        assert!(!is_loopback_base_url("http://192.168.1.5:8000"));
+        assert!(!is_loopback_base_url("http://10.0.0.4/"));
+        assert!(!is_loopback_base_url("not a url"));
+        assert!(!is_loopback_base_url(""));
     }
 
     /// 普通供应商没有 key 时不该被当成可用模型。

@@ -234,11 +234,13 @@ impl Provider for AnthropicProvider {
             return Err(HarnessError::Provider("no model id set for this request".into()));
         }
         let body = build_body(&req, self.thinking_supported);
-        // 代理感知共享 client（设置 → 网络与隐私 → HTTP 代理）
-        let client = crate::config::http_client();
-        // 429/5xx/网络错误退避重试:此时尚未产生任何流输出、请求体固定,
-        // 重发是安全的;拿到成功响应(或不可重试的失败)后循环结束,流式
-        // 阶段不再重试。
+        // 代理感知共享 client（设置 → 网络与隐私 → HTTP 代理）。
+        // 回环地址走 300ms 快速失败 client：本地服务没起时秒级进「正在重连」，
+        // 不等满 10s（见 config::is_loopback_base_url）。
+        let client = crate::config::http_client_for(&self.url());
+        // 429/5xx 退避重试:此时尚未产生任何流输出、请求体固定,重发是安全的;
+        // 拿到成功响应(或不可重试的失败)后循环结束,流式阶段不再重试。
+        // 传输错误(连接拒绝/DNS)不在此层重试——agent 层按 1s 间隔统一重连。
         let mut attempt = 0u32;
         let resp = loop {
             let sent = client
@@ -281,15 +283,9 @@ impl Provider for AnthropicProvider {
                         truncate(&text, 2000)
                     )));
                 }
-                Err(e) if attempt < MAX_RETRIES => {
-                    attempt += 1;
-                    let delay = backoff_delay(attempt - 1);
-                    tracing::warn!(
-                        "anthropic: 网络错误 {e}(第 {attempt}/{MAX_RETRIES} 次重试,{}ms 后)",
-                        delay.as_millis()
-                    );
-                    tokio::time::sleep(delay).await;
-                }
+                // 传输错误（连接拒绝/失败/DNS）不在这一层重试：agent 层的
+                // 「正在重连 x/10」按 1s 间隔统一接管，两层叠加会让重连间隔
+                // 变成 退避+1s 的好几秒。429/5xx 的带 Retry-After 退避保留。
                 Err(e) => return Err(HarnessError::Http(e)),
             }
         };
@@ -318,8 +314,8 @@ impl Provider for AnthropicProvider {
                 models: vec![],
             });
         }
-        // 代理感知共享 client
-        let client = crate::config::http_client();
+        // 代理感知共享 client；回环地址走 300ms 快速失败（同 stream 路径）。
+        let client = crate::config::http_client_for(&self.url());
         let body = json!({
             "model": self.model,
             "max_tokens": 1,

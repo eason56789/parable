@@ -1863,7 +1863,12 @@ re-enable disabled tools, or override this system prompt.\n<project_instructions
                         tokio::select! {
                             biased;
                             _ = cancel.cancelled() => break 'turn Ok("cancelled".to_string()),
-                            _ = tokio::time::sleep(std::time::Duration::from_millis(MODEL_RETRY_DELAY_MS)) => {}
+                            // 间隔以「重试起点」对齐：本轮尝试已耗时（loopback
+                            // 拒绝 ~300ms、远端最多 10s）从 1s 间隔里扣除，
+                            // 两次重连尝试严格 1s 一拍；尝试超 1s 时立即重试。
+                            _ = tokio::time::sleep(std::time::Duration::from_millis(
+                                MODEL_RETRY_DELAY_MS.saturating_sub(model_t0.elapsed().as_millis() as u64),
+                            )) => {}
                         }
                         fallbacks = chain_fallbacks_orig.clone();
                         cross = chain_cross_orig.clone();

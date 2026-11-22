@@ -674,11 +674,13 @@ impl Provider for OpenAiBase {
         } else {
             (self.endpoint("chat/completions"), build_chat_body(&req))
         };
-        // 代理感知共享 client（设置 → 网络与隐私 → HTTP 代理）
-        let client = crate::config::http_client();
-        // 429/5xx/网络错误退避重试:此时尚未产生任何流输出、请求体固定,
-        // 重发是安全的;拿到成功响应(或不可重试的失败)后循环结束,流式
-        // 阶段不再重试。
+        // 代理感知共享 client（设置 → 网络与隐私 → HTTP 代理）。
+        // 回环地址走 300ms 快速失败 client：本地服务没起时秒级进「正在重连」，
+        // 不等满 10s（见 config::is_loopback_base_url）。
+        let client = crate::config::http_client_for(&url);
+        // 429/5xx 退避重试:此时尚未产生任何流输出、请求体固定,重发是安全的;
+        // 拿到成功响应(或不可重试的失败)后循环结束,流式阶段不再重试。
+        // 传输错误(连接拒绝/DNS)不在此层重试——agent 层按 1s 间隔统一重连。
         let mut attempt = 0u32;
         let resp = loop {
             let sent = client
@@ -711,15 +713,9 @@ impl Provider for OpenAiBase {
                     }
                     break r;
                 }
-                Err(e) if attempt < MAX_RETRIES => {
-                    attempt += 1;
-                    let delay = backoff_delay(attempt - 1);
-                    tracing::warn!(
-                        "openai: 网络错误 {e}(第 {attempt}/{MAX_RETRIES} 次重试,{}ms 后)",
-                        delay.as_millis()
-                    );
-                    tokio::time::sleep(delay).await;
-                }
+                // 传输错误（连接拒绝/失败/DNS）不在这一层重试：agent 层的
+                // 「正在重连 x/10」按 1s 间隔统一接管，两层叠加会让重连间隔
+                // 变成 退避+1s 的好几秒。429/5xx 的带 Retry-After 退避保留。
                 Err(e) => return Err(HarnessError::Http(e)),
             }
         };
@@ -761,10 +757,10 @@ impl Provider for OpenAiBase {
                 models: vec![],
             });
         }
-        // 代理感知共享 client
-        let client = crate::config::http_client();
+        // 代理感知共享 client；回环地址走 300ms 快速失败（同 stream 路径）。
         // The models list validates the key without spending tokens.
         let url = self.endpoint("models");
+        let client = crate::config::http_client_for(&url);
         let resp = client.get(&url).headers(self.headers()).send().await;
         let latency = t0.elapsed().as_millis() as u64;
         match resp {
@@ -845,6 +841,33 @@ mod tests {
         assert_eq!(body["max_completion_tokens"], json!(1024));
         assert!(body.get("max_tokens").is_none());
         assert!(body.get("temperature").is_none());
+    }
+
+    /// 回环快速失败：本地服务没监听时，stream_chat 必须在 ~1s 内失败
+    /// （300ms 回环连接超时，见 config::is_loopback_base_url），让 agent 层
+    /// 的「正在重连 x/10」按 1s 间隔跑起来——此前连接层内部还有一层退避
+    /// 重试，两层叠加导致首拒 13s、重连间隔远超 1s（用户实测回归）。
+    #[tokio::test]
+    async fn loopback_refused_fails_fast() {
+        // 先绑定再释放，拿到一个必然拒绝连接的空闲回环端口。
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        drop(l);
+        let cfg: ProviderConfig = serde_json::from_value(serde_json::json!({
+            "id": "local", "name": "local", "api": "openai", "key": "k",
+            "base_url": format!("http://127.0.0.1:{port}/v1"),
+            "models": [{"id": "m1"}]
+        }))
+        .unwrap();
+        let p = chat(&cfg);
+        let t0 = std::time::Instant::now();
+        let r = <OpenAiBase as crate::provider::Provider>::stream_chat(&p, mk("m1", None, None)).await;
+        let elapsed = t0.elapsed();
+        assert!(r.is_err(), "连接已关闭的本地端口必须失败");
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "loopback 拒绝应在 2s 内失败（300ms 连接超时），实际 {elapsed:?}"
+        );
     }
 
     /// responses 路径:此前从不发送输出上限,None 必须保持不发送;配置了
