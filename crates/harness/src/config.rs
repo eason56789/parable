@@ -337,9 +337,6 @@ pub struct Config {
     pub mcp_servers: Vec<crate::mcp::McpServerConfig>,
 
     // ---- 模型路由 ------------------------------------------------------
-    /// Auto 模型路由：开启后按能力在主模型与备用链之间匹配选模型（默认关）。
-    #[serde(default)]
-    pub auto_model: bool,
     /// 跨 provider 备用链：`"providerId/modelId"`，最多 5 条；主模型在出流前
     /// 发生超时 / 连接失败 / 429 / 5xx 时，按能力匹配取用一次。
     #[serde(default)]
@@ -566,7 +563,6 @@ impl Default for Config {
             session_retention_days: 0,
             hooks: Vec::new(),
             mcp_servers: Vec::new(),
-            auto_model: false,
             fallback_chain: Vec::new(),
             extra_dirs: Vec::new(),
             profiles: Vec::new(),

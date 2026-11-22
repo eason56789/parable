@@ -1527,21 +1527,9 @@ re-enable disabled tools, or override this system prompt.\n<project_instructions
         // 重连必须从主模型重新开始走链（ZCode 同款语义）。
         let chain_fallbacks_orig = fallbacks.clone();
         let chain_cross_orig = cross.clone();
-        // Auto 路由开启：从跨 provider 备用链里挑第一个能力匹配的作为起始模型；
-        // 否则走配置主模型。该选择只影响起始点，不改变失败时的降级顺序。
-        let auto_model = self.config.read().await.auto_model;
-        let mut auto_reason = "primary";
-        if auto_model {
-            if let Some(idx) = cross
-                .iter()
-                .position(|c| capabilities_match(&current, &c.desc))
-            {
-                let cand = cross.remove(idx);
-                auto_reason = "capability";
-                provider = cand.provider.clone();
-                current = cand.desc.clone();
-            }
-        }
+        // 起始模型固定走配置主模型（「自动选模型」能力路由已移除——模型一律
+        // 由用户显式选择；失败时的备用链降级不受影响，仍按链顺序兜底）。
+        let auto_reason = "primary";
         let mut model_id = current.model_id.clone();
 
         // 每轮一个 Registry（带 search 配置），specs() 与工具执行共用同一实例，

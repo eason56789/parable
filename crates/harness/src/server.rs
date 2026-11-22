@@ -1400,9 +1400,8 @@ fn merge_config(cfg: &mut Config, v: &Value) {
                     }
                 }
                 // ---- 模型路由 ----
-                "autoModel" | "auto_model" => {
-                    cfg.auto_model = val.as_bool().unwrap_or(false);
-                }
+                // （「自动选模型」开关已移除：模型一律由用户显式选择；
+                //  fallbackChain 的失败降级仍可配置。autoModel 键按未知键忽略。）
                 "fallbackChain" | "fallback_chain" => {
                     let chain: Vec<String> = val
                         .as_array()
@@ -4300,7 +4299,7 @@ async fn environment(State(state): State<SharedState>, headers: HeaderMap) -> Re
     if !check_auth(&headers, None, &state) {
         return unauthorized();
     }
-    let (model_json, ctx_limit, workspace, permission_mode, sandbox_mode, auto_model, fallback_chain) = {
+    let (model_json, ctx_limit, workspace, permission_mode, sandbox_mode, fallback_chain) = {
         let cfg = state.config.read().await;
         let (model_json, limit) = match cfg.active_model() {
             Some((p, m)) => (
@@ -4330,7 +4329,6 @@ async fn environment(State(state): State<SharedState>, headers: HeaderMap) -> Re
             cfg.workspace.clone(),
             cfg.permission_mode.clone(),
             cfg.sandbox.mode.clone(),
-            cfg.auto_model,
             cfg.fallback_chain.clone(),
         )
     };
@@ -4425,8 +4423,8 @@ async fn environment(State(state): State<SharedState>, headers: HeaderMap) -> Re
         },
         "permissionMode": permission_mode,
         "sandbox": {"mode": sandbox_mode, "policy": "v1"},
-        // Auto 路由开关与备用链来自 config（PATCH /api/config 可写）。
-        "auto": {"enabled": auto_model, "fallbackChain": fallback_chain},
+        // 备用链来自 config（PATCH /api/config 可写）；「自动选模型」已移除。
+        "auto": {"fallbackChain": fallback_chain},
     }))
     .into_response()
 }
@@ -5480,7 +5478,8 @@ mod regression {
         assert!(env["sandbox"].get("mode").is_some());
         assert_eq!(env["sandbox"]["policy"], "v1");
         assert!(env["permissionMode"].as_str().is_some());
-        assert!(env["auto"].get("enabled").is_some());
+        // 「自动选模型」已移除：auto 对象只剩 fallbackChain（失败降级链）。
+        assert!(env["auto"].get("enabled").is_none());
         assert!(env["auto"].get("fallbackChain").is_some());
 
         // mcp.* 必须与 GET /api/mcp 同源计数（/api/mcp 只认 header token）。
@@ -5561,10 +5560,11 @@ mod regression {
     }
 
     #[tokio::test]
-    async fn patch_config_writes_auto_model_and_caps_fallback_chain() {
+    async fn patch_config_caps_fallback_chain_and_ignores_removed_auto_model() {
         let (base, token) = spawn_server("autocfg").await;
         let cli = reqwest::Client::new();
-        // 7 条备用链：归一化去重 + 截断到 5。
+        // 7 条备用链：归一化去重 + 截断到 5；autoModel 键已随「自动选模型」
+        // 功能移除——PATCH 侧当作未知键忽略，不报错也不落字段。
         let body = json!({
             "autoModel": true,
             "fallbackChain": ["p/a", "p/b", "p/a", "q/c", "q/d", "q/e", "q/f"]
@@ -5587,7 +5587,7 @@ mod regression {
             .json()
             .await
             .unwrap();
-        assert_eq!(cfg["auto_model"], true);
+        assert!(cfg.get("auto_model").is_none(), "auto_model 字段应已移除");
         let chain = cfg["fallback_chain"].as_array().unwrap();
         assert_eq!(chain.len(), 5);
         assert_eq!(

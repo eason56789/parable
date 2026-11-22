@@ -1846,9 +1846,6 @@ body.r2-ws-drag #r2-ws{transition:none}
 /* full 权限模式只用于危险动作标签，沿用 danger token。 */
 .mi.danger{color:var(--danger-text)}
 .mi.danger small{color:color-mix(in srgb,var(--danger-text) 70%,var(--fg2))}
-.pkauto{margin-top:6px;border-top:.5px solid var(--line);padding-top:10px;cursor:default}
-.pkauto:hover{background:none}
-.pkauto div b{font:var(--fs-body) var(--sans);color:var(--fg)}
 
 /* —— 文件树右键菜单（自绘，不用系统菜单） —— */
 #r2-ctx-menu{position:fixed;z-index:var(--z-pop);min-width:208px;padding:6px;border-radius:11px;
@@ -2486,7 +2483,6 @@ const L = {
     att_uploading:'上传中…', att_fail:'附件上传失败：', att_reveal:'点击打开文件所在位置',
     sysprev_empty:'（空 — 下一轮会话将没有 system 提示词）', sysprev_fail:'预览失败：',
     plan_mode:'计划模式', plan_mode_h:'先制定计划，经确认后再执行', plan_badge:'计划',
-    auto_model:'自动选模型', auto_model_h:'按任务能力自动匹配模型',
     r2_ws:'工作区', r2_host:'主机', r2_wsdir:'工作区', r2_ctx:'上下文', r2_mcp:'连接器', r2_mcp0:'0 个服务器', r2_model:'模型',
     r2_nofile:'从左侧选择文件查看', r2_loading:'加载中…',
     r2_env_local:'本机', r2_env_idle:'未开始会话', r2_env_nomodel:'未配置模型', r2_env_off:'服务未连接',
@@ -2765,7 +2761,6 @@ const L = {
     att_uploading:'Uploading…', att_fail:'Attachment upload failed: ', att_reveal:'Open file location',
     sysprev_empty:'(empty — the next turn will have no system prompt)', sysprev_fail:'Preview failed: ',
     plan_mode:'Plan mode', plan_mode_h:'Draft a plan first and wait for approval before running', plan_badge:'Plan',
-    auto_model:'Auto model', auto_model_h:'Pick a model automatically by task capability',
     r2_ws:'Workspace', r2_host:'Host', r2_wsdir:'Workspace', r2_ctx:'Context', r2_mcp:'Connectors', r2_mcp0:'0 servers', r2_model:'Model',
     r2_nofile:'Select a file from the left to preview', r2_loading:'Loading…',
     r2_env_local:'This machine', r2_env_idle:'No active session', r2_env_nomodel:'No model configured', r2_env_off:'Service offline',
@@ -2836,7 +2831,7 @@ const DEF = {
   // settings.fontSize 对应：正文与界面分开，代码单独一档。
   uiSize:13, lineHeight:1.5, codeSize:13, density:'cozy', inkOn:true,
   speed:22, cd:650, blur:8, sf:1.5, anim:1, stream:true, think:true, toolThink:false, side:true,
-  prefs:'', systemPrompt:'', systemPromptRaw:'', model:'', perm:'ask', lvl:2, auto:false,
+  prefs:'', systemPrompt:'', systemPromptRaw:'', model:'', perm:'ask', lvl:2,
   searchKey:'', anysearchKey:'', spref:'auto', plan:false, mem:true, memAuto:true, followupMode:'queue',
   // 精装修新增：Agent 行为 / 通知 / 会话管理 / 代码块 / 网络与隐私 / 输入
   compactionEnabled:true, compactionPct:85, maxSteps:100, askAutoResolve:false, keepAwake:false, ctxWarnPct:80,
@@ -2981,7 +2976,7 @@ function apply(pushToServer) {
         width: S.w, accent: S.accent, speed: S.speed, cd: S.cd, blur: S.blur,
         sf: S.sf, anim: S.anim, stream: S.stream, think: S.think, side: S.side,
         uiSize: S.uiSize, lineHeight: S.lineHeight, codeSize: S.codeSize, density: S.density,
-        prefs: S.prefs, systemPrompt: S.systemPrompt, systemPromptRaw: S.systemPromptRaw, model: S.model, permissionMode: S.perm, thinkingLevel: S.lvl, autoModel: S.auto, searchKey: S.searchKey, anysearchKey: S.anysearchKey, searchPref: S.spref, followupMode: S.followupMode,
+        prefs: S.prefs, systemPrompt: S.systemPrompt, systemPromptRaw: S.systemPromptRaw, model: S.model, permissionMode: S.perm, thinkingLevel: S.lvl, searchKey: S.searchKey, anysearchKey: S.anysearchKey, searchPref: S.spref, followupMode: S.followupMode,
         compactionEnabled: S.compactionEnabled, compactionPct: S.compactionPct, maxSteps: S.maxSteps,
         askAutoResolve: S.askAutoResolve, keepAwake: S.keepAwake, ctxWarnPct: S.ctxWarnPct,
         notify: S.notify, notifySound: S.notifySound, autoArchiveDays: S.autoArchiveDays,
@@ -10792,8 +10787,8 @@ function modelLabel() {
 function refreshModelChip() {
   const el = $('#ml');
   if (!el) return;
-  el.textContent = (S.auto ? 'Auto · ' : '') + modelLabel();
-  el.classList.toggle('todo', !modelOk() && !S.auto);
+  el.textContent = modelLabel();
+  el.classList.toggle('todo', !modelOk());
 }
 function cycleModel() {
   if (!MODELS.length) { toast(t('noresult')); return; }
@@ -10861,8 +10856,6 @@ function pkHtml() {
       '<div class="pklv"><div class="pklt"><span>' + esc(t('lvlT')) + '</span><b data-pklvtx>' + esc(t('l' + S.lvl)) + '</b></div>' +
         '<input type="range" class="pkrange" min="0" max="3" step="1" value="' + S.lvl + '" data-pklv>' +
       '</div>' +
-      '<div class="mi pkauto" data-auto="1"><div><b>' + esc(t('auto_model')) + '</b><small>' + esc(t('auto_model_h')) + '</small></div>' +
-        '<button class="r2-sw" role="switch" aria-checked="' + (S.auto ? 'true' : 'false') + '" aria-label="' + esc(t('auto_model')) + '"></button></div>' +
     '</div></div>';
 }
 
@@ -10892,14 +10885,6 @@ function pkRenderInto(root) {
     }
     const p = e.target.closest('[data-pkp]');
     if (p) { PKP.sel = p.dataset.pkp; pkRenderInto(root); return; }
-    if (e.target.closest('[data-auto]')) {
-      S.auto = !S.auto;
-      apply();
-      refreshModelChip();
-      spChromeAll();
-      pkRenderInto(root);
-      return;
-    }
     const b = e.target.closest('[data-m]');
     if (!b) return;
     S.model = b.dataset.m;
@@ -16743,7 +16728,6 @@ async function boot() {
       model: c.model ?? local.model ?? S.model,
       perm: c.permission_mode ?? S.perm,
       lvl: c.thinking_level ?? S.lvl,
-      auto: c.auto_model ?? S.auto,
       uiSize: c.ui_size ?? S.uiSize,
       lineHeight: c.line_height ?? S.lineHeight,
       codeSize: c.code_size ?? S.codeSize,
