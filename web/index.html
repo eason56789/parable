@@ -758,6 +758,42 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 .diff{display:flex;align-items:center;gap:4px;font-family:var(--mono);font-size:13px;line-height:1.2;margin-left:4px;white-space:nowrap;flex:none}
 .diff .add{color:var(--diff-add)}
 .diff .del{color:var(--diff-del)}
+/* ---- 工具卡动效（ZCode 同款） ------------------------------------
+   ① bash/shell 卡：命令打字输出时一道亮光扫过文字（.sweep 用
+   background-clip:text 让光带真正穿过字形，与 .shim 骨架同语言）；
+   输出完成后「执行中」状态（三个错峰脉冲点）显示在命令后面。
+   ② write/edit 卡：diff 的 +N/-M 数字滚动（odometer）——旧值向上
+   模糊平移退出、新值自下而入，数值逐级增加。 */
+.ecmd{display:flex;align-items:center;gap:7px;padding:10px 14px 6px;font:calc(var(--cfs,13.5px) - 1px)/1.6 var(--mono);color:var(--code-fg);white-space:nowrap;overflow:hidden}
+.ec.collapsed .ecmd{padding-top:0;padding-bottom:0}
+.ecmd .ecmd-ps{color:var(--fg2);flex:none;user-select:none}
+.ecmd .ecmd-tx{overflow:hidden;text-overflow:ellipsis;min-width:0;flex:0 1 auto}
+.ecmd .ecmd-tx.sweep{
+  background:linear-gradient(100deg,
+    var(--code-fg) 0%,var(--code-fg) 36%,
+    color-mix(in srgb,var(--accent) 52%,#fff) 47%,
+    color-mix(in srgb,var(--accent) 88%,#fff) 50%,
+    color-mix(in srgb,var(--accent) 52%,#fff) 53%,
+    var(--code-fg) 64%,var(--code-fg) 100%);
+  background-size:260% 100%;background-repeat:no-repeat;
+  -webkit-background-clip:text;background-clip:text;
+  -webkit-text-fill-color:transparent;color:transparent;
+  animation:ecmd-lsw calc(1.05s * var(--animd)) linear infinite}
+@keyframes ecmd-lsw{from{background-position:130% 0}to{background-position:-130% 0}}
+.ecmd .ecmd-st{display:inline-flex;align-items:center;gap:5px;flex:none;color:var(--fg2);font:11.5px var(--sans);padding-left:2px}
+.ecmd .ecmd-st i{width:4px;height:4px;border-radius:50%;background:var(--accent);opacity:.85;flex:none;
+  animation:ecmd-dot calc(1.2s * var(--animd)) ease-in-out infinite}
+.ecmd .ecmd-st i:nth-child(2){animation-delay:calc(.18s * var(--animd))}
+.ecmd .ecmd-st i:nth-child(3){animation-delay:calc(.36s * var(--animd))}
+@keyframes ecmd-dot{0%,100%{opacity:.22;transform:translateY(0)}45%{opacity:1;transform:translateY(-2px)}}
+/* odometer 数字：::after 用 attr(data-v) 隐形撑宽，.rv 绝对定位做上下滚动 */
+.rolln{display:inline-block;position:relative;overflow:hidden;height:1.15em;min-width:1ch;vertical-align:baseline}
+.rolln::after{content:attr(data-v);visibility:hidden}
+.rolln .rv{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+  transition:transform calc(.19s * var(--animd)) var(--qeio),opacity calc(.19s * var(--animd)) var(--qeio),filter calc(.19s * var(--animd)) var(--qeio)}
+.rolln .rv.cur{transform:translateY(0);opacity:1;filter:none}
+.rolln .rv.out{transform:translateY(-.85em);opacity:0;filter:blur(3px)}
+.rolln .rv.in{transform:translateY(.85em);opacity:0;filter:blur(3px)}
 .ech{margin-left:auto;color:var(--fg2);display:grid;place-items:center;transition:color calc(.25s * var(--animd));padding-right:2px}
 .eh:hover .ech{color:var(--fg)}
 .ech svg{width:16px;height:16px;transition:transform calc(.4s * var(--animd)) cubic-bezier(.32,.72,0,1)}
@@ -2350,7 +2386,7 @@ const L = {
     ug_trend_stack:'堆叠', ug_trend_line:'折线',
     ug_fav_model:'常用模型',
     ug_open_session:'打开会话',
-    ug_cost_est:'估算成本',
+    ug_cost_est:'估算成本', exec_run:'执行中',
     ug_loading:'正在统计中', ug_loading_h:'正在读取本地会话日志，可能需要一点时间。',
     ug_updated:'最近刷新：{t}', ug_less:'较少', ug_more:'较多', ug_other:'其他模型',
     ug_cache_hit:'缓存命中率',
@@ -2624,7 +2660,7 @@ const L = {
     ug_trend_stack:'Stacked', ug_trend_line:'Lines',
     ug_fav_model:'Favorite model',
     ug_open_session:'Open chat',
-    ug_cost_est:'Estimated cost',
+    ug_cost_est:'Estimated cost', exec_run:'running',
     ug_loading:'Crunching numbers', ug_loading_h:'Reading the local usage journal — this can take a moment.',
     ug_updated:'Last refreshed: {t}', ug_less:'Less', ug_more:'More', ug_other:'Other models',
     ug_cache_hit:'Cache hit rate',
@@ -5703,6 +5739,7 @@ async function putInBackground(card) {
     toast(t('bg_notrunning'));
     return;
   }
+  stopCmdAnim(card); // 转后台后前台卡片不再需要命令打字动画
   let cmd = '';
   try {
     const args = JSON.parse(card.dataset.args || '{}');
@@ -5729,10 +5766,17 @@ async function putInBackground(card) {
  * 与 ZCode 同款语义——「详情仍从原始 input 读取命令」。结果到达时
  * fillToolCard 会清空重建，不会重复。
  */
-function showArgsBody(e) {
+function showArgsBody(e, mode) {
   const toolName = e.dataset.tool || '';
   const raw = e.dataset.args;
-  if (!raw || toolName.startsWith('doc_') || e.querySelector('.rawargs')) return;
+  if (!raw || toolName.startsWith('doc_') || e.querySelector('.rawargs, .ecmd')) return;
+  // bash/shell：命令本体行（ZCode 同款「详情读原始 input」），不走 JSON 噪音。
+  // mode 决定动效档位：live=打字+走光 / ghost=切回重放 / static=落库重建。
+  if (toolName === 'bash' || toolName === 'shell') {
+    let cmd = '';
+    try { cmd = String((JSON.parse(raw) || {}).command || ''); } catch (err) {}
+    if (cmd.trim()) { buildCmdLine(e, cmd, mode || 'static'); return; }
+  }
   let pretty = raw;
   try { pretty = JSON.stringify(JSON.parse(raw), null, 2); } catch (err) {}
   // 超大入参（write_file 的全文）截断展示，避免运行期刷出几十 KB 噪音。
@@ -5800,8 +5844,145 @@ function capTextInto(el, full) {
   el.append(capAllBtn(() => { el.textContent = s; }));
 }
 
-function fillToolCard(e, display, ok, title) {
+/* ---------------- 工具卡动效（ZCode 同款） ----------------
+   命令行「走光」：打字输出期间一道亮光扫过命令文字；输出完成后
+   「执行中」状态（脉冲点）显示在命令后面。结果到达时 fillToolCard
+   会重写卡片主体，动效自然让位。 */
+const REDUCED = !!(window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches);
+
+/** 清掉卡片上可能还在跑的命令打字定时器（fillToolCard / 后台化前调用）。 */
+function stopCmdAnim(e) {
+  if (e && e._cmdTimer) { clearInterval(e._cmdTimer); e._cmdTimer = null; }
+}
+
+/** 命令行结束态：去掉走光，完整命令回填；withStatus 时在命令后面挂
+    「执行中」脉冲点（live 打完字 / ghost 重放仍在运行时）。 */
+function finishCmdLine(line, withStatus) {
+  line.classList.remove('sweep-t');
+  const tx = line.querySelector('.ecmd-tx');
+  if (tx) {
+    tx.classList.remove('sweep');
+    tx.textContent = line.dataset.cmd || tx.textContent;
+  }
+  if (withStatus && !line.querySelector('.ecmd-st')) {
+    const st = document.createElement('span');
+    st.className = 'ecmd-st';
+    st.append(document.createTextNode(t('exec_run')));
+    st.insertAdjacentHTML('beforeend', '<i></i><i></i><i></i>');
+    line.append(st);
+  }
+}
+
+/**
+ * bash/shell 卡的命令本体行（替代 rawargs 的 JSON 噪音）。
+ * mode: 'live'  = 刚收到 tool.call，打字输出 + 走光，打完挂执行态；
+ *       'ghost' = 会话切回时的影子重放，命令完整显示，仍在运行则走光+执行态；
+ *       'static'= 落库重建，纯静态（结果马上会由 fillToolCard 重写）。
+ */
+function buildCmdLine(e, cmd, mode) {
+  const body = e.querySelector('.dc-in');
+  if (!body || e.querySelector('.ecmd')) return;
+  const line = document.createElement('div');
+  line.className = 'ecmd';
+  line.dataset.cmd = cmd;
+  const ps = document.createElement('span');
+  ps.className = 'ecmd-ps';
+  ps.textContent = '$';
+  const tx = document.createElement('span');
+  tx.className = 'ecmd-tx';
+  tx.textContent = cmd;
+  tx.title = cmd;
+  line.append(ps, tx);
+  body.append(line);
+  const running = !!e.querySelector('.st-tx.run');
+  if (mode === 'live' && !REDUCED) {
+    // 打字输出 + 走光：~40 帧把命令打完（约 650ms 封顶），期间文字走光。
+    tx.classList.add('sweep');
+    tx.textContent = '';
+    let i = 0;
+    const total = cmd.length;
+    const step = Math.max(1, Math.ceil(total / 40));
+    const timer = setInterval(() => {
+      // 结果先到（快命令）：fillToolCard 已重建主体，及时收手。
+      if (!line.isConnected || !e._cmdTimer) { clearInterval(timer); return; }
+      i = Math.min(total, i + step);
+      tx.textContent = cmd.slice(0, i);
+      if (i >= total) {
+        clearInterval(timer);
+        e._cmdTimer = null;
+        finishCmdLine(line, true);
+      }
+    }, 16);
+    e._cmdTimer = timer;
+  } else if (mode === 'ghost' && running && !REDUCED) {
+    tx.classList.add('sweep');
+    finishCmdLine(line, true);
+  } else {
+    finishCmdLine(line, mode !== 'static' && running);
+  }
+}
+
+/**
+ * odometer 数字滚动：旧值向上模糊平移退出、新值自下而入，数值逐级增加。
+ * el 是 .rolln 容器（data-v 记当前值，::after 撑宽）；减动效环境直接落值。
+ */
+function rollNum(el, to) {
+  if (!el) return;
+  to = Math.max(0, Math.round(Number(to) || 0));
+  const from = Math.max(0, Math.round(Number(el.dataset.v || '0')) || 0);
+  const set = v => {
+    el.dataset.v = String(v);
+    el.textContent = '';
+    const s = document.createElement('span');
+    s.className = 'rv cur';
+    s.textContent = String(v);
+    el.append(s);
+  };
+  if (REDUCED || to === from) { set(to); return; }
+  el.dataset.v = String(to);
+  el.textContent = '';
+  const cur = document.createElement('span');
+  cur.className = 'rv cur';
+  cur.textContent = String(from);
+  el.append(cur);
+  const steps = Math.min(12, Math.max(1, Math.abs(to - from)));
+  let k = 0;
+  const timer = setInterval(() => {
+    if (!el.isConnected) { clearInterval(timer); return; }
+    k++;
+    const next = k >= steps ? to : Math.round(from + (to - from) * k / steps);
+    const out = el.querySelector('.rv.cur');
+    const inc = document.createElement('span');
+    inc.className = 'rv in';
+    inc.textContent = String(next);
+    el.append(inc);
+    void inc.offsetWidth; // 先以 .in 入场，再过渡到 .cur
+    inc.classList.remove('in');
+    inc.classList.add('cur');
+    if (out) {
+      out.classList.remove('cur');
+      out.classList.add('out');
+      setTimeout(() => out.remove(), 240);
+    }
+    if (k >= steps) clearInterval(timer);
+  }, 34);
+}
+
+/** write_file 在入参已知时预演 +N：内容行数从 0 滚上来；结果到达后
+    fillToolCard 用权威 added 数重滚，「数值增加」的观感保持一致。
+    edit_file 的增删行数只有结果才知道，只在 result 时滚。 */
+function previewDiffAdd(card, args) {
+  const diff = card.querySelector('.diff');
+  if (!diff || diff.children.length) return;
+  const n = typeof (args && args.content) === 'string' ? args.content.split('\n').length : 0;
+  if (n <= 0) return;
+  diff.innerHTML = '<span class="add">+<span class="rolln" data-v="0"></span></span>';
+  rollNum(diff.querySelector('.rolln'), n);
+}
+
+function fillToolCard(e, display, ok, title, animate) {
   if (!e) return;
+  stopCmdAnim(e); // 结果到达：命令打字动画还在跑的话立即收掉
   const stTx = e.querySelector('.st-tx');
   const diff = e.querySelector('.diff');
   const body = e.querySelector('.dc-in');
@@ -5879,7 +6060,27 @@ function fillToolCard(e, display, ok, title) {
     }
     body.append(df);
   } else if (display.kind === 'diff') {
-    diff.innerHTML = '<span class="add">+' + (Number(display.added) || 0) + '</span> <span class="del">-' + (Number(display.removed) || 0) + '</span>';
+    // +N/-M 数字滚动（ZCode 同款）：旧值向上模糊平移退出、新值自下而入。
+    // animate 仅在 live 事件与影子重放路径为真；落库重建直接落定值。
+    const addN = Number(display.added) || 0;
+    const delN = Number(display.removed) || 0;
+    diff.innerHTML = '<span class="add">+<span class="rolln" data-v="0"></span></span> <span class="del">-<span class="rolln" data-v="0"></span></span>';
+    const rollAdd = diff.querySelector('.add .rolln');
+    const rollDel = diff.querySelector('.del .rolln');
+    if (animate) {
+      rollNum(rollAdd, addN);
+      rollNum(rollDel, delN);
+    } else {
+      [rollAdd, rollDel].forEach((el, i) => {
+        const v = i === 0 ? addN : delN;
+        el.dataset.v = String(v);
+        el.textContent = '';
+        const s = document.createElement('span');
+        s.className = 'rv cur';
+        s.textContent = String(v);
+        el.append(s);
+      });
+    }
     const df = document.createElement('div');
     df.className = 'df';
     const paintDiff = ls => {
@@ -5905,12 +6106,25 @@ function fillToolCard(e, display, ok, title) {
     }
     body.append(df);
   } else if (display.kind === 'shell') {
-    const pre = document.createElement('div');
-    pre.className = 'df';
-    pre.style.whiteSpace = 'pre-wrap';
-    capTextInto(pre, '$ ' + display.command + '\n' + (display.stdout || '') +
-      (display.stderr ? '\n[stderr]\n' + display.stderr : ''));
-    body.append(pre);
+    // 命令行 + 输出分两块：与运行期的 .ecmd 动效行视觉连续（同一结构，
+    // 结果态去掉走光与执行点，输出流在下方）。
+    const line = document.createElement('div');
+    line.className = 'ecmd';
+    line.dataset.cmd = display.command || '';
+    line.innerHTML = '<span class="ecmd-ps">$</span><span class="ecmd-tx"></span>';
+    const tx = line.querySelector('.ecmd-tx');
+    tx.textContent = display.command || '';
+    tx.title = display.command || '';
+    body.append(line);
+    const outText = (display.stdout || '') +
+      (display.stderr ? '\n[stderr]\n' + display.stderr : '');
+    if (outText.trim()) {
+      const pre = document.createElement('div');
+      pre.className = 'df';
+      pre.style.whiteSpace = 'pre-wrap';
+      capTextInto(pre, outText);
+      body.append(pre);
+    }
   } else if (display.kind === 'ask') {
     const d = document.createElement('div');
     d.className = 'df askcard';
@@ -6548,13 +6762,14 @@ function replayEvent(ev) {
       // 摘要用模型意图/关键词概括，而不是裸工具名（ev.title 只是 name 的副本）。
       const card = toolCard(curA.querySelector('.ab'), ev.callId, ev.tool, toolDesc(ev.tool, ev.args || {}));
       card.dataset.args = JSON.stringify(ev.args || {});
-      showArgsBody(card);
+      showArgsBody(card, 'ghost');
+      previewDiffAdd(card, ev.args || {});
       toolEls[ev.callId] = card;
       break;
     }
     case 'tool.result': {
       const card = toolEls[ev.callId];
-      fillToolCard(card, ev.display, ev.ok, ev.title);
+      fillToolCard(card, ev.display, ev.ok, ev.title, true);
       break;
     }
     case 'tool.progress': {
@@ -6900,7 +7115,8 @@ function dispatch(ev) {
         const desc = ev.desc || toolDesc(ev.tool, ev.args);
         const card = toolCard(curA.querySelector('.ab'), ev.callId, ev.tool, desc);
         card.dataset.args = JSON.stringify(ev.args || {});
-        showArgsBody(card);
+        showArgsBody(card, 'live');
+        previewDiffAdd(card, ev.args || {});
         toolEls[ev.callId] = card;
         follow();
       }
@@ -6910,7 +7126,7 @@ function dispatch(ev) {
       {
         if (ev.display && ev.display.kind === 'ask') qsCloseFor(ev.callId);
         const card = toolEls[ev.callId];
-        fillToolCard(card, ev.display, ev.ok, ev.title);
+        fillToolCard(card, ev.display, ev.ok, ev.title, true);
         follow();
       }
       break;
