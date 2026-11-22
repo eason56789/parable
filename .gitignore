@@ -26,3 +26,6 @@
 /crates/app/gen/
 # parallel-agent scratch homes
 .parhome/
+
+# 打包产物（本地交付物，不进仓库）
+/dist/
