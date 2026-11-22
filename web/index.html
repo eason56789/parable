@@ -7557,7 +7557,10 @@ document.addEventListener('click', e => {
   // 本服务自己的地址（关于页「在浏览器中打开」用的是原生按钮，不是链接）
   // 也走统一入口：系统浏览器模式下正好就是想要的落点。
   // Shift+点击 = 只这一次强制走系统浏览器（不用去设置里改默认值）。
+  // data-sys 链接（关于页的 GitHub / Bilibili 项目主页）= 无条件系统浏览器：
+  // 「去那个网站办事」需要用户平时的登录态，与 linkTarget 设置无关。
   e.preventDefault();
+  if (e.target.closest('[data-sys]')) { openExternal(abs); return; }
   if (e.shiftKey) { openExternal(abs); return; }
   openLink(abs);
 }, true);
@@ -11605,9 +11608,12 @@ function panel() {
             '<div class="abt-row"><b>Parable</b><span class="abt-ver">v' + esc(APP_VER) + '</span></div>' +
             '<p class="abt-desc">' + esc(t('ab_tagline')) + '</p>' +
             '<div class="abt-btns">' +
-              '<a class="abt-btn" href="https://github.com/eason56789/parable" target="_blank" rel="noopener">' +
+              // data-sys：项目主页链接永远走系统浏览器（去这些站点「办事」
+              // 需要用户自己的登录态/扩展，不该被内置面板接走——外链统一
+              // 路由捕获后按此标记强制 openExternal，无视 linkTarget 设置）。
+              '<a class="abt-btn" data-sys href="https://github.com/eason56789/parable" target="_blank" rel="noopener">' +
                 ic('gh') + '<span>GitHub</span></a>' +
-              '<a class="abt-btn bili" href="https://space.bilibili.com/88981336" target="_blank" rel="noopener">' +
+              '<a class="abt-btn bili" data-sys href="https://space.bilibili.com/88981336" target="_blank" rel="noopener">' +
                 ic('bili') + '<span>Bilibili</span></a>' +
               '<button class="abt-btn" data-chkupd>' + ic('refresh') + '<span>' + t('ab_check') + '</span></button>' +
             '</div>' +
