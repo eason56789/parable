@@ -5895,6 +5895,12 @@ function buildCmdLine(e, cmd, mode) {
   line.append(ps, tx);
   body.append(line);
   const running = !!e.querySelector('.st-tx.run');
+  // ZCode 同款：命令卡在运行期自动展开，让打字走光与执行态可见；
+  // 结果落定后由 fillToolCard 收回一行（_autoExpanded 标记 auto 行为）。
+  if (mode === 'live' || mode === 'ghost') {
+    if (e.classList.contains('collapsed')) e._autoExpanded = true;
+    e.classList.remove('collapsed');
+  }
   if (mode === 'live' && !REDUCED) {
     // 打字输出 + 走光：~40 帧把命令打完（约 650ms 封顶），期间文字走光。
     tx.classList.add('sweep');
@@ -5951,6 +5957,10 @@ function rollNum(el, to) {
     if (!el.isConnected) { clearInterval(timer); return; }
     k++;
     const next = k >= steps ? to : Math.round(from + (to - from) * k / steps);
+    // 堆积防护：后台节流环境下 setTimeout 清除会延迟，最多保留一个正在
+    // 退场的旧值节点，更早的直接移除（正常前台环境每个 240ms 内自然淡出）。
+    const stale = el.querySelectorAll('.rv.out');
+    for (let i = 0; i < stale.length - 1; i++) stale[i].remove();
     const out = el.querySelector('.rv.cur');
     const inc = document.createElement('span');
     inc.className = 'rv in';
@@ -5962,6 +5972,7 @@ function rollNum(el, to) {
     if (out) {
       out.classList.remove('cur');
       out.classList.add('out');
+      out.setAttribute('aria-hidden', 'true'); // 退场残影不进读屏
       setTimeout(() => out.remove(), 240);
     }
     if (k >= steps) clearInterval(timer);
@@ -5998,6 +6009,12 @@ function fillToolCard(e, display, ok, title, animate) {
   const desc = e.dataset.desc || (title ? String(title).replace(/^(Fetched|Searched)\s+/, '') : '');
   if (desc) fi.textContent = cap(desc);
   const toolName = e.dataset.tool || '';
+  // 打字阶段自动展开过的命令卡：结果落定后收回一行（用户手动展开过则尊重
+  // 当前状态——手动收起过（含 collapsed）就不再展开，手动展开过就保持）。
+  if (e._autoExpanded && (toolName === 'bash' || toolName === 'shell')) {
+    e.classList.add('collapsed');
+    e._autoExpanded = false;
+  }
   stTx.classList.remove('run');
   if (ok === false) {
     stTx.textContent = runLabel('err', toolName);
