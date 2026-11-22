@@ -794,6 +794,18 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 .rolln .rv.cur{transform:translateY(0);opacity:1;filter:none}
 .rolln .rv.out{transform:translateY(-.85em);opacity:0;filter:blur(3px)}
 .rolln .rv.in{transform:translateY(.85em);opacity:0;filter:blur(3px)}
+/* 「正在重连」走光文字：亮带以 4s 周期扫过字形（ZCode animated-gradient-text
+   同款：strong 底色 + soft 亮带，background-size 300%，position 100%→0%→100%） */
+.retryln{display:flex;align-items:baseline;gap:8px;padding:3px 14px;font:12.5px var(--sans);color:var(--fg2);min-width:0}
+.retryln .agtext{flex:none;font-weight:500}
+.retryln .retry-err{font:11.5px var(--mono);opacity:.72;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.agtext{display:inline-block;transform:translateZ(0);will-change:background-position;backface-visibility:hidden;
+  background:linear-gradient(90deg,var(--ag-strong) 0%,var(--ag-strong) 34%,var(--ag-soft) 50%,var(--ag-strong) 66%,var(--ag-strong) 100%);
+  background-size:300% 100%;background-repeat:no-repeat;color:transparent;-webkit-text-fill-color:transparent;
+  -webkit-background-clip:text;background-clip:text;
+  animation:ag-flow 4s linear infinite}
+.agtext-subtle{--ag-strong:var(--fg2);--ag-soft:color-mix(in srgb,var(--fg2) 18%,transparent)}
+@keyframes ag-flow{0%{background-position:100% 0}50%{background-position:0 0}to{background-position:100% 0}}
 .ech{margin-left:auto;color:var(--fg2);display:grid;place-items:center;transition:color calc(.25s * var(--animd));padding-right:2px}
 .eh:hover .ech{color:var(--fg)}
 .ech svg{width:16px;height:16px;transition:transform calc(.4s * var(--animd)) cubic-bezier(.32,.72,0,1)}
@@ -2386,7 +2398,7 @@ const L = {
     ug_trend_stack:'堆叠', ug_trend_line:'折线',
     ug_fav_model:'常用模型',
     ug_open_session:'打开会话',
-    ug_cost_est:'估算成本', exec_run:'执行中',
+    ug_cost_est:'估算成本', exec_run:'执行中', retry_conn:'正在重连 {n}/{max}',
     ug_loading:'正在统计中', ug_loading_h:'正在读取本地会话日志，可能需要一点时间。',
     ug_updated:'最近刷新：{t}', ug_less:'较少', ug_more:'较多', ug_other:'其他模型',
     ug_cache_hit:'缓存命中率',
@@ -2660,7 +2672,7 @@ const L = {
     ug_trend_stack:'Stacked', ug_trend_line:'Lines',
     ug_fav_model:'Favorite model',
     ug_open_session:'Open chat',
-    ug_cost_est:'Estimated cost', exec_run:'running',
+    ug_cost_est:'Estimated cost', exec_run:'running', retry_conn:'Reconnecting {n}/{max}',
     ug_loading:'Crunching numbers', ug_loading_h:'Reading the local usage journal — this can take a moment.',
     ug_updated:'Last refreshed: {t}', ug_less:'Less', ug_more:'More', ug_other:'Other models',
     ug_cache_hit:'Cache hit rate',
@@ -5991,6 +6003,37 @@ function previewDiffAdd(card, args) {
   rollNum(diff.querySelector('.rolln'), n);
 }
 
+/* ---------------- 「正在重连 x/10」状态行（ZCode 同款） ----------------
+   后端 model.retry 事件驱动：走光文字（animated-gradient-text 同款实现：
+   亮带以 4s 周期扫过字形）+ 错误原文。同一轮的重试事件原地更新计数，
+   模型恢复（下一段正文/思考/工具事件）或 turn.end 时撤除。 */
+let curRetryEl = null;
+
+function showRetryLine(ev) {
+  if (!curA) return;
+  let line = curRetryEl && curRetryEl.isConnected ? curRetryEl : null;
+  if (!line) {
+    line = document.createElement('div');
+    line.className = 'retryln';
+    const glow = document.createElement('span');
+    glow.className = 'agtext agtext-subtle';
+    const err = document.createElement('span');
+    err.className = 'retry-err';
+    line.append(glow, err);
+    curA.querySelector('.ab').append(line);
+    curRetryEl = line;
+  }
+  line.querySelector('.agtext').textContent =
+    t('retry_conn').replace('{n}', String(ev.attempt ?? '?')).replace('{max}', String(ev.maxRetries ?? 10));
+  const errSpan = line.querySelector('.retry-err');
+  errSpan.textContent = ev.error || '';
+  errSpan.title = (ev.error || '') + (ev.errorStatus ? ' · HTTP ' + ev.errorStatus : '');
+}
+
+function hideRetryLine() {
+  if (curRetryEl) { curRetryEl.remove(); curRetryEl = null; }
+}
+
 function fillToolCard(e, display, ok, title, animate) {
   if (!e) return;
   stopCmdAnim(e); // 结果到达：命令打字动画还在跑的话立即收掉
@@ -6832,6 +6875,11 @@ function shadowPush(sid, ev) {
     // assistant 步落库，造成「切走再回来思考过程只剩一半」。
     return;
   }
+  if (ev.type === 'model.retry') {
+    // 「正在重连」是瞬态进度：不进重放序列（切回来若仍在重连，后端的
+    // 下一次 model.retry 事件会重新画出状态行）。
+    return;
+  }
   if (ev.type === 'reasoning.delta') {
     const last = sh.events[sh.events.length - 1];
     if (last && last.type === 'reasoning.delta') {
@@ -7054,6 +7102,7 @@ function dispatch(ev) {
       if (conv && ev.sessionId === conv.id) {
         turnSawTool = false;
         busy = true;
+        hideRetryLine(); // 新一轮开始：清掉上一轮可能残留的「正在重连」状态行
         if (!sig) sig = { stop: false };
         // 新的一轮开始，上一轮遗留的停止标记必须失效。
         sig.stop = false;
@@ -7101,10 +7150,19 @@ function dispatch(ev) {
       onEventsLost(ev);
       break;
 
+    case 'model.retry':
+      // ZCode 同款「正在重连 x/10」：后端自动重试时的进度行（走光文字 +
+      // 错误原文）。模型恢复（下一段正文/思考/工具）或 turn.end 时撤除。
+      if (!curA) startTurnUI();
+      showRetryLine(ev);
+      follow();
+      break;
+
     case 'reasoning.delta':
       // 思考强度设为「关闭」时，供应商仍会吐 reasoning_content；直接丢弃，
       // 不要造出一个既点不开又没内容的思考块。
-      if (S.lvl === 0) break;
+      if (S.lvl === 0) { hideRetryLine(); break; }
+      hideRetryLine();
       renderReasoning(ev.text || '');
       break;
 
@@ -7112,6 +7170,7 @@ function dispatch(ev) {
       // 正文开始 = 思考结束。这里必须把开着的思考块收尾，否则它的头部会
       // 一直显示「思考中…」，直到 turn.end 才有机会收——而 turn.end 可能
       // 因为断线根本收不到（这就是「回答结束还显示在思考中」的来源之一）。
+      hideRetryLine();
       if (curThinkEl) { finishThink(curThinkEl); curThinkEl = null; thinkStart = 0; }
       curText += (ev.text || '');
       qText(ev.text || '');
@@ -7120,6 +7179,7 @@ function dispatch(ev) {
     case 'tool.call':
       if (!curA) startTurnUI();
       {
+        hideRetryLine();
         turnSawTool = true;
         // Close the current reasoning/text run so the next delta starts a fresh
         // block *after* this card. Otherwise every thought in the turn piles into
@@ -7313,6 +7373,7 @@ function dispatch(ev) {
       // 的块都在这里统一收尾，界面上不会再有第二个「思考中…」。
       finishAllThink(curA);
       stopTurnProbe();
+      hideRetryLine(); // 重连中被打断/重试耗尽：状态行随之撤除
       if (curA) {
         stopSpin(curA, ev.ms);
         setActs(curA, true);

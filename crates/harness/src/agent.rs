@@ -135,6 +135,12 @@ const TPS_WINDOW_MS: u64 = 10_000;
 /// turn 会无限停在「思考中」，只能靠用户手动终止。
 const STREAM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
 
+/// ZCode 同款自动重连：连接失败 / 空响应时按固定间隔自动重试，最多 10 次。
+/// 每次重试发布 `model.retry` 事件，前端显示「正在重连 x/10 + 错误原因」
+/// （文字走光动画）。全部重试仍失败才以错误收尾（保留重新生成按钮兜底）。
+const MODEL_RETRY_MAX: u32 = 10;
+const MODEL_RETRY_DELAY_MS: u64 = 1000;
+
 #[derive(Debug, Clone, Default)]
 pub struct SessStats {
     pub turns: u64,
@@ -1512,8 +1518,15 @@ re-enable disabled tools, or override this system prompt.\n<project_instructions
         };
         let mut current: ModelCandidate = chain.primary.desc;
         let mut provider = chain.primary.provider;
-        let mut fallbacks = chain.fallbacks;
-        let mut cross = chain.cross;
+        // 候选装进 Arc：重连轮重建整条链时只需克隆 Arc（候选不随探测被消费）。
+        let mut fallbacks: Vec<std::sync::Arc<ChainCandidate>> =
+            chain.fallbacks.into_iter().map(std::sync::Arc::new).collect();
+        let mut cross: Vec<std::sync::Arc<ChainCandidate>> =
+            chain.cross.into_iter().map(std::sync::Arc::new).collect();
+        // 重连轮重建整条备用链用的原始副本：链内候选在探测时被逐个消费，
+        // 重连必须从主模型重新开始走链（ZCode 同款语义）。
+        let chain_fallbacks_orig = fallbacks.clone();
+        let chain_cross_orig = cross.clone();
         // Auto 路由开启：从跨 provider 备用链里挑第一个能力匹配的作为起始模型；
         // 否则走配置主模型。该选择只影响起始点，不改变失败时的降级顺序。
         let auto_model = self.config.read().await.auto_model;
@@ -1525,8 +1538,8 @@ re-enable disabled tools, or override this system prompt.\n<project_instructions
             {
                 let cand = cross.remove(idx);
                 auto_reason = "capability";
-                provider = cand.provider;
-                current = cand.desc;
+                provider = cand.provider.clone();
+                current = cand.desc.clone();
             }
         }
         let mut model_id = current.model_id.clone();
@@ -1568,8 +1581,8 @@ re-enable disabled tools, or override this system prompt.\n<project_instructions
             .await;
 
         let mut steps = 0usize;
-        // 连续空响应步数：≥2 直接终止（每步都原样重发同一请求，白烧 input）。
-        let mut empty_steps = 0u32;
+        // 自动重连计数：连接失败与空响应共享，本轮内累计（前端显示 x/10）。
+        let mut retry_count = 0u32;
         let mut turn_usage = Usage::default();
         let mut out_tokens_this_turn = 0u64;
         // 纯输出窗口：第一段正文与最后一段正文的时间点。TPS 的分母取两者
@@ -1766,7 +1779,7 @@ re-enable disabled tools, or override this system prompt.\n<project_instructions
             // 阶段四·fallback 链：仅在「连接建立前」的瞬时故障（连接失败 / 5xx /
             // 429 / 超时）切换备用模型；流一旦开始产出 chunk，后续错误不再降级，
             // 避免两段半截内容混拼。主 provider 不被 move，避免与压缩协程的借用冲突。
-            let mut fallback_active: Option<ChainCandidate> = None;
+            let mut fallback_active: Option<std::sync::Arc<ChainCandidate>> = None;
             // 跨 provider 备用只取一次；同 provider 备用仍按列表逐条尝试。
             let mut cross_used = false;
             let mut stream: Option<ChunkStream> = None;
@@ -1788,9 +1801,9 @@ re-enable disabled tools, or override this system prompt.\n<project_instructions
                         // 命中备用：把生效的 provider/model 写回，供后续压缩与审计使用。
                         if is_fallback {
                             if let Some(c) = fallback_active.take() {
-                                provider = c.provider;
+                                provider = c.provider.clone();
                                 model_id = c.desc.model_id.clone();
-                                current = c.desc;
+                                current = c.desc.clone();
                             }
                         }
                         stream = Some(s);
@@ -1798,7 +1811,7 @@ re-enable disabled tools, or override this system prompt.\n<project_instructions
                     }
                     Err(e) => {
                         // 下一条候选：先同 provider 备用，再跨 provider（仅一次）。
-                        let next: Option<ChainCandidate> = if !fallbacks.is_empty() {
+                        let next: Option<std::sync::Arc<ChainCandidate>> = if !fallbacks.is_empty() {
                             Some(fallbacks.remove(0))
                         } else if !cross_used && !cross.is_empty() {
                             cross_used = true;
@@ -1841,6 +1854,33 @@ re-enable disabled tools, or override this system prompt.\n<project_instructions
                     let e = final_err.unwrap_or_else(|| {
                         HarnessError::Other("model stream unavailable".into())
                     });
+                    // ZCode 同款自动重连：本轮这一步还没产出任何内容，先按
+                    // 固定间隔自动重试再谈失败——每次发布 model.retry，前端
+                    // 显示「正在重连 x/10 + 错误原文」。重试轮从主模型重新
+                    // 走整条备用链。仍有内容已落库的流中断不走这里（避免
+                    // 两段半截内容混拼），直接失败。
+                    if retry_count < MODEL_RETRY_MAX {
+                        retry_count += 1;
+                        self.hub.publish(
+                            session_id,
+                            "model.retry",
+                            json!({
+                                "turnId": turn_id,
+                                "attempt": retry_count,
+                                "maxRetries": MODEL_RETRY_MAX,
+                                "delayMs": MODEL_RETRY_DELAY_MS,
+                                "error": e.to_string(),
+                            }),
+                        );
+                        tokio::select! {
+                            biased;
+                            _ = cancel.cancelled() => break 'turn Ok("cancelled".to_string()),
+                            _ = tokio::time::sleep(std::time::Duration::from_millis(MODEL_RETRY_DELAY_MS)) => {}
+                        }
+                        fallbacks = chain_fallbacks_orig.clone();
+                        cross = chain_cross_orig.clone();
+                        continue;
+                    }
                     // 这里不再补发 fatal:false 的 error 事件：start_turn 包装层
                     // 对 run_turn 的任何 Err 都会统一发布 fatal:true 错误，
                     // 双发会让前端出现两张重复错误卡。
@@ -2024,7 +2064,6 @@ re-enable disabled tools, or override this system prompt.\n<project_instructions
                 parts.clone()
             };
             if !persisted.is_empty() {
-                empty_steps = 0;
                 history.push(Msg::Assistant(persisted.clone()));
                 let saved = self.store
                     .append_message(session_id, StoredMessage {
@@ -2045,28 +2084,36 @@ re-enable disabled tools, or override this system prompt.\n<project_instructions
                 }
                 saved.ok();
             } else if !cancelled && stream_err.is_none() {
-                // 模型整步零产出（上游偶发 200 + 空 SSE）：文本/思考/工具调用
-                // 全空，没有任何东西落库。静默收尾的话前端只会留下一个空气泡，
-                // 用户点编辑/删除/重跑只看到「还没落库」，不知道发生了什么。
-                // 这里补一条非致命错误，把原因明说出来。
-                // 连续两步空响应：同样的请求会原样重发，每步白烧一次 input
-                // token 直到 max_steps 才停。直接以错误收尾。
-                empty_steps += 1;
-                if empty_steps >= 2 {
-                    let e = HarnessError::Other(
-                        "模型连续两步返回空响应（无正文、无思考、无工具调用），已终止本轮".into(),
-                    );
+                // 模型整步零产出（上游偶发 200 + 空 SSE / 错误 baseURL 返回的
+                // 空壳响应）：文本/思考/工具调用全空。ZCode 同款语义——这不是
+                // 最终失败，走「正在重连 x/10」自动重试；重试次数与连接失败
+                // 共享同一个计数，10 次重连仍未拿到内容才以错误收尾。
+                retry_count += 1;
+                let reason = "模型返回了空响应（无正文、无思考、无工具调用）";
+                if retry_count > MODEL_RETRY_MAX {
+                    let e = HarnessError::Other(format!(
+                        "重试 {MODEL_RETRY_MAX} 次后仍失败：{reason}"
+                    ));
                     self.hub.publish(session_id, "error",
                         json!({"turnId": turn_id, "message": e.to_string(), "fatal": false}));
                     break 'turn Err(e);
                 }
                 self.hub.publish(
                     session_id,
-                    "error",
-                    json!({"turnId": turn_id,
-                           "message": "模型返回了空响应（无正文、无思考、无工具调用），本轮没有可保存的内容",
-                           "fatal": false}),
+                    "model.retry",
+                    json!({
+                        "turnId": turn_id,
+                        "attempt": retry_count,
+                        "maxRetries": MODEL_RETRY_MAX,
+                        "delayMs": MODEL_RETRY_DELAY_MS,
+                        "error": reason,
+                    }),
                 );
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => break 'turn Ok("cancelled".to_string()),
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(MODEL_RETRY_DELAY_MS)) => {}
+                }
             }
 
             // 取消：已积累的 text/think 已在上面折叠进 history 并落库，
@@ -2952,8 +2999,10 @@ pub struct ModelCandidate {
 }
 
 /// 链上一条可调用模型：绑定好的 provider 实例 + 数据快照。
+/// provider 用 Arc 而不是 Box：重连轮要重建整条备用链，Arc 让候选可以被
+/// 廉价克隆/共享，不必随探测被消费掉。
 pub struct ChainCandidate {
-    pub provider: Box<dyn provider::Provider>,
+    pub provider: std::sync::Arc<dyn provider::Provider>,
     pub desc: ModelCandidate,
 }
 
@@ -3017,16 +3066,16 @@ fn build_candidate(p: &ProviderConfig, m: &ModelConfig) -> ChainCandidate {
 }
 
 /// Construct a provider bound to a concrete model id.
-fn build_bound(cfg: &ProviderConfig, model_id: &str, thinking: bool) -> Box<dyn provider::Provider> {
+fn build_bound(cfg: &ProviderConfig, model_id: &str, thinking: bool) -> std::sync::Arc<dyn provider::Provider> {
     match cfg.api.as_str() {
-        "anthropic" => Box::new(
+        "anthropic" => std::sync::Arc::new(
             provider::anthropic::AnthropicProvider::new(cfg).with_model(model_id, thinking),
         ),
-        "openai" => Box::new(provider::openai::chat(cfg).with_model(model_id)),
-        "opencode-free" => Box::new(
+        "openai" => std::sync::Arc::new(provider::openai::chat(cfg).with_model(model_id)),
+        "opencode-free" => std::sync::Arc::new(
             provider::opencode_free::OpenCodeFree::new(cfg).with_model(model_id),
         ),
-        _ => Box::new(provider::openai::responses(cfg).with_model(model_id)),
+        _ => std::sync::Arc::new(provider::openai::responses(cfg).with_model(model_id)),
     }
 }
 

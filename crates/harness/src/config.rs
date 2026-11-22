@@ -966,7 +966,7 @@ pub fn set_proxy(proxy: String, no_proxy: String) {
 }
 
 /// 代理感知的共享 HTTP client：模型请求、web 工具共用。按当前代理串缓存，
-/// 设置变更后自动重建。connect_timeout 20s（与原各处手搓 builder 一致）。
+/// 设置变更后自动重建。connect_timeout 10s（失败走 agent 的自动重连）。
 /// 给任意 ClientBuilder 套上当前代理设置（保留调用方的 UA/重定向/超时定制）。
 pub fn apply_proxy(b: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
     let (proxy, no_proxy) = PROXY
@@ -1007,7 +1007,10 @@ pub fn http_client() -> reqwest::Client {
         }
     }
     let client = apply_proxy(
-        reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(20)),
+        // connect_timeout 10s：TCP/TLS 握手 10s 足够宽容；错误 baseURL、被墙
+        // 地址这类场景不应让用户对着静默界面等 20s——失败会进入「正在重连
+        // x/10」自动重连（agent.rs MODEL_RETRY_*），快速失败才能快速重试。
+        reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(10)),
     )
     .build()
     .unwrap_or_else(|_| reqwest::Client::new());
