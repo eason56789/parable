@@ -3204,7 +3204,7 @@ fn build_system_prompt(cfg: &Config, workspace: &PathBuf, opts: &TurnOptions) ->
     s.push_str("You and the user share one workspace, and your job is to collaborate with them until their goal is genuinely handled — write and refactor code, run commands, research, automate, and answer — using your own judgment along the way.\n\n");
     // ---- Harness：稳定的运行时契约。每条描述一条真实存在的机制。
     s.push_str("# Harness\n");
-    s.push_str(" - Text you output outside of tool use is displayed to the user as GitHub-flavored markdown.\n");
+    s.push_str(" - Text you output outside of tool use is displayed to the user as GitHub-flavored markdown — including images: `![alt](path.png)` renders as an actual picture (workspace-relative paths only).\n");
     s.push_str(" - Tools run behind a user-selected permission mode; a denied call means the user declined it — adjust, don't retry verbatim. Hooks may intercept tool calls; a hook's reason arrives as the tool result.\n");
     s.push_str(" - The user can send messages while you are working; they arrive between tool batches and adjust the current task rather than replacing it, unless they clearly say otherwise.\n");
     s.push_str(" - Prefer the dedicated tools over shell commands when one fits. Independent tool calls can run in parallel in one response.\n");
@@ -3252,7 +3252,19 @@ fn build_system_prompt(cfg: &Config, workspace: &PathBuf, opts: &TurnOptions) ->
     s.push_str("`computer_*` (browser), `desktop_*` (real screen), and screenshot tools are slow, visible, and can disrupt the user's machine. Use them only when the task genuinely cannot be done another way:\n");
     s.push_str("- Prefer `web_fetch` for reading a page's content, `web_search` for finding facts, and the file tools for anything on disk. Screenshots are for when the user must SEE something, or when the target is drawn on a canvas and has no accessible tree.\n");
     s.push_str("- Before any `computer_*` / `desktop_*` call, say in one sentence why the cheaper tools cannot do it. The user watches their own screen move; unexplained clicking is unacceptable.\n");
-    s.push_str("- Screenshot tools are for the user's benefit (showing them what you see), not for your own verification loop — use `computer_snapshot` once to get the tree + refs, and act by ref.\n");
+    s.push_str("- Screenshot tools are for the user's benefit (showing them what you see), not for your own verification loop — use `computer_snapshot` once to get the tree + refs, and act by ref. The image they return is shown to the user automatically (see # Images), so don't re-post it as markdown.\n");
+    // ---- Images：图片的呈现契约。模型不知道这套机制时的两种典型失败已经
+    // 在真实使用里出现过：①截图后写一段「我无法把图片插入聊天，只能存到
+    // 工作区」的自我怀疑；②把图片存成文件却不引用，或引用了工作区之外的
+    // 路径（后端按工作区边界拒绝）。这里把「什么图会自动出现」「怎么引用
+    // 磁盘上的图」讲成确定的事实，模型就不用猜。
+    s.push_str("\n# Images\n");
+    s.push_str("Images are first-class here: the app renders them inline for the user, so showing a picture is always an option. Two separate things are true, and mixing them up is the usual mistake.\n");
+    s.push_str(" - `computer_screenshot`, `desktop_screenshot`, and `desktop_snapshot` return their image automatically: the user sees the screenshot in the tool card the moment it returns. Do NOT also write markdown for it, and never claim you are unable to show it.\n");
+    s.push_str(" - Any image already on disk (a screenshot you saved, a chart you generated, a downloaded picture) is displayed by referencing it from your reply with `![short description](relative/path.png)`. The path is workspace-relative: `![desktop](shots/screen.png)` works, an absolute path or a path outside the workspace does not.\n");
+    s.push_str(" - When the user asks you to look at, capture, or show something visual — the desktop, a window, a page, a chart — capture it and put it in front of them. A screenshot is the deliverable, not a silent internal check.\n");
+    s.push_str(" - Tool screenshots are transient (they live in the conversation, not on disk). If the image must survive the session, or the user wants the file, save it first and then reference the saved file.\n");
+    s.push_str(" - Describe what the image shows in the text around it: the user can see the picture, but they cannot see why it matters.\n");
     // ---- Doing tasks：工程纪律（Claude Code doing tasks + following conventions）。
     s.push_str("\n# Doing tasks\n");
     s.push_str("- Understand before you change: read the relevant files and search the codebase first (read_file, grep, glob — batch independent lookups in parallel).\n");
@@ -3547,4 +3559,58 @@ mod tests {
 
     #[allow(dead_code)]
     fn _touch(_t: &ToolSpec) {}
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    use super::*;
+
+    /// 图片契约必须出现在系统提示词里——模型不知道这套机制时会写出
+    /// 「我无法把图片插入聊天」这种自我怀疑（真实发生过），或者把图存了
+    /// 却不引用。三条关键事实缺一不可。
+    #[test]
+    fn system_prompt_states_image_contract() {
+        let cfg = Config::default();
+        let p = build_system_prompt(&cfg, &PathBuf::from("C:/ws"), &TurnOptions::default());
+        let lower = p.to_lowercase();
+        assert!(lower.contains("# images"), "missing Images section");
+        // 截图自动可见，不需要模型再写 markdown
+        assert!(
+            lower.contains("shown to the user automatically"),
+            "prompt must say tool screenshots are displayed automatically"
+        );
+        // 磁盘上的图靠 markdown 引用，且限工作区内相对路径
+        assert!(
+            p.contains("![short description](relative/path.png)"),
+            "prompt must show the markdown image syntax"
+        );
+        assert!(
+            lower.contains("workspace-relative"),
+            "prompt must state images paths are workspace-relative"
+        );
+        // 明确禁止「我无法展示图片」这类说法
+        assert!(
+            lower.contains("never claim you are unable to show it"),
+            "prompt must forbid the can't-show-images claim"
+        );
+    }
+
+    /// 截图类工具的 description 也要写明「图会自动给用户看」，
+    /// 否则模型只看 schema 时仍会重复用 markdown 贴图。
+    #[test]
+    fn screenshot_tools_advertise_auto_display() {
+        let reg = crate::tools::Registry::new(PathBuf::from("C:/ws"));
+        let specs = reg.specs();
+        for name in ["computer_screenshot", "desktop_screenshot", "desktop_snapshot"] {
+            let s = specs
+                .iter()
+                .find(|s| s.name == name)
+                .unwrap_or_else(|| panic!("{name} missing"));
+            assert!(
+                s.description.to_lowercase().contains("shown to the user automatically"),
+                "{name} must advertise auto-display: {}",
+                s.description
+            );
+        }
+    }
 }

@@ -814,7 +814,7 @@ impl Registry {
         let mut specs = vec![
             ToolSpec {
                 name: "read_file".into(),
-                description: "Read a file. Text files return numbered lines (use offset/limit for long files); image files (png/jpg/gif/webp/bmp) are detected by extension and returned as a picture you can look at directly.".into(),
+                description: "Read a file. Text files return numbered lines (use offset/limit for long files); image files (png/jpg/gif/webp/bmp) are detected by extension and returned as a picture you can look at directly — that picture is also shown to the user automatically.".into(),
                 input_schema: obj(json!({
                     "path": str_prop("Absolute or workspace-relative file path"),
                     "offset": int_prop("1-based start line (optional, text files only)"),
@@ -1148,7 +1148,7 @@ skill matches the current request, then follow the steps it contains. Read-only.
             },
             ToolSpec {
                 name: "computer_screenshot".into(),
-                description: "Capture ONLY a screenshot (no tree). Use for canvas, visual layout, or verifying how something looks. Act by coordinates afterwards, or take a snapshot to get refs. With x/y/width/height, captures that region magnified 2x (zoom — read small dense UI, verify tiny targets).".into(),
+                description: "Capture ONLY a screenshot (no tree). Use for canvas, visual layout, or verifying how something looks. The image is shown to the user automatically — no need to re-post it as markdown. Act by coordinates afterwards, or take a snapshot to get refs. With x/y/width/height, captures that region magnified 2x (zoom — read small dense UI, verify tiny targets).".into(),
                 input_schema: obj(json!({
                     "full_page": json!({"type":"boolean","description":"Capture beyond the viewport too (default false)"}),
                     "x": int_prop("Zoom region left (with y/width/height)"),
@@ -1261,14 +1261,14 @@ skill matches the current request, then follow the steps it contains. Read-only.
             // ---- desktop use（OS 级：真实鼠标键盘 + UIA 无障碍树；仅 Windows）----
             ToolSpec {
                 name: "desktop_snapshot".into(),
-                description: "PRIMARY desktop observation: the foreground window's UIA accessibility tree (interactive elements carry stable [rN] refs + physical screen coordinates, edit values, focused/disabled marks) AND a full-screen screenshot in ONE call. Coordinates align with screenshot pixels unless a scale note is present. Re-snapshot whenever the screen changed.".into(),
+                description: "PRIMARY desktop observation: the foreground window's UIA accessibility tree (interactive elements carry stable [rN] refs + physical screen coordinates, edit values, focused/disabled marks) AND a full-screen screenshot in ONE call. The screenshot is shown to the user automatically. Coordinates align with screenshot pixels unless a scale note is present. Re-snapshot whenever the screen changed.".into(),
                 input_schema: obj(json!({
                     "scope": str_prop("focused (default) | all — all walks every visible window"),
                 }), &[]),
             },
             ToolSpec {
                 name: "desktop_screenshot".into(),
-                description: "Capture ONLY a desktop screenshot (full virtual screen, or a region with x/y/width/height in physical pixels). Screens wider than 1568px are downscaled with a scale note — use tree coordinates for actions.".into(),
+                description: "Capture ONLY a desktop screenshot (full virtual screen, or a region with x/y/width/height in physical pixels). The image is shown to the user automatically — no need to re-post it as markdown. Screens wider than 1568px are downscaled with a scale note — use tree coordinates for actions.".into(),
                 input_schema: obj(json!({
                     "x": int_prop("Region left (with y/width/height)"),
                     "y": int_prop("Region top"),
