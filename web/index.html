@@ -1617,10 +1617,15 @@ body.dragging #main{outline:2px dashed var(--accent);outline-offset:-8px}
 .memc{display:flex;align-items:flex-start;gap:14px;padding:16px 18px;border:.5px solid var(--line);border-radius:12px;margin-bottom:12px;background:var(--bg);transition:border-color .2s}
 .memc .mtx{flex:1;min-width:0;line-height:1.7;font-size:13.5px;white-space:pre-wrap;word-break:break-word}
 .mmeta{display:block;font:11.5px var(--mono);color:var(--fg2);margin-top:8px}
-.mtag{flex:none;padding:2px 8px;border-radius:6px;font-size:11.5px;margin-top:2px;white-space:nowrap}
-.t-pref{background:color-mix(in srgb,var(--c1) 15%,transparent);color:var(--c1)}
-.t-proj{background:color-mix(in srgb,var(--c3) 15%,transparent);color:var(--c3)}
-.t-fact{background:color-mix(in srgb,var(--c2) 15%,transparent);color:var(--c2)}
+.mtag{flex:none;padding:2.5px 10px;border-radius:999px;font-size:11.5px;line-height:1.5;
+  margin-top:2px;white-space:nowrap;font-weight:500;letter-spacing:.01em;
+  border:.5px solid color-mix(in srgb,currentColor 28%,transparent)}
+/* 记忆标签：偏好=蓝、事实=绿、项目=紫，胶囊形，底色淡、描边与文字同色。
+   用项目既有的 --uch* 语义色（深浅主题各有取值），不再引用从未定义过的
+   --c1/--c2/--c3——那三个变量全项目没有任何定义，标签因此一直是透明无色。 */
+.t-pref{background:color-mix(in srgb,var(--uch1) 16%,transparent);color:var(--uch1)}
+.t-proj{background:color-mix(in srgb,var(--uch3) 16%,transparent);color:var(--uch3)}
+.t-fact{background:color-mix(in srgb,var(--uch2) 16%,transparent);color:var(--uch2)}
 .memc.ed{flex-direction:column;align-items:stretch;border-color:var(--accent)}
 .memc textarea{width:100%;min-height:76px;resize:vertical;padding:9px 11px;border:1px solid var(--line);border-radius:8px;background:var(--input);color:var(--fg);font:13.5px/1.55 var(--sans);outline:0}
 .mer{display:flex;align-items:center;gap:8px}
