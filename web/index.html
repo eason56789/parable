@@ -85,6 +85,10 @@ body.has-bg #main{border-radius:0;box-shadow:none}
    方块。有底图时改为透明，只保留文字与悬停反馈。 */
 body.has-bg .sbtn{background:transparent;border-color:transparent}
 body.has-bg .sbtn:hover{background:color-mix(in srgb,var(--hov) 60%,transparent)}
+/* 顶部渐隐蒙版（#main::after，52px，从实色 var(--bg) 起头 + 8px 模糊）是
+   纯视觉修饰：有底图时它就是压在画面顶端的一条黑带。直接整层去掉，
+   画面完全干净（滚动内容的可读性由文字本身保证）。 */
+body.has-bg #main::after{content:none;display:none}
 /* 弹窗类保持实色：短文本压在照片上也要可读（与整页半透明不冲突）。 */
 body.has-bg .cfmb,body.has-bg #aum .aumb{background:color-mix(in srgb,var(--bg) 94%,transparent);
   -webkit-backdrop-filter:blur(16px);backdrop-filter:blur(16px)}
