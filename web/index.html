@@ -2509,7 +2509,7 @@ const IC = {
 const ic = n => '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">' + (IC[n] || IC.file) + '</svg>';
 
 /** 版本号：与 Cargo.toml / tauri.conf.json 同步（发布时三处一起改）。 */
-const APP_VER = '0.2.3';
+const APP_VER = '0.2.4';
 /** GitHub 仓库（检查更新读 releases/latest）。 */
 const GH_REPO = 'eason56789/parable';
 
@@ -5760,7 +5760,10 @@ function uMsg(q, idx, atts) {
       //      非图片 → 在系统文件管理器里定位。
       s.innerHTML = (a && a.url ? '<img class="attimg" alt="">' : attIcon(a.name)) + '<b></b>';
       const im = s.querySelector('.attimg');
-      if (im) im.src = a.url;
+      // 同 renderAtts：url 可能是 blob:/data:，也可能是 /api/fs/raw?… 接口
+      // 路径——后者带不了鉴权头，必须走 imgLoad 转 blob。
+      if (im) imgLoad(a.url).then(u => { if (im.isConnected) im.src = u; },
+        () => { im.remove(); });
       s.querySelector('b').textContent = a.name || '';
       if (a && a.url) {
         s.title = t('iv_open');
@@ -9579,7 +9582,10 @@ async function ivSave() {
 function ivAddToChat() {
   const cur = IV.list[IV.i];
   if (!cur) return;
-  const inp = $('#inp');
+  // 主输入框是 #ta（附件芯片挂在 #atts 里）。这里曾经写成 #inp —— 那是
+  // ZCode 的 id，Parable 没有这个元素，于是「添加到聊天」永远报
+  // 「当前没有可接收图片的输入框」。
+  const inp = $('#ta');
   if (!inp) { toast(t('iv_no_composer')); return; }
   if (typeof ATTS === 'undefined') { toast(t('iv_no_composer')); return; }
   if (ATTS.length >= 6) { toast(t('r2_add_full')); return; }
@@ -9599,6 +9605,8 @@ function ivAddToChat() {
   if (typeof sync === 'function') sync();
   toast(t('iv_added'));
   closeImage();
+  // 把焦点交回输入框，用户可以立刻接着打字再发。
+  try { inp.focus(); } catch (e) {}
 }
 
 /** 「在资源管理器中打开」：reveal 走的是绝对路径。 */
@@ -10352,10 +10360,20 @@ function renderAtts() {
   el.querySelectorAll('.att').forEach((s, i) => {
     const a = ATTS[i];
     const im = s.querySelector('.attimg');
-    if (im) im.src = a.url;
+    // 缩略图的 url 可能已经是 blob:/data:（本地选的文件、灯箱里的图），
+    // 也可能是 /api/fs/raw?… 这类接口路径（从工作区/灯箱挂进来的图）。
+    // 后者不能直接塞进 <img src>：本服务只认 X-Parable-Token 请求头。
+    if (im) imgLoad(a.url).then(u => { if (im.isConnected) im.src = u; },
+      () => { im.remove(); });
     s.querySelector('b').textContent = a.name + (a.loading ? ' · ' + t('att_uploading') : '');
-    // 点击芯片 → 打开文件所在位置；× 只做移除。
-    if (a.path && !a.loading) {
+    // 点击芯片：图片 → 灯箱看大图；其他文件 → 打开文件所在位置。× 只做移除。
+    if (a.url && !a.loading) {
+      s.title = t('iv_open');
+      s.onclick = e => {
+        if (e.target.closest('[data-ax]')) return;
+        openImage([{ src: a.url, name: a.name, path: a.path || '', size: a.size || 0 }], 0);
+      };
+    } else if (a.path && !a.loading) {
       s.title = t('att_reveal');
       s.onclick = e => {
         if (!e.target.closest('[data-ax]')) revealFile(a.path);
@@ -11018,7 +11036,18 @@ async function openSession(id, focusMsg) {
         // 附件芯片（File 部件）重放；inline_attachments 的散文注记由芯片
         // 替代，不再进正文——否则刷新后正文多一段「The user attached…」。
         const files = parts.filter(p => p.k === 'file')
-          .map(f => ({ name: f.name, path: f.path, size: f.size }));
+          .map(f => {
+            const name = f.name || '';
+            // 图片附件重放时补一个可加载的 url：存储里只有 path，而 <img>
+            // 带不了鉴权头，所以交给 imgLoad 走 /api/fs/raw 取字节。
+            const rel = String(f.path || '');
+            const isImg = IMG_EXT_RE.test(name) || IMG_EXT_RE.test(rel);
+            return {
+              name, path: f.path, size: f.size,
+              url: isImg && rel ? '/api/fs/raw?path=' + encodeURIComponent(rel) : null,
+              kind: isImg ? 'image' : 'file'
+            };
+          });
         const shown = texts
           .map(x => x.text)
           .filter(t => !/^The user attached the following files:/.test(String(t).trim()));
@@ -18888,7 +18917,8 @@ function r2Attach(info) {
   renderAtts();
   if (typeof sync === 'function') sync();
   toast(t('r2_added'));
-  const inp = $('#inp');
+  // #ta 才是主输入框（#inp 是 ZCode 的 id，这里不存在），写错就永远不会聚焦。
+  const inp = $('#ta');
   if (inp && typeof inp.focus === 'function') inp.focus();
 }
 
