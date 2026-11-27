@@ -52,15 +52,25 @@ svg{display:block}
    背景层已经提供底色，body 必须透明才透得出来。 */
 body.has-bg{background-color:transparent;background-image:none}
 body.has-bg #win{position:relative;z-index:1}
-body.has-bg #side{background:color-mix(in srgb,var(--side) 72%,transparent)}
-body.has-bg #tb{background:color-mix(in srgb,var(--side) 55%,transparent)}
-body.has-bg .sb{background:color-mix(in srgb,var(--side) 80%,transparent)}
-/* 主对话区与设置导航也半透明：底图从整窗透出，而不是只出现在侧栏边缘。
-   弹窗（.cfmb/#medit/.kbdc 等）保持实色——文字压在照片上不可读。 */
-body.has-bg #main{background:color-mix(in srgb,var(--bg) 82%,transparent)}
-body.has-bg #snav{background:color-mix(in srgb,var(--side) 78%,transparent)}
-body.has-bg #sdp{background:color-mix(in srgb,var(--side) 88%,transparent)}
+body.has-bg .sb{background:color-mix(in srgb,var(--side) var(--bg-a),transparent)}
+/* 有底图时的统一透明度：所有"面"用同一个 --bg-a 混合，避免顶栏、侧栏、
+   主区各自一档造成割裂。--bg-a 由 applyBg() 按用户选的透明度换算。 */
+:root{--bg-a:70%}
+body.has-bg #main{background:color-mix(in srgb,var(--bg) var(--bg-a),transparent)}
+body.has-bg #tb{background:color-mix(in srgb,var(--side) var(--bg-a),transparent)}
+body.has-bg #side{background:color-mix(in srgb,var(--side) var(--bg-a),transparent)}
+body.has-bg #sin{background:transparent}
+body.has-bg #snav{background:color-mix(in srgb,var(--side) var(--bg-a),transparent)}
+body.has-bg #sdp{background:color-mix(in srgb,var(--side) var(--bg-a),transparent)}
+/* 设置页整页与其中的输入框：同样透出底图，而不是一块不透明大板。 */
+body.has-bg #card{background:color-mix(in srgb,var(--bg) var(--bg-a),transparent)}
+body.has-bg #modal{background:rgba(0,0,0,.18)}
+body.has-bg .box{background:color-mix(in srgb,var(--input) var(--bg-a),transparent);
+  -webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px)}
 body.has-bg .tk-seg,body.has-bg .seg{background:color-mix(in srgb,var(--hov) 70%,transparent)}
+/* 弹窗类保持实色：短文本压在照片上也要可读（与整页半透明不冲突）。 */
+body.has-bg .cfmb,body.has-bg #aum .aumb{background:color-mix(in srgb,var(--bg) 94%,transparent);
+  -webkit-backdrop-filter:blur(16px);backdrop-filter:blur(16px)}
 /* 底图选择控件：预览缩略图 + 选图/移除按钮 */
 .bgpick{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
 .bgprev{width:184px;height:104px;border-radius:10px;border:.5px solid var(--line);
@@ -3148,6 +3158,12 @@ function applyBg() {
   // 缩放用 transform 而不是改 background-size 两次：模糊在放大后会变虚边，
   // 多留 2% 让边缘不足的像素被推出视口。
   img.style.transform = z > 1 ? 'scale(' + Math.min(1.02, 1 + (z - 1) * 0.05) + ')' : 'none';
+  // 界面各面（顶栏/侧栏/主区/设置页）共用这一档混合比例：用户调高
+  // 「透明度」时面板一起变透，而不是只有图片变亮图片跟界面对不上。
+  // 映射：opacity 0 → 面板几乎全实（96%），100 → 面板较透（46%）。
+  const o = Math.max(0, Math.min(100, +S.bgOpacity || 0));
+  const a = Math.round(96 - o * 0.5);
+  document.documentElement.style.setProperty('--bg-a', a + '%');
   // 底图固定（不随内容滚动）时背景始终贴着视口——层本身就是 fixed，无需额外处理。
 }
 
