@@ -603,7 +603,13 @@ body.has-bg #modal.open{background:var(--bg);backdrop-filter:none;-webkit-backdr
   transition:border-color calc(.25s * var(--animd)),background-color calc(.25s * var(--animd))}
 #sfind:focus{border-color:var(--fg2)}
 #sfind::placeholder{color:var(--fg2)}
-.sgrp{padding:12px 10px 4px;font-size:11px;color:var(--fg2);letter-spacing:.04em}
+/* 分组标题：收紧间距 + 明确层级（小号大写字距 + 更淡的颜色 + 分隔线），
+   让它一眼就是「标题」而不是普通条目。 */
+.sgrp{padding:14px 10px 4px;font-size:10.5px;color:var(--fg2);letter-spacing:.08em;
+  font-weight:600;opacity:.75}
+.sgrp:first-of-type{padding-top:6px}
+/* 除首组外，在标题上方加一条极淡分隔线，强化分组边界。 */
+.sgrp:not(:first-of-type){box-shadow:inset 0 .5px 0 var(--line)}
 #sp{flex:1;overflow-y:auto;padding:0}
 .sphd{padding:38px 44px 6px;max-width:1000px;margin:0 auto}
 .sphd h2{margin:0;font:600 26px var(--serif);color:var(--fg)}
@@ -2463,7 +2469,7 @@ const L = {
     permT:'权限模式', permH:'控制 Parable 能对你的文件执行哪些操作',
     lvlT:'思考强度', modelT:'模型', pk_manage:'管理模型', pk_api:'API', pk_vision:'视觉', pk_think:'思考',
     l0:'关闭', l1:'低', l2:'中', l3:'高',
-    s_g:'通用', s_s:'网络搜索', s_a:'外观', s_bg:'个性化背景', s_m:'模型设置', s_p:'权限与思考', s_n:'动画', s_base:'基础设置',
+    s_pers:'个性化', s_g:'通用', s_s:'网络搜索', s_a:'外观', s_bg:'个性化背景', s_m:'模型设置', s_p:'权限与思考', s_n:'动画', s_base:'基础设置',
     bgOn:'启用底图', bgOnH:'关闭后保留设置，界面回到纯色背景', bg_choose:'选择图片', bg_rechoose:'更换图片',
     bg_none:'尚未选择图片', bg_clear:'移除', bg_notimage:'请选择图片文件（PNG / JPG / WebP）',
     bg_fail:'图片读取失败，请换一张试试', bg_big:'图片较大，已压缩存储',
@@ -2769,7 +2775,7 @@ const L = {
     permT:'Permission mode', permH:'Control what Parable can do to your files',
     lvlT:'Thinking effort', modelT:'Model', pk_manage:'Manage models', pk_api:'API', pk_vision:'Vision', pk_think:'Think',
     l0:'Off', l1:'Low', l2:'Medium', l3:'High',
-    s_g:'General', s_s:'Web search', s_a:'Appearance', s_bg:'Wallpaper', s_m:'Model settings', s_p:'Permissions', s_n:'Animation', s_base:'Basics',
+    s_pers:'Personalization', s_g:'General', s_s:'Web search', s_a:'Appearance', s_bg:'Wallpaper', s_m:'Model settings', s_p:'Permissions', s_n:'Animation', s_base:'Basics',
     bgOn:'Enable wallpaper', bgOnH:'Turning it off keeps your settings and returns to a solid background',
     bg_choose:'Choose image', bg_rechoose:'Replace image', bg_none:'No image selected', bg_clear:'Remove',
     bg_notimage:'Please choose an image file (PNG / JPG / WebP)', bg_fail:'Could not read that image — try another one',
@@ -11663,10 +11669,13 @@ addEventListener('resize', () => { if ($('#mm') && $('#mm').classList.contains('
 /* ==================================================================
    settings modal
    ================================================================== */
-const TAB = ['g', 's', 'a', 'bg', 'n', 'm', 'p', 'mem', 'sk', 'u', 'ab'];
+const TAB = ['g', 's', 'net', 'a', 'bg', 'n', 'm', 'p', 'mem', 'sk', 'u', 'd', 'ab'];
 /** 导航分组：基础设置 / Agent 能力 / 数据与统计 */
 const TGRP = [
-  { k: 's_base', tabs: ['g', 'a', 'bg', 'n', 's', 'net'] },
+  { k: 's_base', tabs: ['g', 's', 'net'] },
+  // 外观 / 个性化背景 / 动画同属「看起来怎么样」，收进一个分组，
+  // 导航点击路径更短（原来散在基础设置 6 项里）。
+  { k: 's_pers', tabs: ['a', 'bg', 'n'] },
   { k: 's_agent', tabs: ['m', 'p', 'mem', 'sk', 'mcp', 'hk', 'bh'] },
   { k: 's_data', tabs: ['u', 'd'] },
   { k: 's_about', tabs: ['ab'] }
@@ -11801,6 +11810,9 @@ const TAB_KW = {
   m:'模型 供应商 api key base url provider anthropic deepseek ollama 智谱 model',
   p:'权限 文件 工具 命令 规则 允许 禁止 permission mode',
   n:'动画 流式 速度 模糊 animation stream blur',
+  bg:'背景 底图 壁纸 图片 模糊 亮度 透明度 缩放 wallpaper background image blur brightness opacity',
+  net:'网络 代理 proxy http https 证书',
+  d:'数据 保留 清理 删除 data retention cleanup',
   mem:'记忆 偏好 记住 memory pref project fact 添加 删除',
   sk:'技能 skill 安装 新建 诊断 SKILL.md 工作流 用户 项目',
   u:'用量 统计 token 热力图 趋势 缓存 会话 活跃 usage'
@@ -11992,6 +12004,8 @@ function panel() {
     bg: [t('s_bg'), z ? '上传一张底图，调节透明度、模糊、亮度与裁剪位置。' : 'Pick a wallpaper and tune its opacity, blur, brightness and crop.'],
     n: [t('s_n'), z ? '动画速度、流式效果与视觉效果。' : 'Animation speed, streaming and visual effects.'],
     p: [t('s_p'), z ? '控制 Parable 能对你的文件做什么，以及思考强度。' : 'Control what Parable may do to your files, and thinking effort.'],
+    net: [t('s_net'), z ? 'HTTP 代理与网络选项。' : 'HTTP proxy and network options.'],
+    d: [t('s_d'), z ? '会话保留与数据清理。' : 'Session retention and data cleanup.'],
   }[tab] || [t('set'), ''];
   p.innerHTML = '<div class="sphd"><h2>' + esc(HD[0]) + '</h2>' +
     (HD[1] ? '<p>' + esc(HD[1]) + '</p>' : '') + '</div><div class="setbody"></div>';
