@@ -734,7 +734,9 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 .tk-seg button{border:0;background:none;color:var(--fg2);padding:5px 12px;border-radius:8px;font:var(--fs-secondary) var(--sans);cursor:pointer;transition:background-color calc(.2s * var(--animd)),color calc(.2s * var(--animd))}
 .tk-seg button:hover{color:var(--fg)}
 .tk-seg button.on{background:var(--bg);color:var(--fg);box-shadow:0 0 0 .5px var(--line)}
-.tk-search{flex:1;min-width:160px;max-width:300px;background:var(--input);border:.5px solid var(--line);border-radius:10px;padding:7px 12px;color:inherit;font:var(--fs-body) var(--sans);outline:0}
+.tk-search{flex:1 1 auto;min-width:140px;height:32px;box-sizing:border-box;
+  background:var(--input);border:.5px solid var(--line);border-radius:10px;padding:0 12px;
+  color:inherit;font:var(--fs-body) var(--sans);outline:0}
 .tk-search:focus{border-color:color-mix(in srgb,var(--fg) 30%,var(--line))}
 .tk-search::placeholder{color:var(--fg2);opacity:.7}
 .taskrow.hide{display:none}
@@ -968,16 +970,14 @@ button.tk-prompt{width:100%;text-align:left;border:0;cursor:pointer}
 .aum-bd .tk-form input::placeholder,.aum-bd .tk-form textarea::placeholder{color:var(--fg2);opacity:.7}
 .aum-bd .tk-form input:focus,.aum-bd .tk-form textarea:focus,.aum-bd .tk-form select:focus{
   border-color:color-mix(in srgb,var(--fg) 30%,var(--line))}
-/* 自动化页头：标题区 + 右侧「新建任务」主按钮 */
-.auto-head{display:flex;align-items:flex-start;gap:16px}
-.auto-head>div{min-width:0;flex:1}
-.auto-new{flex:none;display:inline-flex;align-items:center;gap:7px;padding:8px 15px;
-  background:var(--accent-strong);color:#fff;border:0;border-radius:10px;
+/* 「新建任务」与筛选/搜索同行、靠右；高度与搜索框一致（32px）。 */
+.tk-filters .auto-new{flex:none;height:32px;box-sizing:border-box;display:inline-flex;align-items:center;gap:7px;
+  padding:0 14px;background:var(--accent-strong);color:#fff;border:0;border-radius:10px;
   font:13px var(--sans);cursor:pointer;white-space:nowrap;
   transition:filter calc(.2s * var(--animd)),transform calc(.25s * var(--animd))}
-.auto-new:hover{filter:brightness(1.06)}
-.auto-new:active{transform:scale(.97)}
-.auto-new svg{width:15px;height:15px}
+.tk-filters .auto-new:hover{filter:brightness(1.06)}
+.tk-filters .auto-new:active{transform:scale(.97)}
+.tk-filters .auto-new svg{width:15px;height:15px}
 /* 输入弹窗（promptBox）：单行输入 + 确定 / 取消，卡片样式复用 .cfmb */
 .pibi{width:100%;margin:14px 0 0;padding:9px 12px;font:13px var(--sans);color:var(--fg);
   background:var(--input);border:.5px solid var(--line);border-radius:8px;outline:none}
@@ -3713,12 +3713,13 @@ async function renderAutoPage() {
   }
 
   // 新建/编辑都走弹窗（#aum）；页面上不再内嵌表单。
-  return '<div class="pg-head auto-head"><div><h2>' + (z ? '自动化' : 'Automation') + '</h2>' +
+  // 「新建任务」与筛选/搜索同一行、靠右，视线不离开列表区。
+  return '<div class="pg-head"><h2>' + (z ? '自动化' : 'Automation') + '</h2>' +
     '<p>' + (z ? '定时执行命令或投递对话——比如每小时巡检、每天晨报、定时跑构建。' : 'Run a command or deliver a prompt on a schedule — hourly checks, daily digests, timed builds.') + '</p></div>' +
-    '<button type="button" class="btn auto-new" id="au-new">' + ic('plus') + '<span>' + (z ? '新建任务' : 'New task') + '</span></button>' +
-    '</div>' +
     '<div class="sksh"><b>' + (z ? '定时任务' : 'Scheduled tasks') + '</b><em>' + total + '</em></div>' +
-    '<div class="tk-filters">' + segBar + '</div>' +
+    '<div class="tk-filters">' + segBar +
+      '<button type="button" class="btn auto-new" id="au-new">' + ic('plus') + '<span>' + (z ? '新建任务' : 'New task') + '</span></button>' +
+    '</div>' +
     '<div class="skl" id="au-list">' + listBody + '</div>';
 }
 
