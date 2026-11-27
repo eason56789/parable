@@ -65,11 +65,26 @@ body.has-bg #sin{background:transparent}
 body.has-bg #snav{background:color-mix(in srgb,var(--side) var(--bg-a),transparent)}
 body.has-bg #sdp{background:color-mix(in srgb,var(--side) var(--bg-a),transparent)}
 /* 设置页整页与其中的输入框：同样透出底图，而不是一块不透明大板。 */
-body.has-bg #card{background:color-mix(in srgb,var(--bg) var(--bg-a),transparent)}
-body.has-bg #modal{background:rgba(0,0,0,.18)}
-body.has-bg .box{background:color-mix(in srgb,var(--input) var(--bg-a),transparent);
-  -webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px)}
+/* 设置页是独立整页：必须完全遮住后方的聊天界面，只让底图与设置内容可见。
+   #modal 用纯底色盖死聊天；#card 自己把底图当作背景重画一遍（cover +
+   同一裁剪位置），再叠一层与其它面板同档的半透明底色。
+   底图参数由 applyBg() 写进 --bg-img / --bg-pos / --bg-filter。 */
+body.has-bg #card{
+  background-image:
+    linear-gradient(var(--bg-a-fill),var(--bg-a-fill)),
+    var(--bg-img,none);
+  background-size:auto,cover;
+  background-position:center,var(--bg-pos,center);
+  background-repeat:no-repeat,no-repeat;
+  background-blend-mode:normal,normal}
 body.has-bg .tk-seg,body.has-bg .seg{background:color-mix(in srgb,var(--hov) 70%,transparent)}
+/* #main 的左上圆角 + 0.5px 描边在有底图时会在顶部形成一道深色缺口
+   （看着像一条黑条）。有底图时去掉圆角与描边，画面整片连续。 */
+body.has-bg #main{border-radius:0;box-shadow:none}
+/* 右上角那排统计按钮（Token / 上下文等）：原本 --hov 实色是一块不透明
+   方块。有底图时改为透明，只保留文字与悬停反馈。 */
+body.has-bg .sbtn{background:transparent;border-color:transparent}
+body.has-bg .sbtn:hover{background:color-mix(in srgb,var(--hov) 60%,transparent)}
 /* 弹窗类保持实色：短文本压在照片上也要可读（与整页半透明不冲突）。 */
 body.has-bg .cfmb,body.has-bg #aum .aumb{background:color-mix(in srgb,var(--bg) 94%,transparent);
   -webkit-backdrop-filter:blur(16px);backdrop-filter:blur(16px)}
@@ -558,6 +573,9 @@ body.chat #sbar{margin-top:10px;opacity:1;transform:none;pointer-events:auto}
 
 #modal{position:fixed;inset:0;z-index:var(--z-modal);display:grid;place-items:center;background:rgba(0,0,0,0);pointer-events:none;transition:background-color calc(.5s * var(--animd)),backdrop-filter calc(.5s * var(--animd))}
 #modal.open{background:rgba(0,0,0,.42);backdrop-filter:blur(4px);pointer-events:auto}
+/* 有底图时设置页必须是「底图 + 设置内容」，不能透出后方聊天：
+   #modal.open 的 42% 黑罩不够，改为整页底色；#card 自己重画底图。 */
+body.has-bg #modal.open{background:var(--bg);backdrop-filter:none;-webkit-backdrop-filter:none}
 /* 设置：全屏沉浸式 —— 左侧竖排导航，右侧内容区 */
 #card{position:fixed;inset:0;width:100vw;height:100vh;height:100dvh;background:var(--bg);border-radius:0;display:flex;overflow:hidden;opacity:0;transform:translateY(12px) scale(.985);box-shadow:none;transition:opacity calc(.45s * var(--animd)),transform calc(.6s * var(--animd)) cubic-bezier(.16,.84,.3,1),background-color calc(.6s * var(--animd))}
 #card.wide{width:100vw}
@@ -3164,9 +3182,18 @@ function applyBg() {
   // 界面各面（顶栏/侧栏/主区/设置页）共用这一档混合比例：用户调高
   // 「透明度」时面板一起变透，而不是只有图片变亮图片跟界面对不上。
   // 映射：opacity 0 → 面板几乎全实（96%），100 → 面板较透（46%）。
+  // 设置页自己重画底图用：把当前底图与裁剪位置/滤镜写进自定义属性。
+  // （设置页遮住了聊天区，需要独立呈现「底图 + 设置」而不是透出后方内容。）
+  document.documentElement.style.setProperty('--bg-img', 'url("' + S.bgImg + '")');
+  document.documentElement.style.setProperty('--bg-pos', (S.bgX | 0) + '% ' + (S.bgY | 0) + '%');
+  document.documentElement.style.setProperty('--bg-filter',
+    'blur(' + Math.max(0, Math.min(40, +S.bgBlur || 0)) + 'px) brightness(' +
+    Math.max(20, Math.min(200, +S.bgBright || 100)) + '%)');
   const o = Math.max(0, Math.min(100, +S.bgOpacity || 0));
   const a = Math.round(96 - o * 0.5);
   document.documentElement.style.setProperty('--bg-a', a + '%');
+  document.documentElement.style.setProperty('--bg-a-fill',
+    'color-mix(in srgb,var(--bg) ' + a + '%,transparent)');
   // 底图固定（不随内容滚动）时背景始终贴着视口——层本身就是 fixed，无需额外处理。
 }
 
