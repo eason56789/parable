@@ -576,6 +576,20 @@ body.chat #sbar{margin-top:10px;opacity:1;transform:none;pointer-events:auto}
 @media(max-width:480px){.sbtn{padding:4px 8px;gap:0}.sbtn>span:nth-child(2){display:none}}
 
 #modal{position:fixed;inset:0;z-index:var(--z-modal);display:grid;place-items:center;background:rgba(0,0,0,0);pointer-events:none;transition:background-color calc(.5s * var(--animd)),backdrop-filter calc(.5s * var(--animd))}
+/* 设置是全屏页，会盖住 #tb 的拖拽区 → 窗口拖不动（用户实测）。
+   这里在页面顶部铺一条 46px 的透明拖拽带（与 #tb 等高），
+   并在右侧留出窗口控制按钮的位置。 */
+/* 拖拽带只铺在右侧内容区上方（左侧导航栏自带 drag-region 且要让按钮可点），
+   这样既恢复拖窗，又不遮挡「返回」与设置搜索框。 */
+#setdrag{position:absolute;top:0;left:230px;right:138px;height:46px;z-index:2;
+  pointer-events:auto;cursor:default}
+body:not(.desktop) #setdrag{right:0}
+/* 窄屏导航栏折叠，拖拽带铺满整条。 */
+@media(max-width:760px){#setdrag{left:0}}
+/* #sback 整行可拖动（它是设置页最像标题栏的一条）；
+   返回按钮自己处理点击，不再把事件交给拖拽。 */
+#sback[data-tauri-drag-region]{cursor:default;user-select:none}
+#sback>button{position:relative;z-index:1}
 #modal.open{background:rgba(0,0,0,.42);backdrop-filter:blur(4px);pointer-events:auto}
 /* 有底图时设置页必须是「底图 + 设置内容」，不能透出后方聊天：
    #modal.open 的 42% 黑罩不够，改为整页底色；#card 自己重画底图。 */
@@ -2259,7 +2273,7 @@ body.r2-ws-drag #r2-ws{transition:none}
     </aside>
   </div>
 </div>
-<div id="modal" role="dialog" aria-modal="true" aria-label="设置"><div id="card"><nav id="snav"></nav><div id="sp"></div></div></div>
+<div id="modal" role="dialog" aria-modal="true" aria-label="设置"><div id="setdrag" data-tauri-drag-region></div><div id="card"><nav id="snav"></nav><div id="sp"></div></div></div>
 <div id="cmdk"><div class="cmdb"><input id="cmdin" class="cmdin" placeholder="搜索对话或输入命令…" spellcheck="false" autocomplete="off"><div class="cmdl" id="cmdl"></div><div class="cmdf"><span><b>↑↓</b>选择</span><span><b>↵</b>打开</span><span><b>esc</b>关闭</span></div></div></div>
 <div id="kbd"><div class="kbdc" id="kbdc"></div></div>
 <div id="cfm"><div class="cfmb">
@@ -11795,7 +11809,8 @@ function nav() {
   const btn = k => '<button data-t="' + k + '" class="' + (k === tab ? 'on' : '') + '" data-label="' + t('s_' + k) + '">' +
     t('s_' + k) + '</button>';
   $('#snav').innerHTML =
-    '<div id="sback"><button data-back title="' + t('close') + '">' + ic('back') + '</button>' +
+    '<div id="sback" data-tauri-drag-region>'+
+      '<button data-back title="' + t('close') + '">' + ic('back') + '</button>' +
     '<span class="sbx"><b>' + t('set') + '</b><span>' + (z ? '返回工作区' : 'Back to workspace') + '</span></span></div>' +
     '<input id="sfind" placeholder="' + (z ? '搜索设置' : 'Search settings') + '" spellcheck="false" autocomplete="off">' +
     TGRP.map(g => (g.tabs.length > 1 ? '<div class="sgrp" data-grp="' + g.k + '">' + t(g.k) + '</div>' : '') +
