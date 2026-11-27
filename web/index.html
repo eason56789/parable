@@ -933,6 +933,51 @@ button.tk-prompt{width:100%;text-align:left;border:0;cursor:pointer}
   transition:opacity calc(.26s * var(--animd)) ease,transform calc(.34s * var(--animd)) cubic-bezier(.16,.84,.3,1)}
 #cfm.open .cfmb{opacity:1;transform:none}
 #pib.open .cfmb{opacity:1;transform:none}
+/* 自动化任务弹窗：与确认框同一套遮罩/卡片/动画（#cfm 同款），卡片更宽以容纳表单。 */
+#aum{position:fixed;inset:0;z-index:120;display:grid;place-items:center;padding:20px;
+  background:rgba(0,0,0,0);-webkit-backdrop-filter:blur(0);backdrop-filter:blur(0);
+  opacity:0;pointer-events:none;
+  transition:opacity calc(.28s * var(--animd)) ease,background-color calc(.28s * var(--animd)) ease,backdrop-filter calc(.28s * var(--animd)) ease}
+#aum.open{opacity:1;pointer-events:auto;background:rgba(0,0,0,.34);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)}
+/* 布局常驻，透明度/位移由隐藏态与 #aum.open 控制（特异性压过 .cfmb 的初始态）。 */
+#aum .aumb{width:min(660px,94vw);max-height:88vh;display:flex;flex-direction:column;padding:0;
+  opacity:0;transform:translateY(10px) scale(.97)}
+#aum.open .aumb{opacity:1;transform:none}
+.aum-hd{display:flex;align-items:center;gap:10px;padding:18px 22px 12px}
+.aum-hd b{font:600 15.5px var(--sans);color:var(--fg)}
+.aum-x{margin-left:auto;width:26px;height:26px;border:0;border-radius:7px;background:transparent;
+  color:var(--fg2);font:18px/1 var(--sans);cursor:pointer;transition:background-color calc(.2s * var(--animd))}
+.aum-x:hover{background:var(--hov);color:var(--fg)}
+.aum-bd{padding:2px 22px 4px;overflow:auto;min-height:0}
+.aum-ft{display:flex;justify-content:flex-end;gap:8px;padding:12px 22px 18px;border-top:.5px solid var(--line);margin-top:12px}
+/* 弹窗里 .tk-form 去掉自带边框/留白：卡片本身就是容器，避免「框中框」。 */
+.aum-bd .tk-form{margin:0;padding:0;border:0;border-radius:0;gap:10px}
+/* 弹窗内表单：控件统一间距与盒模型，行内控件等宽自适应，文本框整行撑满。 */
+.aum-bd .tk-row{width:100%;align-items:center}
+.aum-bd .tk-row>.tk-lbl{min-width:52px;flex:none}
+.aum-bd .tk-row>input:not([type=checkbox]):not([type=radio]),
+.aum-bd .tk-row>select{flex:1 1 0;min-width:0;box-sizing:border-box}
+/* 固定宽度的数字/时间/日期控件不参与拉伸，保持紧凑。 */
+.aum-bd .tk-row>input[type=number]{flex:none;width:64px}
+.aum-bd .tk-row>input[type=time],
+.aum-bd .tk-row>input[type=datetime-local]{flex:none}
+.aum-bd textarea{display:block;width:100%;box-sizing:border-box;min-height:64px;resize:vertical}
+.aum-bd .tk-form input,.aum-bd .tk-form textarea,.aum-bd .tk-form select{
+  background:var(--input);border:.5px solid var(--line);border-radius:10px;
+  padding:8px 12px;color:inherit;font:13px var(--sans);outline:0}
+.aum-bd .tk-form input::placeholder,.aum-bd .tk-form textarea::placeholder{color:var(--fg2);opacity:.7}
+.aum-bd .tk-form input:focus,.aum-bd .tk-form textarea:focus,.aum-bd .tk-form select:focus{
+  border-color:color-mix(in srgb,var(--fg) 30%,var(--line))}
+/* 自动化页头：标题区 + 右侧「新建任务」主按钮 */
+.auto-head{display:flex;align-items:flex-start;gap:16px}
+.auto-head>div{min-width:0;flex:1}
+.auto-new{flex:none;display:inline-flex;align-items:center;gap:7px;padding:8px 15px;
+  background:var(--accent-strong);color:#fff;border:0;border-radius:10px;
+  font:13px var(--sans);cursor:pointer;white-space:nowrap;
+  transition:filter calc(.2s * var(--animd)),transform calc(.25s * var(--animd))}
+.auto-new:hover{filter:brightness(1.06)}
+.auto-new:active{transform:scale(.97)}
+.auto-new svg{width:15px;height:15px}
 /* 输入弹窗（promptBox）：单行输入 + 确定 / 取消，卡片样式复用 .cfmb */
 .pibi{width:100%;margin:14px 0 0;padding:9px 12px;font:13px var(--sans);color:var(--fg);
   background:var(--input);border:.5px solid var(--line);border-radius:8px;outline:none}
@@ -2125,6 +2170,15 @@ body.r2-ws-drag #r2-ws{transition:none}
 <div id="cfm"><div class="cfmb">
   <div class="cfmt"></div>
   <div class="cfma"><button class="btn ghost" data-cf="0"></button><button class="btn danger" data-cf="1"></button></div>
+</div></div>
+<!-- 自动化任务弹窗（新建/编辑共用）：卡片样式与动效沿用 .cfmb -->
+<div id="aum"><div class="cfmb aumb">
+  <div class="aum-hd"><b id="aum-title"></b><button type="button" class="aum-x" id="aum-x" aria-label="Close">×</button></div>
+  <div class="aum-bd" id="aum-fields"></div>
+  <div class="aum-ft">
+    <button class="btn ghost" id="aum-cancel"></button>
+    <button class="btn" id="aum-save"></button>
+  </div>
 </div></div>
 <div id="pib"><div class="cfmb">
   <div class="cfmt"></div>
@@ -3658,33 +3712,14 @@ async function renderAutoPage() {
     listBody = rows + '<div class="pempty" id="au-nomatch" hidden>' + esc(t('auto_empty_nomatch')) + '</div>';
   }
 
-  const editTask = AU.editId ? AU_TASKS.find(x => x.id === AU.editId) : null;
-  const editPanel = editTask
-    ? '<div class="sksh"><b>' + esc(t('auto_edit_title')) + '</b>' +
-        '<span class="fl"></span>' +
-        '<button type="button" class="btn" id="et-cancel">' + esc(t('auto_cancel')) + '</button>' +
-      '</div>' +
-      '<div class="tk-form editing" id="et-form">' + auFormFields('et') +
-        '<div class="tk-row">' +
-          '<span class="fl"></span>' +
-          '<button type="button" class="btn" id="et-save">' + esc(t('auto_save')) + '</button>' +
-        '</div>' +
-      '</div>'
-    : '';
-
-  return '<div class="pg-head"><h2>' + (z ? '自动化' : 'Automation') + '</h2>' +
+  // 新建/编辑都走弹窗（#aum）；页面上不再内嵌表单。
+  return '<div class="pg-head auto-head"><div><h2>' + (z ? '自动化' : 'Automation') + '</h2>' +
     '<p>' + (z ? '定时执行命令或投递对话——比如每小时巡检、每天晨报、定时跑构建。' : 'Run a command or deliver a prompt on a schedule — hourly checks, daily digests, timed builds.') + '</p></div>' +
+    '<button type="button" class="btn auto-new" id="au-new">' + ic('plus') + '<span>' + (z ? '新建任务' : 'New task') + '</span></button>' +
+    '</div>' +
     '<div class="sksh"><b>' + (z ? '定时任务' : 'Scheduled tasks') + '</b><em>' + total + '</em></div>' +
     '<div class="tk-filters">' + segBar + '</div>' +
-    '<div class="skl" id="au-list">' + listBody + '</div>' +
-    editPanel +
-    '<div class="sksh"><b>' + (z ? '新建任务' : 'New task') + '</b></div>' +
-    '<div class="tk-form" id="nt-form">' + auFormFields('nt') +
-      '<div class="tk-row">' +
-        '<span class="fl"></span>' +
-        '<button type="button" class="btn" id="nt-add">' + (z ? '创建' : 'Create') + '</button>' +
-      '</div>' +
-    '</div>';
+    '<div class="skl" id="au-list">' + listBody + '</div>';
 }
 
 /** 任务卡展开后拉取运行历史；接口未就绪时静默隐藏该区域。 */
@@ -3819,133 +3854,156 @@ function bindAutoPage(root) {
     });
   });
 
-  // —— 新建表单 ——
-  const ntForm = auWireForm(root, 'nt', null);
-  const addBtn = root.querySelector('#nt-add');
-  if (addBtn && ntForm) {
-    addBtn.onclick = async () => {
-      const c = ntForm.readCommon();
-      if (!c) return;
-      try {
+  // —— 新建 / 编辑：同一个弹窗（#aum），卡片样式与动效沿用确认框 ——
+  const newBtn = root.querySelector('#au-new');
+  if (newBtn) newBtn.onclick = () => auOpenTask('');
+  root.querySelectorAll('.taskrow [data-act="edit"]').forEach(b => {
+    b.onclick = ev => { ev.stopPropagation(); auOpenTask(b.closest('.taskrow').dataset.id); };
+  });
+}
+
+/* ---------------------------------------------------- 任务弹窗 */
+
+/** 打开任务弹窗：taskId 为空 = 新建，否则编辑（回填既有值）。 */
+function auOpenTask(taskId) {
+  const z = S.lang === 'zh';
+  const wrap = $('#aum');
+  const bd = $('#aum-fields');
+  const task = taskId ? (AU_TASKS || []).find(x => x.id === taskId) : null;
+  $('#aum-title').textContent = task ? t('auto_edit_title') : (z ? '新建任务' : 'New task');
+  $('#aum-save').textContent = task ? t('auto_save') : (z ? '创建' : 'Create');
+  $('#aum-cancel').textContent = t('auto_cancel');
+  // 字段套一层 .tk-form：控件基础样式（背景/边框/圆角/内边距）都定义在它下面。
+  bd.innerHTML = '<div class="tk-form" id="ns-form">' + auFormFields('ns') + '</div>';
+  const form = auWireForm(bd, 'ns', task);
+  if (!form) return;
+
+  if (task) {
+    const g = id => bd.querySelector('#ns-' + id);
+    const tm = task.timing || {};
+    const isShell = task.action && task.action.kind === 'shell';
+    g('name').value = task.name || '';
+    g('action').value = isShell ? 'shell' : 'agent';
+    g('prompt').value = task.prompt || '';
+    g('command').value = (task.action && task.action.command) || '';
+    g('target').value = 'reuse';
+    const mdl = task.modelSel || task.model_sel || '';
+    if (mdl && form.modelSel) {
+      let found = false;
+      form.modelSel.querySelectorAll('option').forEach(o => { if (o.value === mdl) found = true; });
+      if (!found) {
+        const o = document.createElement('option');
+        o.value = mdl; o.textContent = mdl;
+        form.modelSel.append(o);
+      }
+      form.modelSel.value = mdl;
+    }
+    const kind = tm.kind || 'every';
+    g('kind').value = ['every', 'daily', 'weekly', 'after', 'at', 'cron'].indexOf(kind) >= 0 ? kind : 'every';
+    if (kind === 'every') {
+      const s = Math.max(60, +tm.every_seconds || 300);
+      if (s % 3600 === 0 && s >= 3600) { g('num').value = s / 3600; g('unit').value = 'hour'; }
+      else { g('num').value = Math.max(1, Math.round(s / 60)); g('unit').value = 'min'; }
+    } else if (kind === 'after') {
+      const s = Math.max(1, +tm.after_seconds || 5);
+      if (s % 3600 === 0 && s >= 3600) { g('num').value = s / 3600; g('unit').value = 'hour'; }
+      else { g('num').value = s; g('unit').value = 'min'; }
+    } else if (kind === 'daily') {
+      g('time').value = tm.time || '09:00';
+    } else if (kind === 'weekly') {
+      g('time').value = tm.time || '09:00';
+      const wd = (tm.weekdays || []).map(x => +x);
+      bd.querySelectorAll('#ns-wdrow input[type="checkbox"]').forEach(cb => {
+        cb.checked = wd.indexOf(+cb.value) >= 0;
+      });
+    } else if (kind === 'at') {
+      g('at').value = auRFCToLocalInput(tm.at);
+    } else if (kind === 'cron') {
+      g('cron').value = tm.expression || '';
+    }
+    const tgt = task.target;
+    const tgtKind = (tgt && typeof tgt === 'object') ? tgt.kind : tgt;
+    if (tgtKind === 'existing') {
+      const boundSid = (tgt && typeof tgt === 'object') ? (tgt.session_id || tgt.sessionId || '') : '';
+      g('target').value = boundSid ? 'existing' : 'reuse';
+    } else if (tgtKind === 'new_each_time' || tgtKind === 'new') g('target').value = 'new';
+    else g('target').value = 'reuse';
+    g('kind').dispatchEvent(new Event('change'));
+    g('action').dispatchEvent(new Event('change'));
+  }
+
+  let done = false;
+  const prevFocus = document.activeElement;
+  const onKey = e => {
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); finish(); }
+  };
+  const finish = () => {
+    if (done) return;
+    done = true;
+    wrap.classList.remove('open');
+    document.body.classList.remove('modal-open');
+    document.removeEventListener('keydown', onKey, true);
+    wrap.onclick = null;
+    if (prevFocus && prevFocus.focus) prevFocus.focus();
+  };
+  document.addEventListener('keydown', onKey, true);
+  wrap.onclick = e => { if (e.target === wrap) finish(); };
+  $('#aum-x').onclick = finish;
+  $('#aum-cancel').onclick = finish;
+  $('#aum-save').onclick = async () => {
+    const c = form.readCommon();
+    if (!c) return;
+    const btn = $('#aum-save');
+    btn.disabled = true;
+    try {
+      if (task) {
+        const body = {
+          name: c.name,
+          prompt: c.prompt,
+          action: c.isShell ? { kind: 'shell', command: c.command } : { kind: 'agent' },
+          timing: c.timing,
+          model: c.isShell ? '' : (form.modelSel ? form.modelSel.value : '')
+        };
+        if (c.isShell) body.command = c.command;
+        if (!c.isShell) {
+          if (c.tgt === 'existing') {
+            const bound = (task.target && typeof task.target === 'object')
+              ? (task.target.session_id || task.target.sessionId || '') : '';
+            body.target = { kind: 'existing', session_id: (conv && conv.id) || bound || '' };
+          } else {
+            body.target = c.tgt === 'new' ? 'new' : 'reuse';
+          }
+        }
+        await api('/schedule/' + task.id, { method: 'PATCH', body });
+        toast(t('auto_saved'));
+      } else {
         await api('/schedule', {
           method: 'POST',
           body: {
             name: c.name,
             prompt: c.prompt,
             action: c.isShell ? { kind: 'shell', command: c.command } : { kind: 'agent' },
-            model: c.isShell ? '' : (ntForm.modelSel ? ntForm.modelSel.value : ''),
+            model: c.isShell ? '' : (form.modelSel ? form.modelSel.value : ''),
             timing: c.timing,
-            target: c.tgt === 'existing' ? { kind: 'existing', session_id: (conv && conv.id) || '' } : c.tgt,
+            target: c.tgt === 'existing'
+              ? { kind: 'existing', session_id: (conv && conv.id) || '' }
+              : c.tgt,
             session_id: (conv && conv.id) || ''
           }
         });
         toast(t('auto_created'));
-        go('auto', true);
-      } catch (e) { toast(e.message); }
-    };
-  }
-
-  // —— 编辑面板（与新建表单同构，保存走 PATCH） ——
-  const etFormEl = root.querySelector('#et-form');
-  const editTask = AU.editId ? AU_TASKS.find(x => x.id === AU.editId) : null;
-  if (etFormEl && editTask) {
-    const et = auWireForm(root, 'et', editTask);
-    // 回填既有值
-    if (et) {
-      const g = id => root.querySelector('#et-' + id);
-      const tm = editTask.timing || {};
-      const isShell = editTask.action && editTask.action.kind === 'shell';
-      g('name').value = editTask.name || '';
-      g('action').value = isShell ? 'shell' : 'agent';
-      g('prompt').value = editTask.prompt || '';
-      g('command').value = (editTask.action && editTask.action.command) || '';
-      g('target').value = 'reuse';
-      const mdl = editTask.modelSel || editTask.model_sel || '';
-      if (mdl && et.modelSel) {
-        let found = false;
-        et.modelSel.querySelectorAll('option').forEach(o => { if (o.value === mdl) found = true; });
-        if (!found) {
-          const o = document.createElement('option');
-          o.value = mdl;
-          o.textContent = mdl;
-          et.modelSel.append(o);
-        }
-        et.modelSel.value = mdl;
       }
-      // 时机回填：把后端的 timing 还原成表单的各控件
-      const kind = tm.kind || 'every';
-      g('kind').value = ['every', 'daily', 'weekly', 'after', 'at', 'cron'].indexOf(kind) >= 0 ? kind : 'every';
-      if (kind === 'every') {
-        const s = Math.max(60, +tm.every_seconds || 300);
-        if (s % 3600 === 0 && s >= 3600) { g('num').value = s / 3600; g('unit').value = 'hour'; }
-        else { g('num').value = Math.max(1, Math.round(s / 60)); g('unit').value = 'min'; }
-      } else if (kind === 'after') {
-        const s = Math.max(1, +tm.after_seconds || 5);
-        if (s % 3600 === 0 && s >= 3600) { g('num').value = s / 3600; g('unit').value = 'hour'; }
-        else { g('num').value = s; g('unit').value = 'min'; }
-      } else if (kind === 'daily') {
-        g('time').value = tm.time || '09:00';
-      } else if (kind === 'weekly') {
-        g('time').value = tm.time || '09:00';
-        const wd = (tm.weekdays || []).map(x => +x);
-        root.querySelectorAll('#et-wdrow input[type="checkbox"]').forEach(cb => {
-          cb.checked = wd.indexOf(+cb.value) >= 0;
-        });
-      } else if (kind === 'at') {
-        g('at').value = auRFCToLocalInput(tm.at);
-      } else if (kind === 'cron') {
-        g('cron').value = tm.expression || '';
-      }
-      // 目标：existing 才有意义
-      const tgt = editTask.target;
-      const tgtKind = (tgt && typeof tgt === 'object') ? tgt.kind : tgt;
-      if (tgtKind === 'existing') {
-        // 「投递到当前会话」在没有活动会话时被禁用，选中会被浏览器丢掉：
-        // 保留 existing 语义（有绑定会话 id 就用它，没有则提示改目标）。
-        const boundSid = (tgt && typeof tgt === 'object') ? (tgt.session_id || tgt.sessionId || '') : '';
-        if (boundSid) g('target').value = 'existing';
-        else g('target').value = 'reuse';
-      } else if (tgtKind === 'new_each_time' || tgtKind === 'new') g('target').value = 'new';
-      else g('target').value = 'reuse';
-      // 重新跑一次联动（值变了，display 要跟着走）
-      g('kind').dispatchEvent(new Event('change'));
-      g('action').dispatchEvent(new Event('change'));
+      finish();
+      AU.editId = '';
+      go('auto', true);
+    } catch (e) {
+      toast(e.message);
+    } finally {
+      btn.disabled = false;
     }
-    const cancelBtn = root.querySelector('#et-cancel');
-    if (cancelBtn) cancelBtn.onclick = () => { AU.editId = ''; go('auto', true); };
-    const saveBtn = root.querySelector('#et-save');
-    if (saveBtn && et) {
-      saveBtn.onclick = async () => {
-        const c = et.readCommon();
-        if (!c) return;
-        try {
-          const body = {
-            name: c.name,
-            prompt: c.prompt,
-            action: c.isShell ? { kind: 'shell', command: c.command } : { kind: 'agent' },
-            timing: c.timing,
-            model: c.isShell ? '' : (et.modelSel ? et.modelSel.value : '')
-          };
-          // 目标也能改：existing 必须带 session_id，否则后端会拒。
-          if (!c.isShell) {
-            if (c.tgt === 'existing') {
-              // 优先用当前会话；没有就用任务原先绑定的那一个。
-              const bound = (editTask.target && typeof editTask.target === 'object')
-                ? (editTask.target.session_id || editTask.target.sessionId || '') : '';
-              const sid = (conv && conv.id) || bound || '';
-              body.target = { kind: 'existing', session_id: sid };
-            } else {
-              body.target = c.tgt === 'new' ? 'new' : 'reuse';
-            }
-          }
-          await api('/schedule/' + editTask.id, { method: 'PATCH', body });
-          toast(t('auto_saved'));
-          AU.editId = '';
-          go('auto', true);
-        } catch (e) { toast(e.message); }
-      };
-    }
-  }
+  };
+  document.body.classList.add('modal-open');
+  wrap.classList.add('open');
 }
 
 /* ---------------------------------------------------- 插件 */
