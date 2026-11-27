@@ -47,10 +47,113 @@ pub struct FileContent {
     pub text: String,
     /// 1-based line number of the first returned line.
     pub offset: u64,
-    /// Total number of lines in the file.
+    /// Total number of lines in the file. **0 for binary files**: counting
+    /// newlines in a PNG is meaningless and the UI printed things like
+    /// "56 KB · 174 行" under an image.
     pub total_lines: u64,
     /// `true` when more lines follow after `offset + limit`.
     pub truncated: bool,
+    /// MIME type when the file is an image (sniffed from magic bytes, not the
+    /// extension), so the side pane can render a preview instead of hex noise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+}
+
+/// Large images are still previewable; this cap only guards the JSON path.
+const MAX_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
+
+/// Image MIME sniffing from magic bytes.
+///
+/// Extensions lie: a `.png` is sometimes a JPEG, and a `.svg` is text. The UI
+/// decides "show a picture" vs "show text" from this, so it must look at the
+/// bytes. Returns `None` for anything that is not a recognisable raster image.
+pub fn image_mime(name: &str, head: &[u8]) -> Option<&'static str> {
+    // PNG: 89 50 4E 47 0D 0A 1A 0A
+    if head.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
+        return Some("image/png");
+    }
+    // JPEG: FF D8 FF
+    if head.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return Some("image/jpeg");
+    }
+    // GIF87a / GIF89a
+    if head.starts_with(b"GIF87a") || head.starts_with(b"GIF89a") {
+        return Some("image/gif");
+    }
+    // RIFF....WEBP
+    if head.len() >= 12 && head.starts_with(b"RIFF") && &head[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    // BMP: "BM"
+    if head.starts_with(b"BM") {
+        return Some("image/bmp");
+    }
+    // ISO-BMFF: ....ftypavif / ....ftypavis
+    if head.len() >= 12 && &head[4..8] == b"ftyp" && (&head[8..12] == b"avif" || &head[8..12] == b"avis") {
+        return Some("image/avif");
+    }
+    // ICO: 00 00 01 00
+    if head.starts_with(&[0x00, 0x00, 0x01, 0x00]) {
+        return Some("image/x-icon");
+    }
+    // SVG is text: only trust it when the file is actually named .svg,
+    // otherwise every XML-ish text file would be treated as a picture.
+    let ext = Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    if ext == "svg" {
+        let probe = String::from_utf8_lossy(&head[..head.len().min(512)]);
+        let probe = probe.trim_start().to_ascii_lowercase();
+        if probe.starts_with("<svg") || probe.starts_with("<?xml") || probe.starts_with("<!doctype svg") {
+            return Some("image/svg+xml");
+        }
+    }
+    None
+}
+
+/// Raw image bytes for the side pane / chat markdown renderer.
+///
+/// Refuses anything that is not a recognised image so this endpoint can never
+/// be used as a generic "read any file, bypassing the text blacklist" hole.
+pub fn read_image(workspace: &Path, raw: &str) -> Result<(Vec<u8>, String, String), HarnessError> {
+    let path = resolve(workspace, raw)?;
+    let meta = std::fs::metadata(&path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            HarnessError::NotFound(path.display().to_string())
+        } else {
+            HarnessError::Io(e)
+        }
+    })?;
+    if meta.is_dir() {
+        return Err(HarnessError::Tool(format!("{} is a directory", path.display())));
+    }
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    if is_secret_name(&name) {
+        return Err(HarnessError::Tool(format!(
+            "{} 是密钥/凭据文件，已拒绝在面板中打开",
+            path.display()
+        )));
+    }
+    if meta.len() > MAX_IMAGE_BYTES {
+        return Err(HarnessError::Tool(format!(
+            "{} is {} bytes; too large to preview",
+            path.display(),
+            meta.len()
+        )));
+    }
+    let bytes = std::fs::read(&path).map_err(HarnessError::Io)?;
+    let Some(mime) = image_mime(&name, &bytes) else {
+        return Err(HarnessError::Tool(format!(
+            "{} is not a recognised image",
+            path.display()
+        )));
+    };
+    Ok((bytes, mime.to_string(), name))
 }
 
 /// A filename search hit.
@@ -217,12 +320,31 @@ pub fn read(workspace: &Path, raw: &str, offset: u64, limit: u64) -> Result<File
     }
 
     let bytes = std::fs::read(&path).map_err(HarnessError::Io)?;
+    // 图片（按魔数判定，扩展名不算数）：不按行切、不做 lossy 解码——把 PNG
+    // 的字节按 UTF-8 读成文本，既浪费内存又会让面板显示一堆乱码，还会把
+    // 「换行字节数」当成行数报出来（用户看到 PNG 底下写着「174 行」）。
+    let image = image_mime(&file_name, &bytes);
+    if let Some(mime) = image {
+        return Ok(FileContent {
+            path: rel(workspace, &path),
+            name: file_name,
+            size: meta.len(),
+            binary: true,
+            text: String::new(),
+            offset: 1,
+            total_lines: 0,
+            truncated: false,
+            image: Some(mime.to_string()),
+        });
+    }
     // B-17：先尝试一次性 UTF-8 解码，避免为判定编码先克隆整份字节。
     let (binary, text) = match String::from_utf8(bytes) {
         Ok(s) => (false, s),
         Err(e) => (true, String::from_utf8_lossy(e.as_bytes()).into_owned()),
     };
-    let lines: Vec<&str> = text.lines().collect();
+    // 二进制文件没有「行」的概念：`lines()` 会把任意 0x0A 字节当成换行，
+    // 报出来的行数纯属噪音。只有文本才统计。
+    let lines: Vec<&str> = if binary { Vec::new() } else { text.lines().collect() };
     let total_lines = lines.len() as u64;
 
     let start = offset.saturating_sub(1) as usize;
@@ -247,6 +369,7 @@ pub fn read(workspace: &Path, raw: &str, offset: u64, limit: u64) -> Result<File
         offset: start as u64 + 1,
         total_lines,
         truncated,
+        image: None,
     })
 }
 
@@ -324,6 +447,64 @@ mod tests {
         std::fs::write(dir.join("a.txt"), "one\ntwo\nthree\n").unwrap();
         std::fs::write(dir.join("sub/b.md"), "# b").unwrap();
         dir
+    }
+
+    #[test]
+    fn image_mime_sniffs_magic_bytes_not_extension() {
+        // 真 PNG 头
+        let png = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13];
+        assert_eq!(image_mime("a.png", &png), Some("image/png"));
+        // 扩展名说谎：叫 .png 但字节是 JPEG
+        let jpg = [0xFF, 0xD8, 0xFF, 0xE0, 0, 16];
+        assert_eq!(image_mime("a.png", &jpg), Some("image/jpeg"));
+        // GIF / WEBP / BMP
+        assert_eq!(image_mime("x", b"GIF89a......"), Some("image/gif"));
+        let mut webp = Vec::from(*b"RIFF\0\0\0\0WEBPVP8 ");
+        webp.truncate(12);
+        assert_eq!(image_mime("x.webp", &webp), Some("image/webp"));
+        assert_eq!(image_mime("x.bmp", b"BM\0\0"), Some("image/bmp"));
+        // 文本不是图片
+        assert_eq!(image_mime("notes.txt", b"hello world"), None);
+        // SVG 只在 .svg 名下、且内容像 SVG 时才算图片
+        assert_eq!(image_mime("a.svg", b"<svg xmlns=\"...\">"), Some("image/svg+xml"));
+        assert_eq!(image_mime("a.txt", b"<svg>"), None);
+    }
+
+    #[test]
+    fn read_reports_image_and_no_line_count() {
+        let ws = tmp_ws("img");
+        // 一个最小合法 PNG（1x1），带若干 0x0A 字节——旧实现会把它们当换行数出来。
+        let png: [u8; 33] = [
+            0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13, b'I', b'H', b'D', b'R',
+            0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 0x0A, 0x0A, 0x0A, 0,
+        ];
+        std::fs::write(ws.join("p.png"), png).unwrap();
+        let f = read(&ws, "p.png", 1, 500).unwrap();
+        assert_eq!(f.image.as_deref(), Some("image/png"));
+        assert!(f.binary);
+        assert_eq!(f.text, "", "image bytes must not be decoded as text");
+        assert_eq!(f.total_lines, 0, "an image has no line count");
+        // 文本文件仍然正常统计
+        let t = read(&ws, "a.txt", 1, 500).unwrap();
+        assert_eq!(t.image, None);
+        assert_eq!(t.total_lines, 3);
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn read_image_refuses_non_images_and_escapes() {
+        let ws = tmp_ws("raw");
+        // 文本文件不能走图片接口
+        assert!(read_image(&ws, "a.txt").is_err());
+        // 越界路径拒绝
+        assert!(read_image(&ws, "../../../Windows/win.ini").is_err());
+        // 真图片可以
+        std::fs::write(ws.join("ok.gif"), b"GIF89a\x01\x00\x01\x00").unwrap();
+        let (bytes, mime, name) = read_image(&ws, "ok.gif").unwrap();
+        assert_eq!(mime, "image/gif");
+        assert_eq!(name, "ok.gif");
+        assert_eq!(bytes.len(), 10);
+        let _ = std::fs::remove_dir_all(&ws);
     }
 
     #[test]

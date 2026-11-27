@@ -347,6 +347,8 @@ pub fn build_router(state: SharedState) -> Router {
         // 侧边栏(side pane):文件浏览 / git 审查 / 浏览器 / 终端
         .route("/fs/tree", get(fs_tree))
         .route("/fs/file", get(fs_file))
+        .route("/fs/raw", get(fs_raw))
+        .route("/img-proxy", get(img_proxy))
         .route("/fs/search", get(fs_search))
         .route("/git/status", get(git_status))
         .route("/git/diff", get(git_diff))
@@ -454,9 +456,13 @@ async fn index(
 ///    iframe 嵌入（配合 Host/Origin 守卫，防点击劫持与嵌入驱动的 token 泄露）；
 ///  - `form-action 'self'`：页面表单只能提交回本服务，防表单劫持外传。
 fn apply_html_security_headers(headers: &mut axum::http::HeaderMap) {
+    // `connect-src` 放行 `blob:` / `data:`：图片灯箱要用 fetch 把 blob URL 读回
+    // 字节（复制到剪贴板 / 另存为 / 添加到聊天）。这两者都是页面自己创建的
+    // 同源数据，不是网络出口，不会扩大外联面——CSP 对 fetch 的 blob:/data:
+    // 与对 <img src> 的放行是两套独立规则，漏了这条链路上全部会 TypeError。
     const CSP: &str = "default-src 'self'; script-src 'self' 'unsafe-inline'; \
         style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; \
-        font-src 'self' data:; connect-src 'self' https://api.github.com; \
+        font-src 'self' data:; connect-src 'self' blob: data: https://api.github.com; \
         frame-ancestors 'none'; form-action 'self'; base-uri 'self'";
     headers.insert(
         axum::http::header::CONTENT_SECURITY_POLICY,
@@ -3913,6 +3919,88 @@ async fn fs_file(
     let limit = q.get("limit").and_then(|v| v.parse().ok()).unwrap_or(500);
     match crate::wsfs::read(&ws, &path, offset, limit) {
         Ok(f) => Json(json!({"file": f})).into_response(),
+        Err(e) => ws_error(&e),
+    }
+}
+
+/// GET /api/fs/raw — stream a workspace image back to the pane / lightbox.
+///
+/// The text endpoint (`/fs/file`) is line-oriented and refuses anything that is
+/// not UTF-8, so it cannot serve a picture. This one returns raw bytes with the
+/// sniffed MIME type and `nosniff`, and only ever serves recognised images —
+/// that restriction is what keeps it from becoming a generic file-exfil hole.
+async fn fs_raw(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    let ws = workspace_root(&state).await;
+    let path = q.get("path").cloned().unwrap_or_default();
+    match crate::wsfs::read_image(&ws, &path) {
+        Ok((bytes, mime, _name)) => {
+            let mut resp = bytes.into_response();
+            let h = resp.headers_mut();
+            h.insert(
+                axum::http::header::CONTENT_TYPE,
+                HeaderValue::from_str(&mime)
+                    .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")),
+            );
+            h.insert(
+                axum::http::header::X_CONTENT_TYPE_OPTIONS,
+                HeaderValue::from_static("nosniff"),
+            );
+            // 工作区里的文件随时可能被 agent 改写，缓存住会让面板一直显示旧图。
+            h.insert(
+                axum::http::header::CACHE_CONTROL,
+                HeaderValue::from_static("no-store"),
+            );
+            resp
+        }
+        Err(e) => ws_error(&e),
+    }
+}
+
+/// GET /api/img-proxy?url=… — fetch a remote image for the chat renderer.
+///
+/// Markdown written by a model routinely embeds `![](https://…)`. Loading that
+/// directly in the page would leak the reader's IP to arbitrary hosts and is
+/// blocked by the page CSP (`img-src 'self' data: blob:`). Proxying it through
+/// the local server keeps the CSP tight; the outbound request reuses the same
+/// DNS-rebinding/SSRF guard as `web_fetch` (resolve → verify → pin).
+async fn img_proxy(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    let url = q.get("url").cloned().unwrap_or_default();
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return bad_request("only http/https image URLs are supported");
+    }
+    match crate::tools::web::fetch_image(&url).await {
+        Ok((bytes, mime)) => {
+            let mut resp = bytes.into_response();
+            let h = resp.headers_mut();
+            h.insert(
+                axum::http::header::CONTENT_TYPE,
+                HeaderValue::from_str(&mime)
+                    .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")),
+            );
+            h.insert(
+                axum::http::header::X_CONTENT_TYPE_OPTIONS,
+                HeaderValue::from_static("nosniff"),
+            );
+            h.insert(
+                axum::http::header::CACHE_CONTROL,
+                HeaderValue::from_static("private, max-age=300"),
+            );
+            resp
+        }
         Err(e) => ws_error(&e),
     }
 }

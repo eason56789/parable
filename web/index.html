@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <!-- 内容安全策略：本地壳场景保留内联样式/脚本（单文件零构建约束）；
      字体/图片只走自身与 data/blob；外链仅放行更新检查用的 GitHub API。 -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://api.github.com; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; base-uri 'self'; frame-src 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' blob: data: https://api.github.com; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; base-uri 'self'; frame-src 'none'">
 <title>Parable</title>
 <style>
 :root{--bg:#faf9f5;--side:#f5f4ed;--fg:#141413;--fg2:#5f5e58;--line:rgba(31,30,29,.14);--input:#fff;--bubble:#f0eee6;--hov:rgba(31,30,29,.06);--accent:#d97757;
@@ -1337,6 +1337,115 @@ body.spmax #sdp{position:fixed;inset:46px 0 0 0;width:100vw;max-width:none;z-ind
 .spfile{padding:10px 16px 30px}
 .spfile pre{margin:0;white-space:pre-wrap;word-break:break-word;font:12px/1.6 var(--mono);color:var(--fg)}
 .spfmeta{padding:6px 16px;color:var(--fg2);font-size:11.5px;border-bottom:.5px solid var(--line)}
+/* 图片详情：meta 条 + 可点击放大的预览（点击开灯箱）。 */
+.spimgwrap{display:grid;place-items:center;padding:18px 16px 30px;min-height:0}
+.spimgwrap img{max-width:100%;max-height:100%;object-fit:contain;border-radius:9px;cursor:zoom-in;
+  border:.5px solid var(--line);background:
+    repeating-conic-gradient(from 45deg,var(--hov) 0 25%,transparent 0 50%) 0 0/16px 16px}
+.spimgwrap img:hover{border-color:color-mix(in srgb,var(--accent) 50%,var(--line))}
+.spimgmeta{display:flex;align-items:center;gap:8px}
+
+/* ---------------------------------------------------------------- 图片灯箱
+   ZCode 同构：全屏暗底 + 居中图片，顶部浮动工具条（缩放下限 50% / 上限 300%），
+   图片可拖动平移、滚轮缩放、双击复位、←/→ 多图切换、右键菜单四项。
+   层级压在窗口控制按钮（#winctl z-index 60）之上，否则右上角会被挡住。 */
+#iv{position:fixed;inset:0;z-index:200;display:grid;place-items:center;
+  background:rgba(0,0,0,.82);-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);
+  opacity:0;pointer-events:none;transition:opacity calc(.2s * var(--animd)) ease}
+#iv.open{opacity:1;pointer-events:auto}
+#iv-stage{position:absolute;inset:0;display:grid;place-items:center;overflow:hidden;
+  touch-action:none;user-select:none;-webkit-user-select:none}
+#iv-img{max-width:none;max-height:none;transform-origin:center center;will-change:transform;
+  border-radius:6px;box-shadow:0 24px 80px rgba(0,0,0,.55);background:#0b0b0b;
+  transition:transform calc(.18s * var(--animd)) cubic-bezier(.2,.8,.3,1)}
+#iv.dragging #iv-img{transition:none;cursor:grabbing}
+#iv-stage.can-grab{cursor:grab}
+#iv-stage.can-grab:active{cursor:grabbing}
+/* 工具条：与 ZCode 一样浮在右上。右侧必须留够「关闭按钮 + 间距」，
+   否则 × 会压在工具条最后一个按钮上（用户看到的就是两个东西重叠）。 */
+#iv-bar{position:absolute;top:14px;right:calc(14px + 34px + 10px);
+  z-index:3;display:flex;align-items:center;gap:2px;padding:6px;
+  background:color-mix(in srgb,var(--bg) 92%,transparent);color:var(--fg);
+  border:.5px solid var(--line);border-radius:12px;box-shadow:0 16px 44px rgba(0,0,0,.4);
+  -webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px);
+  opacity:0;transform:translateY(-6px);transition:opacity calc(.2s * var(--animd)),transform calc(.24s * var(--animd))}
+#iv.open #iv-bar{opacity:1;transform:none}
+body:not(.desktop) #iv-bar{right:calc(14px + 34px + 10px)}
+#iv-bar .ivb{display:grid;place-items:center;width:30px;height:30px;padding:0;border:0;border-radius:8px;
+  background:none;color:var(--fg);cursor:pointer;flex:none}
+#iv-bar .ivb:hover{background:var(--hov)}
+#iv-bar .ivb:disabled{opacity:.32;cursor:default;background:none}
+#iv-bar .ivb svg{width:17px;height:17px}
+#iv-bar .ivpct{min-width:52px;height:30px;padding:0 6px;border:0;border-radius:8px;background:none;
+  color:var(--fg);font:500 12px/1 var(--mono);cursor:pointer;flex:none;font-variant-numeric:tabular-nums}
+#iv-bar .ivpct:hover{background:var(--hov)}
+#iv-bar .ivsep{width:.5px;height:18px;background:var(--line);margin:0 4px;flex:none}
+#iv-count{min-width:44px;text-align:center;font:11.5px/1 var(--mono);color:var(--fg2);flex:none;
+  font-variant-numeric:tabular-nums;padding:0 6px}
+#iv-count:empty{display:none}
+body.desktop #iv-close{top:calc(46px + 12px)}
+#iv-close{position:absolute;top:14px;right:14px;z-index:4;width:34px;height:34px;padding:0;border:0;
+  border-radius:50%;display:grid;place-items:center;cursor:pointer;color:#fff;
+  background:rgba(0,0,0,.42);-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);
+  transition:background-color .16s}
+/* 桌面壳右上角是自绘的窗口控制条（#winctl，46px 高、z-index 60）。灯箱层级
+   更高，× 压在那一带上会把最小化/关闭挡住——下移一档让开。 */
+body.desktop #iv-close{top:calc(46px + 12px)}
+#iv-close:hover{background:rgba(0,0,0,.62)}
+#iv-close svg{width:17px;height:17px}
+/* 左右切换箭头：只在多图时出现。垂直居中，横向留 16px 边距，
+   避开右上工具条（工具条在顶部 14px，二者不会重叠）。 */
+#iv-prev,#iv-next{position:absolute;top:50%;transform:translateY(-50%);z-index:3;
+  width:40px;height:56px;padding:0;border:0;border-radius:12px;display:none;place-items:center;
+  cursor:pointer;color:#fff;background:rgba(0,0,0,.42);
+  -webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);transition:background-color .16s,opacity .16s}
+#iv-prev{left:16px}#iv-next{right:16px}
+#iv-prev:hover,#iv-next:hover{background:rgba(0,0,0,.68)}
+#iv-prev:disabled,#iv-next:disabled{opacity:.28;cursor:default;background:rgba(0,0,0,.3)}
+#iv-prev svg,#iv-next svg{width:20px;height:20px}
+#iv.multi #iv-prev,#iv.multi #iv-next{display:grid}
+/* hidden 属性必须压过 display:grid（作者样式优先级高于 UA 的 [hidden]） */
+#iv-prev[hidden],#iv-next[hidden]{display:none!important}
+#iv-hint{position:absolute;left:0;right:0;bottom:16px;text-align:center;z-index:2;
+  font:11.5px/1.4 var(--sans);color:rgba(255,255,255,.6);pointer-events:none;
+  opacity:0;transition:opacity calc(.3s * var(--animd))}
+#iv.open #iv-hint{opacity:1}
+/* 放大后图片会超出视口上下沿：两侧压一层极淡的暗角，暗示「可以拖」，
+   否则用户看到画面被截断会以为图坏了。 */
+#iv::before,#iv::after{content:'';position:absolute;left:0;right:0;height:56px;z-index:1;
+  pointer-events:none;opacity:0;transition:opacity calc(.25s * var(--animd))}
+#iv::before{top:0;background:linear-gradient(to bottom,rgba(0,0,0,.55),transparent)}
+#iv::after{bottom:0;background:linear-gradient(to top,rgba(0,0,0,.55),transparent)}
+#iv.panned::before,#iv.panned::after{opacity:1}
+#iv-spin{position:absolute;inset:0;display:none;place-items:center;z-index:2}
+#iv-spin .sp{width:26px;height:26px;border-radius:50%;border:2px solid rgba(255,255,255,.22);
+  border-top-color:#fff;animation:ivspin .8s linear infinite}
+@keyframes ivspin{to{transform:rotate(360deg)}}
+#iv.loading #iv-spin{display:grid}
+#iv-err{position:absolute;inset:0;display:none;place-items:center;padding:40px;z-index:2;
+  color:rgba(255,255,255,.8);font:13px/1.6 var(--sans);text-align:center}
+#iv.broken #iv-err{display:grid}
+/* markdown 正文里的图片：圆角、可点、加载时给骨架。
+   高度上限 420px：一张 827×1170 的截图按宽度铺满会把整屏占掉，聊天记录
+   被一张图截断得完全没法扫读；点开灯箱再看全尺寸。 */
+.mdimg{display:block;max-width:100%;max-height:420px;width:auto;height:auto;margin:0;
+  border-radius:10px;border:.5px solid var(--line);cursor:zoom-in;background:var(--hov)}
+.mdimg:hover{border-color:color-mix(in srgb,var(--accent) 50%,var(--line))}
+/* 包裹层用 inline-block（不是 inline-flex）：flex 容器会让子项的 max-height
+   在收缩计算里失效，420px 上限就白写了。inline-block 下子图按自身比例排布，
+   超宽时由 max-width:100% 收边，同行多图自然换行。 */
+.mdimgw{position:relative;display:inline-block;max-width:100%;margin:10px 8px 10px 0;
+  vertical-align:top;line-height:0}
+.mdimgw.loading{min-width:120px;min-height:80px}
+.mdimgw.loading::before{content:'';position:absolute;inset:0;border-radius:10px;
+  background:linear-gradient(100deg,var(--hov) 30%,color-mix(in srgb,var(--hov) 45%,transparent) 50%,var(--hov) 70%);
+  background-size:220% 100%;animation:mdshim 1.6s linear infinite}
+@keyframes mdshim{to{background-position:-120% 0}}
+/* 加载失败退化成链接时的样式 */
+.mdimglink{color:var(--accent);text-decoration:none;border-bottom:.5px solid color-mix(in srgb,var(--accent) 40%,transparent);
+  word-break:break-all}
+.mdimglink:hover{border-bottom-color:var(--accent)}
+
 /* 审查面板 */
 .spgit{padding:8px 0}
 .spgf{display:flex;align-items:center;gap:8px;padding:6px 16px;cursor:pointer;font:12.5px var(--mono)}
@@ -1549,6 +1658,10 @@ body.spmax #sdp{position:fixed;inset:46px 0 0 0;width:100vw;max-width:none;z-ind
 @keyframes cmdo{from{opacity:1}to{opacity:0;transform:translateY(-3px)}}
 .cmi{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .cmi mark{background:transparent;color:var(--accent);font-weight:600}
+/* 灯箱（z-index 200）里弹出的右键菜单：必须压过灯箱本身，否则菜单被盖住。 */
+#cm.ivmenu{z-index:220}
+#cm .cmi svg{width:16px;height:16px;flex:none;opacity:.85}
+#cm.ivmenu .cmi{gap:9px}
 /* 命令面板条目副标题：原名 .cms 与上下文菜单的弹出子菜单（105 行）同名冲突，
    改名 .cmdsub 分离。 */
 .cmdsub{display:block;font-size:11.5px;color:var(--fg2);opacity:.8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:1px}
@@ -2295,6 +2408,29 @@ body.r2-ws-drag #r2-ws{transition:none}
   <div class="cfma"><button class="btn ghost" data-pi="0"></button><button class="btn" data-pi="1"></button></div>
 </div></div>
 <div id="toast" role="status" aria-live="polite"></div>
+<!-- 图片灯箱：全屏查看 / 缩放 / 平移 / 多图切换 / 另存为 / 复制 / 定位。
+     放在 #cm 之前，右键菜单才能压在它上面。 -->
+<div id="iv" role="dialog" aria-modal="true" aria-label="图片查看器">
+  <div id="iv-stage"><img id="iv-img" alt=""></div>
+  <div id="iv-spin"><span class="sp"></span></div>
+  <div id="iv-err"></div>
+  <div id="iv-bar">
+    <button class="ivb" id="iv-zo" type="button"></button>
+    <button class="ivpct" id="iv-pct" type="button"></button>
+    <button class="ivb" id="iv-zi" type="button"></button>
+    <span class="ivsep"></span>
+    <button class="ivb" id="iv-fit" type="button"></button>
+    <button class="ivb" id="iv-save" type="button"></button>
+    <button class="ivb" id="iv-copy" type="button"></button>
+    <button class="ivb" id="iv-more" type="button"></button>
+    <span class="ivsep"></span>
+    <span id="iv-count"></span>
+  </div>
+  <button id="iv-close" type="button"></button>
+  <button id="iv-prev" type="button"></button>
+  <button id="iv-next" type="button"></button>
+  <div id="iv-hint"></div>
+</div>
 <div id="cm" role="menu"></div>
 <input type="file" id="fileIn" multiple hidden>
 <script>
@@ -2360,6 +2496,11 @@ const IC = {
   lock:'<rect x="5" y="9" width="10" height="7" rx="1.5"/><path d="M7.5 9V7a2.5 2.5 0 015 0v2"/>',
   link:'<path d="M8.2 11.8a3 3 0 004.2 0l2.4-2.4a3 3 0 00-4.2-4.2l-1.2 1.2"/><path d="M11.8 8.2a3 3 0 00-4.2 0l-2.4 2.4a3 3 0 004.2 4.2l1.2-1.2"/>',
   ext:'<path d="M12 4h4v4M16 4l-6.5 6.5"/><path d="M15 11v5H4V4h5"/>',
+  /* 图片查看器工具条：与 ZCode 的 zoom-in / zoom-out / fit / save / copy / more 一一对应 */
+  img:'<rect x="3" y="4.5" width="14" height="11" rx="2"/><circle cx="7.2" cy="8.6" r="1.3"/><path d="M4.2 13.6l3.6-3.4 2.6 2.4 2.3-2.1 3.1 3"/>',
+  zo:'<circle cx="9" cy="9" r="5"/><path d="M13 13l4 4M6.8 9h4.4"/>',
+  zi:'<circle cx="9" cy="9" r="5"/><path d="M13 13l4 4M6.8 9h4.4M9 6.8v4.4"/>',
+  fitmax:'<path d="M3 7V4h3M17 7V4h-3M3 13v3h3M17 13v3h-3"/>',
   // 品牌图标：GitHub 官方 mark（实心）与 Bilibili 电视机标（描边 + 两根天线），
   // 都是矢量路径，不依赖外部字体或图片资源。
   gh:'<path fill="currentColor" stroke="none" d="M10 .9a9.1 9.1 0 00-2.88 17.73c.46.08.62-.2.62-.44v-1.55c-2.54.55-3.08-1.22-3.08-1.22-.42-1.06-1.02-1.34-1.02-1.34-.83-.57.06-.56.06-.56.92.07 1.4.95 1.4.95.82 1.4 2.15 1 2.67.76.08-.6.32-1 .58-1.23-2.03-.23-4.16-1.02-4.16-4.52 0-1 .36-1.82.94-2.46-.1-.23-.41-1.16.09-2.42 0 0 .77-.25 2.52.94a8.7 8.7 0 014.6 0c1.75-1.19 2.52-.94 2.52-.94.5 1.26.19 2.19.09 2.42.59.64.94 1.46.94 2.46 0 3.51-2.13 4.29-4.17 4.52.33.28.62.84.62 1.69v2.5c0 .25.16.53.63.44A9.1 9.1 0 0010 .9z"/>',
@@ -2368,7 +2509,7 @@ const IC = {
 const ic = n => '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">' + (IC[n] || IC.file) + '</svg>';
 
 /** 版本号：与 Cargo.toml / tauri.conf.json 同步（发布时三处一起改）。 */
-const APP_VER = '0.2.1';
+const APP_VER = '0.2.2';
 /** GitHub 仓库（检查更新读 releases/latest）。 */
 const GH_REPO = 'eason56789/parable';
 
@@ -2692,6 +2833,18 @@ const L = {
     r2_nofile:'从左侧选择文件查看', r2_loading:'加载中…',
     r2_env_local:'本机', r2_env_idle:'未开始会话', r2_env_nomodel:'未配置模型', r2_env_off:'服务未连接',
     r2_add_chat:'添加到对话', r2_reveal:'在文件夹中显示', r2_added:'已添加到对话', r2_add_full:'附件已达 6 个上限',
+    /* 图片查看器（灯箱）：与 ZCode 的菜单项与提示语对齐 */
+    iv_open:'打开', iv_close:'关闭', iv_zoom_in:'放大', iv_zoom_out:'缩小', iv_zoom_reset:'重置缩放',
+    iv_fit:'适应窗口', iv_actual:'原始大小', iv_copy:'复制图片', iv_copy_ok:'图片已复制',
+    iv_copy_fail:'复制图片失败，请检查剪贴板权限后重试。',
+    iv_save:'保存图片', iv_save_ok:'图片已保存', iv_save_fail:'保存图片失败，请重试',
+    iv_reveal:'在资源管理器中打开', iv_reveal_fail:'无法在文件管理器中打开',
+    iv_add_chat:'添加到聊天', iv_added:'已添加到聊天', iv_add_fail:'添加失败，请先打开一个可编辑的会话。',
+    iv_download:'下载图片', iv_prev:'上一张图片', iv_next:'下一张图片',
+    iv_action_fail:'图片操作失败，请重试', iv_open_fail:'这张图片无法预览（文件可能已被删除或改动）。',
+    iv_hint:'滚轮缩放 · 拖动平移 · 双击复位 · ←/→ 切换 · Esc 关闭', iv_of:'{i} / {n}',
+    iv_img:'图片', iv_loading:'正在加载图片预览…', iv_no_composer:'当前没有可接收图片的输入框',
+    iv_relocal:'重新定位', iv_saved_as:'已保存到 {p}',
     auto_no_chat:'当前没有会话，不能投递到当前对话', disc:'Parable 是 AI，可能会出错，请核实重要内容',
     auto_st_active:'运行中', auto_st_paused:'已暂停', auto_st_ended:'已结束', auto_kind_agent:'对话',
     auto_pause:'暂停', auto_resume:'启用', auto_run_now:'立即运行', auto_delete:'删除', auto_edit_btn:'编辑',
@@ -3005,6 +3158,17 @@ const L = {
     r2_nofile:'Select a file from the left to preview', r2_loading:'Loading…',
     r2_env_local:'This machine', r2_env_idle:'No active session', r2_env_nomodel:'No model configured', r2_env_off:'Service offline',
     r2_add_chat:'Add to chat', r2_reveal:'Show in folder', r2_added:'Added to chat', r2_add_full:'Attachment limit reached (6)',
+    iv_open:'Open', iv_close:'Close', iv_zoom_in:'Zoom in', iv_zoom_out:'Zoom out', iv_zoom_reset:'Reset zoom',
+    iv_fit:'Fit to window', iv_actual:'Actual size', iv_copy:'Copy image', iv_copy_ok:'Image copied',
+    iv_copy_fail:'Could not copy the image. Check clipboard access and try again.',
+    iv_save:'Save image', iv_save_ok:'Image saved', iv_save_fail:'Could not save the image. Try again.',
+    iv_reveal:'Show in file explorer', iv_reveal_fail:'Could not open the file manager',
+    iv_add_chat:'Add to chat', iv_added:'Added to chat', iv_add_fail:'Could not add it. Open an editable chat first.',
+    iv_download:'Download image', iv_prev:'Previous image', iv_next:'Next image',
+    iv_action_fail:'Could not complete the image action. Please try again.', iv_open_fail:'This image cannot be previewed — the file may have moved or changed.',
+    iv_hint:'Wheel to zoom · drag to pan · double-click to reset · ←/→ to switch · Esc to close', iv_of:'{i} / {n}',
+    iv_img:'Image', iv_loading:'Loading image preview…', iv_no_composer:'No chat input is available for this image',
+    iv_relocal:'Locate again', iv_saved_as:'Saved to {p}',
     auto_no_chat:'No active chat to deliver to', disc:'Parable is AI and can make mistakes. Please double-check important content',
     auto_st_active:'Active', auto_st_paused:'Paused', auto_st_ended:'Ended', auto_kind_agent:'agent',
     auto_pause:'Pause', auto_resume:'Resume', auto_run_now:'Run now', auto_delete:'Delete', auto_edit_btn:'Edit',
@@ -5233,7 +5397,12 @@ function rebuildBlock(st) {
   st.animLeft = ANIM_BUDGET;
   // Prose blocks keep an inline writer so later deltas animate in; the writer
   // targets the inner <p>, not the wrapper.
-  st.inline = (st.kind === 'p' && wrapper.children.length === 1 && wrapper.firstElementChild.tagName === 'P')
+  //
+  // 带图片的段禁用增量写入：`iwrite` 只认识粗体/行内代码，`![](…)` 会被当成
+  // 普通字符逐字打出来，而下一个 delta 又只能追加在图片之后——顺序和语法都
+  // 会错。改由每个 delta 走一次 rebuildBlock，图片由 renderRichInline 负责。
+  const hasImg = /!\[[^\]\n]*\]\(/.test(st.buf);
+  st.inline = (!hasImg && st.kind === 'p' && wrapper.children.length === 1 && wrapper.firstElementChild.tagName === 'P')
     ? mkInline(wrapper.firstElementChild) : null;
 }
 
@@ -5488,7 +5657,9 @@ function renderBlock(host, text, ink, noanim = true) {
       i++;
     }
     const p = document.createElement('p');
-    mdInline(p, grp.join('\n'), ink, noanim);
+    // 段落里可能夹着 ![alt](src)：走图片感知的行内渲染，图片单独建节点、
+    // 可点击放大；没有图片时 renderRichInline 直接退回 mdInline，零额外开销。
+    renderRichInline(p, grp.join('\n'), ink, noanim);
     host.append(p);
   }
 }
@@ -5584,12 +5755,17 @@ function uMsg(q, idx, atts) {
       const s = document.createElement('span');
       s.className = 'att';
       // 图片附件带本地预览缩略图（URL.createObjectURL，随消息一起传入）；
-      // 非图片按扩展名渲染类型色块图标。点击 → 打开文件所在位置。
+      // 非图片按扩展名渲染类型色块图标。
+      // 点击：图片 → 灯箱看大图（缩略图只有 26px，本来也看不清内容）；
+      //      非图片 → 在系统文件管理器里定位。
       s.innerHTML = (a && a.url ? '<img class="attimg" alt="">' : attIcon(a.name)) + '<b></b>';
       const im = s.querySelector('.attimg');
       if (im) im.src = a.url;
       s.querySelector('b').textContent = a.name || '';
-      if (a.path) {
+      if (a && a.url) {
+        s.title = t('iv_open');
+        s.onclick = () => openImage([{ src: a.url, name: a.name, path: a.path || '', size: a.size || 0 }], 0);
+      } else if (a.path) {
         s.title = t('att_reveal');
         s.onclick = () => revealFile(a.path);
       }
@@ -6962,9 +7138,13 @@ function fillToolCard(e, display, ok, title, animate) {
     d.style.cssText = 'padding:0;background:#000';
     if (b64) {
       const img = document.createElement('img');
-      img.src = 'data:' + safeMt + ';base64,' + b64;
-      img.style.cssText = 'display:block;width:100%;height:auto;max-height:420px;object-fit:contain;margin:0 auto';
+      const dataUrl = 'data:' + safeMt + ';base64,' + b64;
+      img.src = dataUrl;
+      img.style.cssText = 'display:block;width:100%;height:auto;max-height:420px;object-fit:contain;margin:0 auto;cursor:zoom-in';
       img.alt = 'screenshot';
+      // 工具截图同样是图片，点开进灯箱（data URL 已是可直接加载的 URL，
+      // 没有本地路径，所以菜单里只有「复制 / 下载 / 添加到聊天」）。
+      img.onclick = () => openImage([{ src: dataUrl, name: 'screenshot.' + (safeMt === 'image/jpeg' ? 'jpg' : 'png'), path: '', size: 0 }], 0);
       d.append(img);
     } else {
       d.style.padding = '10px 12px';
@@ -8854,6 +9034,729 @@ function collapseGone(el, done) {
   el.style.margin = '0';
   el.style.padding = '0';
   setTimeout(() => { el.remove(); if (done) done(); }, 330);
+}
+
+/* ------------------------------------------------------------- image lightbox
+ *
+ * 聊天正文里的图片、侧栏文件面板里的图片、工具输出里的截图，点开都进这一个
+ * 灯箱。行为对齐 ZCode 的图片查看器：
+ *  - 缩放 50%–300%，按钮 ±50%（用比例的加法而不是乘法，手感一致），
+ *    滚轮按指数缩放并以光标为锚点；点百分比重置到 100%。
+ *  - 放大到超出视口后可以拖动平移；双击复位。
+ *  - 工具条浮在右上：缩小 / 百分比 / 放大 | 适应窗口 / 保存 / 复制 / 更多。
+ *  - 右键菜单：添加到聊天 / 复制图片 / 在资源管理器中打开 / 下载图片。
+ *  - 多图（同一条消息里的若干张）用 ←/→ 或两侧箭头切换。
+ *
+ * 图片源统一成「一个能直接喂给 <img> 的 URL」：
+ *  - `data:` / `blob:` 直接可用；
+ *  - 工作区相对路径 → /api/fs/raw（后端只回图片，且过工作区边界校验）；
+ *  - http(s) → /api/img-proxy（走 web_fetch 的 SSRF 防线，CSP 也放得过）。
+ */
+const IV = {
+  open: false,
+  list: [],      // [{src, name, path, url}] —— 同组图片，支持 ←/→ 切换
+  i: 0,
+  scale: 1,      // 用户缩放倍数（1 = 适应窗口）
+  fitScale: 1,   // 100% 对应的 CSS 尺寸比例，由 naturalWidth 推导
+  ox: 0, oy: 0,  // 平移偏移（px）
+  el: null
+};
+const IV_MIN = 0.5, IV_MAX = 3;
+
+/** 图片扩展名：文件列表用它在点开之前就区分出可预览的条目。 */
+const IMG_EXT_RE = /\.(png|jpe?g|gif|webp|bmp|avif|ico|svg)$/i;
+
+const ivEl = id => document.getElementById(id);
+
+/**
+ * 从图片 src 推出它对应的工作区相对路径（拿不到就返回空串）。
+ *
+ * 模型写的图片路径有好几种形态，需要统一：
+ *  - `images/a.png` / `./images/a.png`  → 工作区相对路径
+ *  - `/images/a.png`                    → 也算相对工作区（模型常把站点根路径
+ *    和仓库根路径混用；后端 resolve 会把前导 `/` 当成盘符根而拒绝）
+ *  - `/api/fs/raw?path=images%2Fa.png`  → 我们自己拼出来的读图接口
+ *  - `https://…` / `data:` → 没有本地路径
+ */
+function imgWorkspacePath(spec) {
+  const s = String(spec || '');
+  if (!s || /^(data:|blob:|https?:|file:)/i.test(s)) return '';
+  if (/^\/api\/fs\/raw\?/i.test(s)) {
+    const q = s.split('?')[1] || '';
+    for (const kv of q.split('&')) {
+      const [k, v] = kv.split('=');
+      if (k === 'path') {
+        try { return decodeURIComponent(v || ''); } catch (e) { return v || ''; }
+      }
+    }
+    return '';
+  }
+  if (/^\/api\//i.test(s)) return '';
+  return s.replace(/^\.\//, '').replace(/^\/+/, '');
+}
+
+/** 把各种来源的图片描述归一化成一个可用于 <img src> 的 URL。 */
+function imgSrc(spec) {
+  const s = String(spec || '');
+  if (!s) return '';
+  if (/^(data:|blob:|https?:|file:)/i.test(s)) {
+    // 远程图片走本地代理：页面 CSP 是 `img-src 'self' data: blob:`，
+    // 直连外站会被拦；代理由后端做 SSRF 校验后转发。
+    if (/^https?:/i.test(s)) return '/api/img-proxy?url=' + encodeURIComponent(s);
+    return s;
+  }
+  // 已经是本站 API 路径（'/api/fs/raw?path=…' 这类，调用方自己拼好的）：
+  // 原样返回。曾经把这种路径当工作区相对路径再编码一次，结果请求变成
+  // `/api/fs/raw?path=%2Fapi%2Ffs%2Fraw%3Fpath%3D…`，后端回 400。
+  if (/^\/api\//.test(s)) return s;
+  // 工作区相对路径。前导 `/` 一律剥掉：模型常写 `/images/a.png` 这种站点根
+  // 写法，交给后端会被当成本机盘符根而拒掉。
+  return '/api/fs/raw?path=' + encodeURIComponent(s.replace(/^\.\//, '').replace(/^\/+/, ''));
+}
+
+/**
+ * 图片加载缓存：`spec` → blob URL。
+ *
+ * 为什么不能直接把 `/api/fs/raw?...` 塞进 `<img src>`：本服务的鉴权只认
+ * `X-Parable-Token` 请求头（token 藏在页面脚本里，不在 URL 上），而 `<img>`
+ * 无法自定义请求头——直接引用会 401，浏览器就画一个破图。所以这里用 fetch
+ * 带头取字节，转成 blob URL 再交给 `<img>`（CSP 已放行 blob:）。
+ *
+ * 缓存按插入顺序淘汰：聊天里滚一遍历史会带来几十张图，不设上限就是内存泄漏。
+ */
+const IMG_CACHE = new Map();
+const IMG_CACHE_MAX = 160;
+
+function imgLoad(spec) {
+  const s = String(spec || '');
+  if (!s) return Promise.reject(new Error('empty image'));
+  // 已经是可直接用的 URL：不经过网络层，直接返回。
+  if (/^(data:|blob:)/i.test(s)) return Promise.resolve(s);
+  const hit = IMG_CACHE.get(s);
+  if (hit) {
+    // 命中即刷新 LRU 位置
+    IMG_CACHE.delete(s);
+    IMG_CACHE.set(s, hit);
+    return hit;
+  }
+  const p = fetch(imgSrc(s), {
+    headers: { 'X-Parable-Token': TOKEN },
+    cache: 'force-cache'
+  }).then(r => {
+    if (!r.ok) throw new Error(r.status + ' ' + r.statusText);
+    return r.blob();
+  }).then(b => {
+    const u = URL.createObjectURL(b);
+    OBJ_URLS.add(u);
+    return u;
+  });
+  IMG_CACHE.set(s, p);
+  // 淘汰最老的一条（只回收 blob，不动失败项）
+  if (IMG_CACHE.size > IMG_CACHE_MAX) {
+    const oldest = IMG_CACHE.keys().next().value;
+    const old = IMG_CACHE.get(oldest);
+    IMG_CACHE.delete(oldest);
+    old.then(u => {
+      try { URL.revokeObjectURL(u); } catch (e) {}
+      OBJ_URLS.delete(u);
+    }, () => {});
+  }
+  // 失败不要留在缓存里：文件可能刚被 agent 写好，下次点开应该重试。
+  p.catch(() => { if (IMG_CACHE.get(s) === p) IMG_CACHE.delete(s); });
+  return p;
+}
+
+/** 判断一个字符串像不像图片路径/URL（给 markdown 的 ![]() 兜底用）。 */
+function looksLikeImage(s) {
+  return /\.(png|jpe?g|gif|webp|bmp|avif|ico|svg)(\?|#|$)/i.test(String(s || ''));
+}
+
+/**
+ * 打开灯箱。`list` 是同组图片（至少一张），`idx` 是起始下标。
+ * 每项形如 {src, name, path}：src 用于加载，path 用于「在资源管理器中打开」
+ * 与「添加到聊天」（工作区绝对路径）。
+ */
+function openImage(list, idx) {
+  const items = (list || []).filter(x => x && x.src);
+  if (!items.length) return;
+  IV.list = items;
+  IV.i = Math.max(0, Math.min(items.length - 1, idx | 0));
+  IV.open = true;
+  const el = ivEl('iv');
+  if (!el) return;
+  el.classList.add('open');
+  el.classList.toggle('multi', items.length > 1);
+  // 打开时锁滚动，避免滚轮缩放的同时把背后的聊天记录滚走。
+  document.body.style.overflow = 'hidden';
+  ivRender();
+  setFocusGuard(true);
+}
+
+function closeImage() {
+  if (!IV.open) return;
+  IV.open = false;
+  const el = ivEl('iv');
+  if (el) {
+    el.classList.remove('open', 'loading', 'broken', 'dragging');
+  }
+  document.body.style.overflow = '';
+  IV.list = [];
+  IV.i = 0;
+  IV.scale = 1; IV.ox = 0; IV.oy = 0;
+  closeIvMenu();
+  setFocusGuard(false);
+}
+
+/** 焦点归还：灯箱开着时把焦点困在内部，关闭后还给原来的元素。 */
+let ivPrevFocus = null;
+function setFocusGuard(on) {
+  if (on) {
+    ivPrevFocus = document.activeElement;
+    const b = ivEl('iv-close');
+    if (b) b.focus({ preventScroll: true });
+  } else if (ivPrevFocus && ivPrevFocus.isConnected && typeof ivPrevFocus.focus === 'function') {
+    try { ivPrevFocus.focus({ preventScroll: true }); } catch (e) {}
+    ivPrevFocus = null;
+  }
+}
+
+/** 重新加载当前这一张。 */
+function ivRender() {
+  const cur = IV.list[IV.i];
+  const el = ivEl('iv');
+  const img = ivEl('iv-img');
+  if (!cur || !img || !el) return;
+  el.classList.remove('broken');
+  el.classList.add('loading');
+  IV.scale = 1; IV.ox = 0; IV.oy = 0;
+  img.alt = cur.name || t('iv_img');
+  img.style.transform = '';
+  // 换图时先清空 src 再赋新值：同一张图重复点开时，缓存命中会直接返回，
+  // 不重置的话 onload 不会触发，loading 态就永远挂着。
+  img.removeAttribute('src');
+  img.onload = () => {
+    el.classList.remove('loading');
+    ivFit();
+  };
+  img.onerror = () => {
+    el.classList.remove('loading');
+    el.classList.add('broken');
+    const e = ivEl('iv-err');
+    if (e) e.textContent = t('iv_open_fail');
+  };
+  // `<img>` 带不了 token 头，必须先取字节再转 blob URL（见 imgLoad）。
+  const want = cur.src;
+  imgLoad(want).then(u => {
+    // 期间用户可能已经切到下一张：只认最后一次请求。
+    if (!IV.open || IV.list[IV.i] !== cur) return;
+    img.src = u;
+  }, () => {
+    if (!IV.open || IV.list[IV.i] !== cur) return;
+    img.onerror && img.onerror();
+  });
+  ivSyncBar();
+}
+
+/** 计算「适应窗口」的基准尺寸并落到 img 上。 */
+function ivFit() {
+  const img = ivEl('iv-img');
+  const stage = ivEl('iv-stage');
+  if (!img || !stage || !img.naturalWidth) return;
+  const sw = stage.clientWidth * 0.92, sh = stage.clientHeight * 0.88;
+  const nw = img.naturalWidth, nh = img.naturalHeight;
+  // 适应窗口时的小图不放大：一张 16×16 的图标铺满整屏只会更糊。
+  const fit = Math.min(1, sw / nw, sh / nh);
+  img.style.width = Math.round(nw * fit) + 'px';
+  img.style.height = Math.round(nh * fit) + 'px';
+  IV.fitScale = fit;
+  IV.scale = 1;
+  ivApply();
+}
+
+/**
+ * 把平移量夹在「图片还能盖住视口」的范围内。
+ *
+ * 没有这一步时，放大后图片会整体滑出视口，屏幕上只剩一角白底——
+ * 用户会以为图片裂了。允许的偏移量 = (缩放后尺寸 - 视口尺寸) / 2，
+ * 且不小于 0（缩到比视口小时居中，不许拖）。
+ */
+function ivClampPan() {
+  const img = ivEl('iv-img');
+  const stage = ivEl('iv-stage');
+  if (!img || !stage) return;
+  const w = img.clientWidth * IV.scale;
+  const h = img.clientHeight * IV.scale;
+  const mx = Math.max(0, (w - stage.clientWidth) / 2);
+  const my = Math.max(0, (h - stage.clientHeight) / 2);
+  IV.ox = Math.max(-mx, Math.min(mx, IV.ox));
+  IV.oy = Math.max(-my, Math.min(my, IV.oy));
+  // 图片比视口大（无论是否正在拖）就显示上下暗角，提示可以拖。
+  const big = (img.clientWidth * IV.scale > stage.clientWidth + 2)
+    || (img.clientHeight * IV.scale > stage.clientHeight + 2);
+  const root = ivEl('iv');
+  if (root) root.classList.toggle('panned', big);
+}
+
+/** 把 scale/偏移写到 transform，并同步工具条可用状态。 */
+function ivApply() {
+  const img = ivEl('iv-img');
+  const stage = ivEl('iv-stage');
+  if (!img) return;
+  ivClampPan();
+  img.style.transform = 'translate(' + IV.ox.toFixed(1) + 'px,' + IV.oy.toFixed(1) + 'px) scale(' + IV.scale.toFixed(3) + ')';
+  // 只有「放大到超出容器」才有可拖动的余量。
+  const over = IV.scale > 1.001;
+  if (stage) stage.classList.toggle('can-grab', over);
+  ivSyncBar();
+}
+
+function ivSyncBar() {
+  const pct = ivEl('iv-pct');
+  if (pct) pct.textContent = Math.round(IV.scale * 100) + '%';
+  const zo = ivEl('iv-zo'), zi = ivEl('iv-zi');
+  if (zo) zo.disabled = IV.scale <= IV_MIN + 1e-6;
+  if (zi) zi.disabled = IV.scale >= IV_MAX - 1e-6;
+  const cnt = ivEl('iv-count');
+  if (cnt) {
+    cnt.textContent = IV.list.length > 1
+      ? t('iv_of').replace('{i}', IV.i + 1).replace('{n}', IV.list.length)
+      : '';
+  }
+  const pv = ivEl('iv-prev'), nx = ivEl('iv-next');
+  if (pv) pv.hidden = IV.i <= 0;
+  if (nx) nx.hidden = IV.i >= IV.list.length - 1;
+}
+
+/** 以视口内某个点为锚点缩放——缩放时光标下的那一块不跑。 */
+function ivZoomTo(next, cx, cy) {
+  const stage = ivEl('iv-stage');
+  if (!stage) return;
+  const clamped = Math.max(IV_MIN, Math.min(IV_MAX, next));
+  if (Math.abs(clamped - IV.scale) < 1e-4) return;
+  if (cx == null || cy == null) {
+    cx = stage.clientWidth / 2;
+    cy = stage.clientHeight / 2;
+  }
+  const k = clamped / IV.scale;
+  // 以舞台中心为原点的坐标换算：transform 先平移后缩放，
+  // 想让锚点固定，偏移要按 (1-k) 补偿。
+  const dx = cx - stage.clientWidth / 2;
+  const dy = cy - stage.clientHeight / 2;
+  IV.ox = dx - (dx - IV.ox) * k;
+  IV.oy = dy - (dy - IV.oy) * k;
+  IV.scale = clamped;
+  // 缩回 100% 以内就没必要留着偏移，否则小图会偏到角落。
+  if (IV.scale <= 1) { IV.ox = 0; IV.oy = 0; }
+  ivApply();
+}
+
+function ivStep(d) {
+  ivZoomTo(IV.scale + d);
+}
+
+function ivReset() {
+  IV.scale = 1; IV.ox = 0; IV.oy = 0;
+  ivApply();
+}
+
+// ---------------------------------------------------------------- 交互接线
+let ivDrag = null;
+
+(function ivWire() {
+  const el = ivEl('iv');
+  const stage = ivEl('iv-stage');
+  if (!el || !stage) return;
+
+  ivEl('iv-close').innerHTML = ic('x');
+  ivEl('iv-zo').innerHTML = ic('zo');
+  ivEl('iv-zi').innerHTML = ic('zi');
+  ivEl('iv-fit').innerHTML = ic('fitmax');
+  ivEl('iv-save').innerHTML = ic('dl');
+  ivEl('iv-copy').innerHTML = ic('copy');
+  ivEl('iv-more').innerHTML = ic('more');
+  ivEl('iv-prev').innerHTML = ic('back');
+  ivEl('iv-next').innerHTML = ic('chevr');
+
+  ivEl('iv-close').title = t('iv_close');
+  ivEl('iv-zo').title = t('iv_zoom_out');
+  ivEl('iv-zi').title = t('iv_zoom_in');
+  ivEl('iv-pct').title = t('iv_zoom_reset');
+  ivEl('iv-fit').title = t('iv_fit');
+  ivEl('iv-save').title = t('iv_save');
+  ivEl('iv-copy').title = t('iv_copy');
+  ivEl('iv-more').title = t('iv_more');
+  ivEl('iv-prev').title = t('iv_prev');
+  ivEl('iv-next').title = t('iv_next');
+  ivEl('iv-hint').textContent = t('iv_hint');
+
+  ivEl('iv-close').onclick = closeImage;
+  ivEl('iv-zo').onclick = () => ivStep(-0.5);
+  ivEl('iv-zi').onclick = () => ivStep(0.5);
+  ivEl('iv-pct').onclick = ivReset;
+  ivEl('iv-fit').onclick = ivFit;
+  ivEl('iv-save').onclick = () => ivSave();
+  ivEl('iv-copy').onclick = () => ivCopy();
+  ivEl('iv-more').onclick = e => {
+    e.stopPropagation();
+    const r = e.currentTarget.getBoundingClientRect();
+    ivMenu(r.left - 190, r.bottom + 6);
+  };
+  ivEl('iv-prev').onclick = () => ivGo(-1);
+  ivEl('iv-next').onclick = () => ivGo(1);
+
+  // 点背景关闭：只有点在舞台上、且不是拖动结束时才算。
+  stage.addEventListener('click', e => {
+    if (e.target === stage && !IV.dragging) closeImage();
+  });
+
+  // 滚轮缩放：passive:false 才能 preventDefault，避免连带滚动背景。
+  stage.addEventListener('wheel', e => {
+    if (!IV.open) return;
+    e.preventDefault();
+    const r = stage.getBoundingClientRect();
+    const dy = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaMode === 2 ? e.deltaY * r.height : e.deltaY;
+    // 指数缩放：鼠标滚一格（~100px）约 22%，从 50% 到 300% 手感一致。
+    // 先把单次 delta 夹到 ±300 再算，但**不能**因此丢掉大 delta 的方向：
+    // 触控板/长按滚轮会一次给几千，夹住之后只缩一点点，到不了上下限。
+    // 这里改成「大 delta 直接吸附到端值」，一次到底。
+    const clamped = Math.max(-300, Math.min(300, dy));
+    let next = IV.scale * Math.exp(-clamped * 0.002);
+    if (Math.abs(dy) > 300) next = dy < 0 ? IV_MAX : IV_MIN;
+    ivZoomTo(next, e.clientX - r.left, e.clientY - r.top);
+  }, { passive: false });
+
+  // 拖动平移 + 双击复位
+  stage.addEventListener('pointerdown', e => {
+    if (e.button !== 0 || IV.scale <= 1.001) return;
+    e.preventDefault();
+    IV.dragging = false;
+    ivDrag = { x: e.clientX, y: e.clientY, ox: IV.ox, oy: IV.oy, id: e.pointerId };
+    try { stage.setPointerCapture(e.pointerId); } catch (x) {}
+  });
+  stage.addEventListener('pointermove', e => {
+    if (!ivDrag || e.pointerId !== ivDrag.id) return;
+    const dx = e.clientX - ivDrag.x, dy = e.clientY - ivDrag.y;
+    if (!IV.dragging && Math.hypot(dx, dy) > 3) {
+      IV.dragging = true;
+      el.classList.add('dragging');
+    }
+    if (!IV.dragging) return;
+    IV.ox = ivDrag.ox + dx;
+    IV.oy = ivDrag.oy + dy;
+    ivApply();
+  });
+  const endDrag = e => {
+    if (!ivDrag || (e && e.pointerId !== ivDrag.id)) return;
+    const moved = IV.dragging;
+    try { stage.releasePointerCapture(ivDrag.id); } catch (x) {}
+    ivDrag = null;
+    el.classList.remove('dragging');
+    // click 事件在 pointerup 之后到达，延一帧再清标记，
+    // 否则「拖完松手」会被当成「点背景」而直接关闭。
+    setTimeout(() => { IV.dragging = false; }, 0);
+    if (!moved) IV.dragging = false;
+  };
+  stage.addEventListener('pointerup', endDrag);
+  stage.addEventListener('pointercancel', endDrag);
+
+  ivEl('iv-img').addEventListener('dblclick', e => { e.preventDefault(); ivReset(); });
+
+  // 右键菜单：与 ZCode 一致的四项
+  el.addEventListener('contextmenu', e => {
+    if (!IV.open) return;
+    // 输入框/选区的原生菜单优先级更高（复用全局那份判断逻辑）
+    const tg = e.target;
+    if (tg && tg.closest && tg.closest('input,textarea,[contenteditable]')) return;
+    e.preventDefault();
+    ivMenu(e.clientX, e.clientY);
+  });
+
+  // 键盘：Esc 关闭、←/→ 切换、+/- 缩放、0 复位
+  document.addEventListener('keydown', e => {
+    if (!IV.open) return;
+    const tg = e.target;
+    if (tg && tg.closest && tg.closest('input,textarea,[contenteditable]')) return;
+    if (e.key === 'Escape') { e.preventDefault(); closeImage(); return; }
+    if (e.key === 'ArrowLeft') { e.preventDefault(); ivGo(-1); return; }
+    if (e.key === 'ArrowRight') { e.preventDefault(); ivGo(1); return; }
+    if (e.key === '+' || e.key === '=') { e.preventDefault(); ivStep(0.5); return; }
+    if (e.key === '-') { e.preventDefault(); ivStep(-0.5); return; }
+    if (e.key === '0') { e.preventDefault(); ivReset(); return; }
+  });
+})();
+
+function ivGo(d) {
+  const n = IV.i + d;
+  if (n < 0 || n >= IV.list.length) return;
+  IV.i = n;
+  ivRender();
+}
+
+/** 当前这张图的字节（用于复制/保存/添加）。 */
+async function ivBytes() {
+  const cur = IV.list[IV.i];
+  if (!cur) throw new Error('no image');
+  const url = imgSrc(cur.src);
+  // blob:/data: 已经是本地数据，fetch 它们不带 token 也不会 401；
+  // 带自定义头反而会让某些内核把它当跨域请求而失败。
+  const local = /^(blob:|data:)/i.test(url);
+  const r = await fetch(url, local ? { cache: 'no-store' }
+    : { headers: { 'X-Parable-Token': TOKEN }, cache: 'no-store' });
+  if (!r.ok) {
+    let msg = r.status + ' ' + r.statusText;
+    try { const j = await r.json(); if (j && j.error) msg = j.error; } catch (e) {}
+    throw new Error(msg);
+  }
+  return await r.blob();
+}
+
+/** 复制图片到剪贴板（PNG 走 ClipboardItem；非 PNG 先过一遍 canvas）。 */
+async function ivCopy() {
+  try {
+    const blob = await ivBytes();
+    if (typeof ClipboardItem === 'undefined' || !navigator.clipboard || !navigator.clipboard.write) {
+      throw new Error('clipboard unavailable');
+    }
+    let png = blob;
+    if (blob.type !== 'image/png') {
+      // 剪贴板只吃 PNG：其他格式先在 canvas 上转一次。
+      png = await new Promise((res, rej) => {
+        const img = new Image();
+        const u = URL.createObjectURL(blob);
+        img.onload = () => {
+          try {
+            const c = document.createElement('canvas');
+            c.width = img.naturalWidth; c.height = img.naturalHeight;
+            const g = c.getContext('2d');
+            g.drawImage(img, 0, 0);
+            c.toBlob(b => (b ? res(b) : rej(new Error('png encode failed'))), 'image/png');
+          } catch (e) { rej(e); } finally { URL.revokeObjectURL(u); }
+        };
+        img.onerror = () => { URL.revokeObjectURL(u); rej(new Error('decode failed')); };
+        img.src = u;
+      });
+    }
+    await navigator.clipboard.write([new ClipboardItem({ 'image/png': png })]);
+    toast(t('iv_copy_ok'));
+  } catch (e) {
+    toast(t('iv_copy_fail'));
+  }
+}
+
+/** 保存图片到本地（浏览器壳走下载，Tauri 壳走同一个 a[download]）。 */
+async function ivSave() {
+  const cur = IV.list[IV.i];
+  try {
+    const blob = await ivBytes();
+    const u = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = u;
+    // 文件名：优先用 alt / 原文件名；从 src 推的时候要跳过 blob:/data: 这类
+    // 前缀（它们的「末段」是 UUID 或一长串 base64，拿来当名字毫无意义）。
+    let name = (cur.name || '').trim();
+    const s = String(cur.src || '');
+    if (!name && !/^(blob:|data:)/i.test(s)) {
+      const last = s.split(/[?#]/)[0].split('/').pop() || '';
+      try { name = decodeURIComponent(last); } catch (e) { name = last; }
+    }
+    if (!name) name = 'image';
+    if (!/\.[a-z0-9]{2,5}$/i.test(name)) {
+      const ext = (blob.type.split('/')[1] || 'png').replace('jpeg', 'jpg');
+      name = name + '.' + ext;
+    }
+    a.download = name.replace(/[\\/:*?"<>|]/g, '_');
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(u), 4000);
+    toast(t('iv_save_ok'));
+  } catch (e) {
+    toast(t('iv_save_fail'));
+  }
+}
+
+/** 「添加到聊天」：把图片作为附件塞进输入区（不复制文件，直接用工作区路径）。 */
+function ivAddToChat() {
+  const cur = IV.list[IV.i];
+  if (!cur) return;
+  const inp = $('#inp');
+  if (!inp) { toast(t('iv_no_composer')); return; }
+  if (typeof ATTS === 'undefined') { toast(t('iv_no_composer')); return; }
+  if (ATTS.length >= 6) { toast(t('r2_add_full')); return; }
+  const abs = cur.path || '';
+  if (!abs) {
+    // 远程图片或 data URL 没有本地路径：先落盘到 uploads 再挂附件。
+    ivBytes().then(blob => {
+      const f = new File([blob], cur.name || 'image.png', { type: blob.type || 'image/png' });
+      addFiles([f]);
+    }).catch(() => toast(t('iv_add_fail')));
+    return;
+  }
+  if (ATTS.some(a => a.path === abs)) { toast(t('r2_added')); return; }
+  // 缩略图直接用灯箱里那张已经加载好的 URL（blob:/data:），点击芯片还能再放大。
+  ATTS.push({ path: abs, name: cur.name || 'image', size: cur.size || 0, type: '', kind: 'image', loading: false, url: imgSrc(cur.src) });
+  renderAtts();
+  if (typeof sync === 'function') sync();
+  toast(t('iv_added'));
+  closeImage();
+}
+
+/** 「在资源管理器中打开」：reveal 走的是绝对路径。 */
+function ivReveal() {
+  const cur = IV.list[IV.i];
+  if (!cur || !cur.path) { toast(t('iv_reveal_fail')); return; }
+  api('/files/reveal', { method: 'POST', body: { path: cur.path } })
+    .then(() => toast(S.lang === 'zh' ? '已打开文件所在位置' : 'Opened file location'))
+    .catch(() => toast(t('iv_reveal_fail')));
+}
+
+/* ---------------------------------------------------------------- 灯箱右键菜单 */
+function ivMenu(x, y) {
+  const CMel = $('#cm');
+  if (!CMel) return;
+  const cur = IV.list[IV.i];
+  const it = (k, label, icon) => '<div class="cmi" role="menuitem" data-iv="' + k + '">' +
+    (icon || '') + '<span>' + esc(label) + '</span></div>';
+  CMel.innerHTML =
+    it('add', t('iv_add_chat'), ic('plus')) +
+    it('copy', t('iv_copy'), ic('copy')) +
+    (cur && cur.path ? it('reveal', t('iv_reveal'), ic('folder')) : '') +
+    '<div class="csep"></div>' +
+    it('save', t('iv_download'), ic('dl'));
+  // 灯箱本身在 z-index 200，#cm 默认 100：不加这个类，菜单会被压在图片底下。
+  CMel.classList.add('ivmenu');
+  CMel.classList.add('open');
+  const w = CMel.offsetWidth, h = CMel.offsetHeight;
+  CMel.style.left = Math.max(8, Math.min(x, innerWidth - w - 8)) + 'px';
+  CMel.style.top = Math.max(8, Math.min(y, innerHeight - h - 8)) + 'px';
+  CMel.querySelectorAll('[data-iv]').forEach(b => {
+    b.onclick = () => {
+      const k = b.dataset.iv;
+      closeIvMenu();
+      if (k === 'add') ivAddToChat();
+      else if (k === 'copy') ivCopy();
+      else if (k === 'reveal') ivReveal();
+      else if (k === 'save') ivSave();
+    };
+  });
+  ivMenu._on = true;
+}
+
+function closeIvMenu() {
+  const CMel = $('#cm');
+  if (CMel && ivMenu._on) {
+    CMel.classList.remove('open');
+    CMel.classList.remove('ivmenu');
+    CMel.innerHTML = '';
+    ivMenu._on = false;
+  }
+}
+
+// 点别处关掉灯箱菜单。用 click（不是 pointerdown）：pointerdown 先于 click，
+// 会把菜单项的点击本身吃掉——菜单刚弹出就消失，看起来像「点不动」。
+document.addEventListener('click', e => {
+  if (ivMenu._on && !e.target.closest('#cm') && !e.target.closest('#iv-more')) closeIvMenu();
+});
+// 灯箱里的图片再右键一次要能换位置重新弹菜单，先把旧的收掉。用冒泡阶段
+// （不是 capture）：否则会在 ivMenu 建好菜单之后又被这里清掉。
+document.addEventListener('contextmenu', e => {
+  if (ivMenu._on && !e.target.closest('#cm') && !(e.target.closest('#iv') || e.target.closest('.spimgwrap'))) closeIvMenu();
+});
+
+/**
+ * 从 markdown 的一段文字里抽出 `![alt](src "title")`。
+ * 返回 [{before, alt, src, after}] —— 调用方把 before / after 交给行内渲染，
+ * 图片本身单独建节点（行内渲染器不认识图片语法）。
+ */
+const MD_IMG_RE = /!\[([^\]\n]*)\]\(\s*<?([^)\s>]+)>?(?:\s+"([^"\n]*)")?\s*\)/g;
+
+function splitImages(text) {
+  const out = [];
+  let last = 0;
+  MD_IMG_RE.lastIndex = 0;
+  let m;
+  const s = String(text || '');
+  while ((m = MD_IMG_RE.exec(s))) {
+    if (m.index > last) out.push({ text: s.slice(last, m.index) });
+    out.push({ alt: m[1] || '', src: m[2] || '', title: m[3] || '' });
+    last = m.index + m[0].length;
+  }
+  if (last < s.length) out.push({ text: s.slice(last) });
+  return out;
+}
+
+/** 一张 markdown 图片：包一层容器便于骨架屏，点击开灯箱。 */
+function mdImage(host, alt, src, title, group) {
+  const w = document.createElement('span');
+  w.className = 'mdimgw loading';
+  const im = document.createElement('img');
+  im.className = 'mdimg';
+  im.alt = alt || '';
+  if (title) im.title = title;
+  // 不用 loading="lazy"：图片是先 fetch 成 blob URL 再赋 src 的，那时候
+  // 浏览器往往还判定不了它是否接近视口（历史消息渲染在离屏容器里），
+  // 结果就是肉眼可见的「图一直不出现」。字节本来就已经下载完了，省这
+  // 一步解码没有收益。
+  im.decoding = 'async';
+  im.onload = () => {
+    w.classList.remove('loading');
+    // 小图不拉伸：按原始像素宽度收窄，避免把 16px 图标拉成一张模糊大图。
+    if (im.naturalWidth && im.naturalWidth < 160) im.style.maxWidth = im.naturalWidth + 'px';
+  };
+  im.onerror = () => {
+    w.classList.remove('loading');
+    w.remove();
+    // 加载失败就不要留一个破图框：退化成一行可点的链接文本。
+    const a = document.createElement('a');
+    a.href = '#';
+    a.className = 'mdimglink';
+    a.textContent = alt || src;
+    a.onclick = e => { e.preventDefault(); openExternal(src); };
+    host.append(a);
+  };
+  im.onclick = () => openImage(group, group.findIndex(g => g.src === src));
+  w.append(im);
+  host.append(w);
+  // 同 ivRender：<img> 带不了鉴权头，先 fetch 成 blob URL 再赋 src。
+  imgLoad(src).then(u => { if (w.isConnected) im.src = u; },
+    () => { w.classList.remove('loading'); im.onerror && im.onerror(); });
+  return w;
+}
+
+/**
+ * 渲染一段可能夹着图片的 markdown 文字：图片单独成节点，其余文本走
+ * 原来的行内渲染（粗体 / 行内代码 / 换行）。
+ */
+function renderRichInline(host, text, ink, noanim) {
+  const segs = splitImages(text);
+  if (segs.length === 1 && segs[0].text != null) {
+    // 没有图片：走原路，零额外开销。
+    mdInline(host, text, ink, noanim);
+    return;
+  }
+  // 同一条文本里的图片构成一组，灯箱里可以左右切换。
+  // `path` 给「在资源管理器中打开 / 添加到聊天」用：markdown 里写的是工作区
+  // 相对路径或我们自己的读图接口，这里统一推回工作区路径再补成绝对路径。
+  const group = segs.filter(s => s.src).map(s => {
+    const rel = imgWorkspacePath(s.src);
+    return {
+      src: s.src,
+      name: (s.alt || '').trim() || decodeURIComponent(rel.split(/[?#]/)[0].split('/').pop() || '') || 'image',
+      path: rel ? r2AbsPath(rel) : '',
+      size: 0
+    };
+  });
+  segs.forEach(s => {
+    if (s.text != null) {
+      if (s.text.trim()) {
+        const sp = document.createElement('span');
+        mdInline(sp, s.text, ink, noanim);
+        host.append(sp);
+      }
+      return;
+    }
+    mdImage(host, s.alt, s.src, s.title, group);
+  });
 }
 
 /**
@@ -10849,6 +11752,9 @@ function openChatMenu(c, el, x, y) {
 }
 
 function closeChatMenu() {
+  // #cm 是同一个 DOM 节点，灯箱右键菜单也挂在上面：会话菜单关闭时必须连带
+  // 清掉它的 ivmenu 提升层级，否则下次打开会话菜单会带着 220 的 z-index。
+  if (ivMenu._on) { closeIvMenu(); return; }
   CM.classList.remove('open');
   cmTarget = null;
   document.querySelectorAll('.rc.menu').forEach(e => e.classList.remove('menu'));
@@ -11042,7 +11948,13 @@ CM.addEventListener('click', e => {
   closeChatMenu();
 });
 document.addEventListener('click', e => { if (!e.target.closest('#cm')) closeChatMenu(); });
-document.addEventListener('contextmenu', e => { if (!e.target.closest('.rc')) closeChatMenu(); });
+// 右键空白处关掉会话菜单。灯箱/侧栏图片自己会 preventDefault 并弹自己的菜单，
+// 这里必须让开——否则同一次 contextmenu 事件里刚建的菜单会被立刻清掉
+// （用户看到的就是「右键没反应」）。#iv 与 .spimgwrap 下的右键归灯箱菜单管。
+document.addEventListener('contextmenu', e => {
+  if (e.target.closest('#iv') || e.target.closest('.spimgwrap')) return;
+  if (!e.target.closest('.rc')) closeChatMenu();
+});
 addEventListener('resize', closeChatMenu);
 
 function newChat() {
@@ -15110,8 +16022,11 @@ async function spFilesTree(tab) {
     rows.push('<div class="sprow" data-spup="1">' + ic('back') + '<span class="nm">..</span></div>');
   }
   (res.entries || []).forEach(e => {
+    // 图片文件给图片图标而不是通用文件图标：面板里的图片可以预览，
+    // 图标是用户点开之前的唯一线索。
+    const icon = e.is_dir ? 'folder' : (IMG_EXT_RE.test(e.name) ? 'img' : 'file');
     rows.push('<div class="sprow" data-spp="' + esc(e.path) + '" data-dir="' + (e.is_dir ? '1' : '') + '">' +
-      ic(e.is_dir ? 'folder' : 'file') +
+      ic(icon) +
       '<span class="nm">' + esc(e.name) + '</span>' +
       (e.is_dir ? '' : '<span class="sz">' + fmtBytes(e.size) + '</span>') + '</div>');
   });
@@ -15172,6 +16087,39 @@ async function spFilesOpen(tab, path) {
   if (SP.active !== tab.id) return;
   const f = res.file;
   if (!f) { box.innerHTML = '<div class="spempty">' + esc(t('sp_empty_fs')) + '</div>'; return; }
+  // 后端按魔数判过：是图片就渲染成可点开的预览，而不是拿二进制当文本。
+  if (f.image) {
+    tab.st.path = f.path;
+    const src = '/api/fs/raw?path=' + encodeURIComponent(f.path);
+    // 工作区绝对路径：右键「在资源管理器中打开」和「添加到聊天」都要它。
+    const abs = r2AbsPath(f.path);
+    box.innerHTML =
+      '<div class="spfmeta spimgmeta">' +
+        ic('img') + '<span>' + esc(f.path) + '</span>' +
+        '<span style="margin-left:auto">' + esc(fmtBytes(f.size)) + ' · ' + esc(String(f.image).replace('image/', '').toUpperCase()) + '</span>' +
+      '</div>' +
+      '<div class="spimgwrap"><img alt="' + esc(f.name) + '"></div>';
+    const im = box.querySelector('.spimgwrap img');
+    if (im) {
+      im.onclick = () => openImage([{ src: src, name: f.name, path: abs, size: f.size }], 0);
+      im.oncontextmenu = e => {
+        e.preventDefault();
+        e.stopPropagation();
+        IV.list = [{ src: src, name: f.name, path: abs, size: f.size }];
+        IV.i = 0;
+        // 侧栏里的图片不需要先进灯箱才能用菜单：菜单动作只依赖 IV.list/IV.i。
+        ivMenu(e.clientX, e.clientY);
+      };
+      im.onerror = () => {
+        box.querySelector('.spimgwrap').innerHTML =
+          '<div class="spempty">' + esc(t('iv_open_fail')) + '</div>';
+      };
+      // 见 imgLoad：<img> 无法携带 X-Parable-Token，必须走 fetch + blob。
+      imgLoad(src).then(u => { if (im.isConnected) im.src = u; },
+        () => { im.onerror && im.onerror(); });
+    }
+    return;
+  }
   box.innerHTML = '<div class="spfmeta">' + esc(f.path) + ' · ' + fmtBytes(f.size) +
     (f.total_lines ? ' · ' + f.total_lines + ' 行' : '') + '</div>' +
     '<div class="spfile">' + (f.binary ? '<div class="spempty">' + esc(t('sp_empty_fs')) + '</div>'

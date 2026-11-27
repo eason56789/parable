@@ -104,6 +104,15 @@ async fn read_body_capped(
     resp: reqwest::Response,
     cap: usize,
 ) -> Result<(String, bool), HarnessError> {
+    let (bytes, clipped) = read_bytes_capped(resp, cap).await?;
+    Ok((String::from_utf8_lossy(&bytes).into_owned(), clipped))
+}
+
+/// 同 [`read_body_capped`],但保留原始字节——图片代理需要二进制而不是 lossy 文本。
+async fn read_bytes_capped(
+    resp: reqwest::Response,
+    cap: usize,
+) -> Result<(Vec<u8>, bool), HarnessError> {
     let mut out: Vec<u8> = Vec::new();
     let mut clipped = false;
     let mut stream = resp.bytes_stream();
@@ -117,7 +126,60 @@ async fn read_body_capped(
         }
         out.extend_from_slice(&chunk);
     }
-    Ok((String::from_utf8_lossy(&out).into_owned(), clipped))
+    Ok((out, clipped))
+}
+
+/// 远程图片下载上限:聊天里嵌入的图大多是截图/图表,4 MB 足够;超过就拒绝,
+/// 不让一个指向巨型资源的 `![](…)` 把内存吃光。
+const MAX_REMOTE_IMAGE_BYTES: usize = 4 * 1024 * 1024;
+
+/// 抓一张远程图片(给 `/api/img-proxy` 用)。
+///
+/// 和 `web_fetch` 走同一套 SSRF 防线:每一跳都「解析 → 校验 → 钉住」,重定向
+/// 手动跟随且每跳复检,连接只落在已校验地址上。只接受嗅探出来确实是图片的
+/// 响应——把任意 URL 当图片转发等于开一个开放的读取代理。
+pub async fn fetch_image(url: &str) -> Result<(Vec<u8>, String), HarnessError> {
+    let mut current = url.to_string();
+    for _ in 0..5 {
+        let (host, port, addrs) = resolve_public_addrs(&current).await?;
+        let client = pinned_client(&host, port, &addrs, 10, 20, "Parable-Harness/0.1")?;
+        let r = client.get(&current).send().await?;
+        let status = r.status();
+        if status.is_redirection() {
+            let loc = r
+                .headers()
+                .get("location")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+            current = resolve_redirect(&current, &loc).ok_or_else(|| {
+                HarnessError::Tool(format!("unsupported redirect target `{loc}` from {current}"))
+            })?;
+            continue;
+        }
+        if !status.is_success() {
+            return Err(HarnessError::Tool(format!("HTTP {status} fetching {url}")));
+        }
+        let (bytes, clipped) = read_bytes_capped(r, MAX_REMOTE_IMAGE_BYTES).await?;
+        if clipped {
+            return Err(HarnessError::Tool(format!(
+                "image at {url} exceeds the 4 MB proxy limit"
+            )));
+        }
+        let name = current
+            .rsplit(['/', '?', '#'])
+            .next()
+            .unwrap_or("image");
+        let Some(mime) = crate::wsfs::image_mime(name, &bytes) else {
+            return Err(HarnessError::Tool(format!(
+                "{url} did not return a recognised image"
+            )));
+        };
+        return Ok((bytes, mime.to_string()));
+    }
+    Err(HarnessError::Tool(format!(
+        "too many redirects fetching image {url}"
+    )))
 }
 
 /// SSRF 防护 + DNS 重绑定防线:解析 URL 主机并检查每个解析结果的 IP,
@@ -957,6 +1019,23 @@ fn urlencode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 图片代理的 SSRF 防线：环回/私网必须被拒，公网地址放行。
+    /// 这条断言守住的是「`/api/img-proxy` 不能被拿来当内网读取器」。
+    #[test]
+    fn image_proxy_ssrf_guard_rejects_private_targets() {
+        use std::net::Ipv4Addr;
+        for s in ["127.0.0.1", "10.1.2.3", "192.168.1.1", "172.16.0.9", "169.254.169.254", "0.0.0.0"] {
+            let ip: IpAddr = s.parse().unwrap();
+            assert!(!is_public_ip(ip), "{s} must be rejected");
+        }
+        assert!(is_public_ip(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))));
+        assert!(is_public_ip(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))));
+        // IPv4-mapped IPv6 不能绕过
+        assert!(!is_public_ip("::ffff:127.0.0.1".parse().unwrap()));
+        assert!(!is_public_ip("::ffff:10.0.0.1".parse().unwrap()));
+        assert!(!is_public_ip("::1".parse().unwrap()));
+    }
 
     #[test]
     fn urlencode_handles_chinese() {

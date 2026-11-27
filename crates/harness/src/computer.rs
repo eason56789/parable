@@ -1469,13 +1469,32 @@ fn request_shell_browser_window() -> bool {
 
 /// 用系统默认浏览器（Edge / Chrome / …，取决于用户的文件关联）打开一个 URL。
 ///
-/// 调用方负责校验协议与字符集（见 `normalize_url`）。Windows 侧直接走
-/// `explorer.exe` 单参数拉起，不再经 `cmd /C start`——cmd 会把 `& | ^` 等
-/// 元字符拆成第二条命令，绕过 shell 解析即消除这条注入面。
+/// 调用方负责校验协议与字符集（见 `normalize_url`）。
+///
+/// Windows 侧用 `cmd /C start "" <url>`：
+/// - 不能用 `explorer.exe <url>`：explorer 会把 `?token=...` 的 `?`/`&`
+///   当成路径成分，实际打开的是「文档」文件夹（用户实测故障）。
+/// - cmd 的元字符注入面不存在——参数经 `Command::arg` 逐个传递，从不拼接
+///   成一条 shell 字符串；URL 本身在上层已限制为 http(s) 且无控制字符。
 pub fn spawn_system_browser(url: &str) -> std::io::Result<std::process::Child> {
     #[cfg(windows)]
     {
-        std::process::Command::new("explorer.exe").arg(url).spawn()
+        // 不能直接用 `explorer.exe <url>`：explorer 会把 `?token=...` 里的
+        // `?`/`&` 当作路径分隔成分，最后打开的是「文档」文件夹而不是浏览器。
+        // `cmd /C start "" "<url>"` 是官方推荐做法——第一个引号参数是窗口
+        // 标题占位（缺了它，带空格的 URL 会被当成标题）。
+        // 不经过 shell 拼接：Command::arg 逐个传参，URL 已在上层校验过
+        // 只含 http(s) 且无控制字符。
+        let mut cmd = std::process::Command::new("cmd");
+        cmd.args(["/C", "start", "", url]);
+        // 隐藏 cmd 的黑框；start 自己会拉起浏览器。
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        cmd.spawn()
     }
     #[cfg(target_os = "macos")]
     {
