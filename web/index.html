@@ -610,6 +610,21 @@ body.has-bg #modal.open{background:var(--bg);backdrop-filter:none;-webkit-backdr
 .sgrp:first-of-type{padding-top:6px}
 /* 除首组外，在标题上方加一条极淡分隔线，强化分组边界。 */
 .sgrp:not(:first-of-type){box-shadow:inset 0 .5px 0 var(--line)}
+/* 设置 → 归档对话：每行 = 可点击标题 + 时间 + 操作按钮 */
+.archrow{display:flex;align-items:center;gap:12px;padding:11px 14px;margin:0 0 8px;
+  border:.5px solid var(--line);border-radius:11px;background:var(--input);
+  transition:border-color calc(.2s * var(--animd));flex-wrap:wrap}
+/* 标题可收缩、操作用 flex:none 顶住不被挤走；窄屏时操作按钮换到第二行。 */
+.archrow>.archacts{margin-left:auto}
+.archrow:hover{border-color:color-mix(in srgb,var(--fg2) 35%,var(--line))}
+.archopen{flex:1;min-width:0;display:flex;align-items:center;gap:9px;border:0;background:none;
+  color:var(--fg);font:13.5px var(--sans);text-align:left;cursor:pointer;padding:0}
+.archopen svg{width:16px;height:16px;flex:none;color:var(--fg2)}
+.archopen span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.archrow:hover .archopen span{color:var(--accent)}
+.archmeta{flex:none;color:var(--fg2);font:11.5px var(--sans);white-space:nowrap}
+.archacts{display:flex;gap:6px;flex:none}
+.archft{margin:14px 0 0;color:var(--fg2);font:11.5px var(--sans)}
 #sp{flex:1;overflow-y:auto;padding:0}
 .sphd{padding:38px 44px 6px;max-width:1000px;margin:0 auto}
 .sphd h2{margin:0;font:600 26px var(--serif);color:var(--fg)}
@@ -2475,7 +2490,7 @@ const L = {
     bg_fail:'图片读取失败，请换一张试试', bg_big:'图片较大，已压缩存储',
     bgOpacity:'透明度', bgBlur:'模糊', bgBright:'亮度', bgZoom:'缩放', bgX:'裁剪横向位置', bgY:'裁剪纵向位置',
     s_u:'使用统计', s_data:'数据与统计', s_agent:'Agent 能力', s_about:'关于',
-    s_mem:'记忆', s_sk:'技能', s_bh:'Agent 行为', s_net:'网络与隐私', s_d:'数据',
+    s_mem:'记忆', s_sk:'技能', s_bh:'Agent 行为', s_net:'网络与隐私', s_d:'数据', s_arch:'归档对话',
     s_mcp:'MCP 服务器', s_hk:'钩子', s_ab:'关于',
     cmpEn:'上下文自动压缩', cmpEnH:'上下文将满时自动把较早历史交给模型做结构化摘要（关闭后超限的轮次直接报错）',
     cmpPct:'压缩触发阈值', cmpPctH:'上下文占用达到该百分比时触发压缩（改动下一轮生效）',
@@ -2612,6 +2627,7 @@ const L = {
     export:'导出对话', exported:'已导出为 Markdown', export_none:'当前还没有对话',
     cm_pin:'置顶', cm_unpin:'取消置顶', cm_rename:'重命名', cm_cpid:'复制对话 ID', cm_delete:'删除', cm_renamed:'已重命名',
     cm_archive:'归档', cm_unarchive:'取消归档', archd:'已归档', arch_done:'已归档', unarch_done:'已取消归档',
+    arch_desc:'已归档的对话不会出现在侧栏。可以在这里搜索、打开或取消归档。', arch_search:'搜索已归档对话', arch_none:'还没有归档的对话', arch_open:'打开对话', arch_deleted:'已删除', arch_count:'共 {n} 个已归档对话',
     wrap:'自动换行', noresult:'没有匹配结果', in_msgs:'消息内容', kbd:'键盘快捷键', kbd_h:'这些快捷键在任何时候都能使用。',
     actions:'操作', cmdk:'命令面板', att:'附件', ctx:'上下文', edit:'编辑', editmsg:'编辑这条消息', delmsg:'删除这条消息', regen:'重新生成', clear:'已清空当前对话', close:'关闭',
     mp_title:'模型设置', mp_desc:'管理自定义模型供应商，配置后可在聊天时选择使用。',
@@ -2782,7 +2798,7 @@ const L = {
     bg_big:'Large image — stored compressed',
     bgOpacity:'Opacity', bgBlur:'Blur', bgBright:'Brightness', bgZoom:'Zoom', bgX:'Crop horizontal', bgY:'Crop vertical',
     s_u:'Usage', s_data:'Data & stats', s_agent:'Agent capabilities', s_about:'About',
-    s_mem:'Memory', s_sk:'Skills', s_bh:'Agent behavior', s_net:'Network & privacy', s_d:'Data',
+    s_mem:'Memory', s_sk:'Skills', s_bh:'Agent behavior', s_net:'Network & privacy', s_d:'Data', s_arch:'Archived chats',
     s_mcp:'MCP servers', s_hk:'Hooks', s_ab:'About',
     cmpEn:'Auto compaction', cmpEnH:'Summarise older history into the model when the context nears its limit (off = over-limit turns fail loudly)',
     cmpPct:'Compaction threshold', cmpPctH:'Fire compaction when context usage reaches this percent (applies to the next turn)',
@@ -2921,6 +2937,7 @@ const L = {
     export:'Export conversation', exported:'Exported as Markdown', export_none:'No conversation yet',
     cm_pin:'Pin', cm_unpin:'Unpin', cm_rename:'Rename', cm_cpid:'Copy conversation ID', cm_delete:'Delete', cm_renamed:'Renamed',
     cm_archive:'Archive', cm_unarchive:'Unarchive', archd:'Archived', arch_done:'Archived', unarch_done:'Unarchived',
+    arch_desc:'Archived chats are hidden from the sidebar. Search, open or restore them here.', arch_search:'Search archived chats', arch_none:'No archived chats yet', arch_open:'Open chat', arch_deleted:'Deleted', arch_count:'{n} archived chat(s)',
     wrap:'Wrap lines', noresult:'No matching results', in_msgs:'Messages', kbd:'Keyboard shortcuts',
     kbd_h:'These shortcuts work anywhere in the app.', actions:'Actions', cmdk:'Command palette',
     att:'Attachments', ctx:'Context', editmsg:'Edit this message', delmsg:'Delete this message', regen:'Regenerate',
@@ -9730,15 +9747,9 @@ function renderSidebar() {
     g.append(sbList('tl', live.filter(c => !c.pin), t('view_timeline')));
   }
 
-  // 归档：单独一段，默认收起
-  const arch = CONVS.filter(c => c.arch);
-  if (arch.length) {
-    a.hidden = false;
-    a.append(sbHead('arch', t('archd'), arch.length));
-    if (SB.archOpen) sbSorted(arch).forEach(c => a.append(sbNode(c)));
-  } else {
-    a.hidden = true;
-  }
+  // 归档对话已移到「设置 → 归档对话」（与 ZCode 一致，侧栏不再堆一段）。
+  // a 段保留为空并隐藏，避免影响既有布局高度计算。
+  a.hidden = true;
 
   // 服务端分页的「加载更多」（超过 200 条时才出现）
   if (sessLimited) {
@@ -11669,7 +11680,7 @@ addEventListener('resize', () => { if ($('#mm') && $('#mm').classList.contains('
 /* ==================================================================
    settings modal
    ================================================================== */
-const TAB = ['g', 's', 'net', 'a', 'bg', 'n', 'm', 'p', 'mem', 'sk', 'u', 'd', 'ab'];
+const TAB = ['g', 's', 'net', 'a', 'bg', 'n', 'm', 'p', 'mem', 'sk', 'u', 'd', 'arch', 'ab'];
 /** 导航分组：基础设置 / Agent 能力 / 数据与统计 */
 const TGRP = [
   { k: 's_base', tabs: ['g', 's', 'net'] },
@@ -11677,7 +11688,7 @@ const TGRP = [
   // 导航点击路径更短（原来散在基础设置 6 项里）。
   { k: 's_pers', tabs: ['a', 'bg', 'n'] },
   { k: 's_agent', tabs: ['m', 'p', 'mem', 'sk', 'mcp', 'hk', 'bh'] },
-  { k: 's_data', tabs: ['u', 'd'] },
+  { k: 's_data', tabs: ['u', 'd', 'arch'] },
   { k: 's_about', tabs: ['ab'] }
 ];
 const SW = ['#d97757', '#6a9bcc', '#788c5d', '#9b87f5', '#d4637a', '#c9a227'];
@@ -11813,6 +11824,7 @@ const TAB_KW = {
   bg:'背景 底图 壁纸 图片 模糊 亮度 透明度 缩放 wallpaper background image blur brightness opacity',
   net:'网络 代理 proxy http https 证书',
   d:'数据 保留 清理 删除 data retention cleanup',
+  arch:'归档 已归档 取消归档 恢复 archive archived restore unarchive',
   mem:'记忆 偏好 记住 memory pref project fact 添加 删除',
   sk:'技能 skill 安装 新建 诊断 SKILL.md 工作流 用户 项目',
   u:'用量 统计 token 热力图 趋势 缓存 会话 活跃 usage'
@@ -11995,6 +12007,7 @@ function panel() {
   if (tab === 'mem') { renderMemoryPage(p); return; }
   if (tab === 'sk') { renderSkillsPage(p); return; }
   if (tab === 'u') { renderUsagePage(p); return; }
+  if (tab === 'arch') { renderArchivePage(p); return; }
   // 右侧：大标题 + 说明，然后是设置项
   const z = S.lang === 'zh';
   const HD = {
@@ -12006,6 +12019,8 @@ function panel() {
     p: [t('s_p'), z ? '控制 Parable 能对你的文件做什么，以及思考强度。' : 'Control what Parable may do to your files, and thinking effort.'],
     net: [t('s_net'), z ? 'HTTP 代理与网络选项。' : 'HTTP proxy and network options.'],
     d: [t('s_d'), z ? '会话保留与数据清理。' : 'Session retention and data cleanup.'],
+    arch: [t('s_arch'), z ? '已归档的对话不会出现在侧栏。可以在这里搜索、打开或取消归档。'
+                              : 'Archived chats are hidden from the sidebar. Search, open or restore them here.'],
   }[tab] || [t('set'), ''];
   p.innerHTML = '<div class="sphd"><h2>' + esc(HD[0]) + '</h2>' +
     (HD[1] ? '<p>' + esc(HD[1]) + '</p>' : '') + '</div><div class="setbody"></div>';
@@ -13292,6 +13307,83 @@ function skEdit(id) {
       .catch(x => err(x.message));
   };
   setTimeout(() => { const f = ov.querySelector('#skn1'); if (f) f.focus(); }, 40);
+}
+
+/**
+ * 设置 → 归档对话（与 ZCode 一致：归档不再挤在侧栏，集中在这里管理）。
+ * 数据源是已加载的 CONVS（arch=true 的项），操作走既有
+ * /sessions/{id}/unarchive 与 DELETE /sessions/{id}。
+ */
+let archQ = '';
+function renderArchivePage(host) {
+  host.innerHTML =
+    '<div class="archpg" style="' + SP_PAD + '">' +
+      spHead(t('s_arch'), t('arch_desc'),
+        '<input class="tk-search" id="arch-q" type="search" placeholder="' + esc(t('arch_search')) +
+        '" value="' + esc(archQ) + '" aria-label="' + esc(t('arch_search')) + '">') +
+      '<div id="arch-list"></div>' +
+    '</div>';
+  archDraw();
+  const q = host.querySelector('#arch-q');
+  if (q) {
+    q.oninput = () => { archQ = q.value; archDraw(); };
+  }
+  host.onclick = async e => {
+    const un = e.target.closest('[data-arch-un]');
+    if (un) {
+      const id = un.dataset.archUn;
+      try {
+        await api('/sessions/' + id + '/unarchive', { method: 'POST' });
+        toast(t('unarch_done'));
+        await loadSessions(true);
+        archDraw();
+      } catch (err) { toast(err.message); }
+      return;
+    }
+    const del = e.target.closest('[data-arch-del]');
+    if (del) {
+      const id = del.dataset.archDel;
+      const c = CONVS.find(x => x.id === id);
+      if (!(await confirmBox(t('cm_delete') + '：' + (c ? c.t : id) + '？', { danger: true }))) return;
+      try {
+        await api('/sessions/' + id, { method: 'DELETE' });
+        toast(t('arch_deleted'));
+        CONVS = CONVS.filter(x => x.id !== id);
+        renderSidebar();  // 侧栏条目与缓存随之清掉
+        archDraw();
+      } catch (err) { toast(err.message); }
+      return;
+    }
+    const open = e.target.closest('[data-arch-open]');
+    if (open) { closeSet(); openSession(open.dataset.archOpen); }
+  };
+}
+
+function archDraw() {
+  const list = document.getElementById('arch-list');
+  if (!list) return;
+  const q = (archQ || '').trim().toLowerCase();
+  const all = (CONVS || []).filter(c => c.arch);
+  const vis = q ? all.filter(c => (c.t || '').toLowerCase().includes(q)) : all;
+  if (!all.length) {
+    list.innerHTML = '<div class="pempty">' + esc(t('arch_none')) + '</div>';
+    return;
+  }
+  if (!vis.length) {
+    list.innerHTML = '<div class="pempty">' + esc(t('auto_empty_nomatch')) + '</div>';
+    return;
+  }
+  list.innerHTML = vis.map(c =>
+    '<div class="archrow" data-id="' + esc(c.id) + '">' +
+      '<button class="archopen" data-arch-open="' + esc(c.id) + '" title="' + esc(t('arch_open')) + '">' +
+        ic('chat') + '<span>' + esc(c.t || c.id) + '</span></button>' +
+      '<span class="archmeta">' + esc(fmtAgo(c.ts || 0)) + '</span>' +
+      '<span class="archacts">' +
+        '<button class="btn" data-arch-un="' + esc(c.id) + '">' + esc(t('cm_unarchive')) + '</button>' +
+        '<button class="btn danger" data-arch-del="' + esc(c.id) + '">' + esc(t('cm_delete')) + '</button>' +
+      '</span>' +
+    '</div>').join('') +
+    '<div class="archft">' + esc(t('arch_count').replace('{n}', all.length)) + '</div>';
 }
 
 function renderUsagePage(host) {
