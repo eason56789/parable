@@ -44,6 +44,8 @@ svg{display:block}
    模糊/亮度/缩放都作用在它身上，所以模糊不会糊到界面文字。
    界面底色在 body.has-bg 下改为半透明，底图才透得出来。 */
 #bg{position:fixed;inset:0;z-index:0;pointer-events:none;overflow:hidden;background:var(--bg)}
+/* #bg-img 用 cover 铺满；父层底色只是兜底（缩放 <100% 时理论上会露出 1px
+   边，所以缩放下限锁死 100%，此处仅防御性保留）。 */
 #bg[hidden]{display:none}
 #bg-img{position:absolute;inset:0;background-repeat:no-repeat;background-position:center;
   transform-origin:center;will-change:transform,filter;opacity:1;
@@ -3147,17 +3149,18 @@ function applyBg() {
   document.body.classList.toggle('has-bg', on);
   if (!on) return;
   img.style.backgroundImage = 'url("' + S.bgImg + '")';
-  // cover 之上的额外缩放：bgZoom 100% = cover 原始比例。
-  const z = Math.max(50, Math.min(300, +S.bgZoom || 100)) / 100;
-  img.style.backgroundSize = (z * 100).toFixed(1) + '% auto';
+  // 恒用 cover：任何视口比例下都铺满、绝不留黑边。旧实现用 `N% auto`
+  // （按宽铺满），视口比图更"方"时上下就会露出底色。
+  img.style.backgroundSize = 'cover';
   img.style.backgroundPosition = (S.bgX | 0) + '% ' + (S.bgY | 0) + '%';
   img.style.opacity = Math.max(0, Math.min(100, +S.bgOpacity || 0)) / 100;
   img.style.filter =
     'blur(' + Math.max(0, Math.min(40, +S.bgBlur || 0)) + 'px) ' +
     'brightness(' + Math.max(20, Math.min(200, +S.bgBright || 100)) + '%)';
-  // 缩放用 transform 而不是改 background-size 两次：模糊在放大后会变虚边，
-  // 多留 2% 让边缘不足的像素被推出视口。
-  img.style.transform = z > 1 ? 'scale(' + Math.min(1.02, 1 + (z - 1) * 0.05) + ')' : 'none';
+  // 缩放在 cover 之上叠加 transform：改 background-size 会破坏 cover 的
+  // 裁切语义（留边）。放大时多给一点余量，避免模糊后边缘透出底色。
+  const z = Math.max(100, Math.min(300, +S.bgZoom || 100)) / 100;
+  img.style.transform = z !== 1 ? 'scale(' + z.toFixed(3) + ')' : 'none';
   // 界面各面（顶栏/侧栏/主区/设置页）共用这一档混合比例：用户调高
   // 「透明度」时面板一起变透，而不是只有图片变亮图片跟界面对不上。
   // 映射：opacity 0 → 面板几乎全实（96%），100 → 面板较透（46%）。
@@ -11675,7 +11678,7 @@ const SC = {
     { k:'bgOpacity', t:'rg', l:'bgOpacity', min:0, max:100, step:1, u:'%' },
     { k:'bgBlur', t:'rg', l:'bgBlur', min:0, max:40, step:1, u:'px' },
     { k:'bgBright', t:'rg', l:'bgBright', min:20, max:200, step:5, u:'%' },
-    { k:'bgZoom', t:'rg', l:'bgZoom', min:50, max:300, step:5, u:'%' },
+    { k:'bgZoom', t:'rg', l:'bgZoom', min:100, max:300, step:5, u:'%' },
     { k:'bgX', t:'rg', l:'bgX', min:0, max:100, step:1, u:'%' },
     { k:'bgY', t:'rg', l:'bgY', min:0, max:100, step:1, u:'%' }
   ],
