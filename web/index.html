@@ -723,8 +723,45 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 .au-tpl-t svg{width:14px;height:14px;color:var(--fg2);flex:none}
 .au-tpl-d{font-size:12px;color:var(--fg2);margin:6px 0 8px;line-height:1.55;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .au-tpl-w{font-size:12px;color:var(--fg2);opacity:.8}
-.tk-form{display:none}
+/* 注意：这里原来写的是 .tk-form{display:none}，它会盖掉上面那条
+   .tk-form{...display:flex}（同权重、后出现），而页面从未给表单加 .open
+   —— 结果「新建任务」表单整体不可见。改为按 .collapsed 折叠。 */
+.tk-form.collapsed{display:none}
 .tk-form.open{display:flex}
+/* —— 自动化页：筛选条 / 任务卡 / 运行历史 —— */
+.tk-filters{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0 0 12px}
+.tk-seg{display:inline-flex;gap:2px;padding:3px;border-radius:10px;background:var(--hov)}
+.tk-seg button{border:0;background:none;color:var(--fg2);padding:5px 12px;border-radius:8px;font:var(--fs-secondary) var(--sans);cursor:pointer;transition:background-color calc(.2s * var(--animd)),color calc(.2s * var(--animd))}
+.tk-seg button:hover{color:var(--fg)}
+.tk-seg button.on{background:var(--bg);color:var(--fg);box-shadow:0 0 0 .5px var(--line)}
+.tk-search{flex:1;min-width:160px;max-width:300px;background:var(--input);border:.5px solid var(--line);border-radius:10px;padding:7px 12px;color:inherit;font:var(--fs-body) var(--sans);outline:0}
+.tk-search:focus{border-color:color-mix(in srgb,var(--fg) 30%,var(--line))}
+.tk-search::placeholder{color:var(--fg2);opacity:.7}
+.taskrow.hide{display:none}
+button.tk-name{border:0;background:none;padding:0;text-align:left;cursor:pointer;color:var(--fg)}
+button.tk-name:hover{text-decoration:underline;text-underline-offset:2px}
+button.tk-prompt{width:100%;text-align:left;border:0;cursor:pointer}
+.tk-wd{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.tk-wdl{display:inline-flex;align-items:center;gap:5px;font:var(--fs-secondary) var(--sans);color:var(--fg2);padding:4px 10px;border:.5px solid var(--line);border-radius:9px;cursor:pointer}
+.tk-wdl:hover{color:var(--fg);background:var(--hov)}
+.tk-wdl input{accent-color:var(--accent);margin:0}
+.tk-hint{font:var(--fs-secondary) var(--sans);color:var(--fg2);line-height:1.6}
+.tk-lbl{font:var(--fs-secondary) var(--sans);color:var(--fg2);flex:none;min-width:52px}
+.tk-hint.err{color:var(--danger-text)}
+.tk-form.editing{border-color:color-mix(in srgb,var(--accent) 45%,var(--line))}
+.tk-bad{border-color:var(--danger-text)!important;box-shadow:0 0 0 2px color-mix(in srgb,var(--danger-text) 16%,transparent)}
+.tk-runs{margin-top:10px;border-top:.5px solid var(--line);padding-top:10px}
+.tk-runs-h{font:var(--fs-secondary) var(--sans);font-weight:600;color:var(--fg2);margin-bottom:6px}
+.tk-run{border:.5px solid var(--line);border-radius:10px;padding:8px 10px;margin:0 0 6px;background:color-mix(in srgb,var(--bg) 55%,transparent)}
+.tk-run:last-child{margin-bottom:0}
+.tk-run-t{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font:var(--fs-secondary) var(--sans);color:var(--fg2)}
+.tk-badge{font:var(--fs-caption) var(--sans);padding:1px 8px;border-radius:99px;flex:none}
+.tk-badge.ok{background:color-mix(in srgb,var(--ok) 18%,transparent);color:var(--ok)}
+.tk-badge.bad{background:color-mix(in srgb,var(--danger-text) 18%,transparent);color:var(--danger-text)}
+.tk-rtime{font-family:var(--mono)}
+.tk-rcode{font-family:var(--mono)}
+.tk-rlink{padding:2px 9px;font:var(--fs-caption) var(--sans);margin-left:auto}
+.tk-rout{font:var(--fs-caption)/1.55 var(--mono);max-height:200px;overflow:auto;background:var(--input);border-radius:8px;padding:8px 10px;margin:6px 0 0;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--fg2)}
 #scr{display:none}
 #tp{left:0;bottom:calc(100% + 6px);min-width:248px;transform-origin:bottom left}
 .gl{padding:8px 10px 4px;font-size:12px;color:var(--fg2)}
@@ -2488,6 +2525,35 @@ const L = {
     r2_env_local:'本机', r2_env_idle:'未开始会话', r2_env_nomodel:'未配置模型', r2_env_off:'服务未连接',
     r2_add_chat:'添加到对话', r2_reveal:'在文件夹中显示', r2_added:'已添加到对话', r2_add_full:'附件已达 6 个上限',
     auto_no_chat:'当前没有会话，不能投递到当前对话', disc:'Parable 是 AI，可能会出错，请核实重要内容',
+    auto_st_active:'运行中', auto_st_paused:'已暂停', auto_st_ended:'已结束', auto_kind_agent:'对话',
+    auto_pause:'暂停', auto_resume:'启用', auto_run_now:'立即运行', auto_delete:'删除', auto_edit_btn:'编辑',
+    auto_pause_tip:'暂停这个任务，不再按时触发', auto_resume_tip:'重新启用这个任务',
+    auto_run_tip:'立刻触发一次', auto_del_tip:'删除这个任务（不可恢复）', auto_edit_task_tip:'编辑这个任务',
+    auto_expand_tip:'点击展开或收起（并加载运行历史）', auto_next:'下次', auto_ran:'已跑', auto_last:'最近',
+    auto_del_confirm:'确定删除这个任务？删除后无法恢复。', auto_triggered:'已触发', auto_created:'任务已创建', auto_saved:'任务已保存',
+    auto_edit_title:'编辑任务', auto_cancel:'取消', auto_save:'保存',
+    auto_filter_label:'按状态筛选', auto_search_ph:'搜索任务名称…',
+    auto_f_all:'全部', auto_f_active:'运行中', auto_f_paused:'已暂停', auto_f_ended:'已结束',
+    auto_empty_none:'还没有定时任务。在下方新建一个，比如每小时巡检或每天晨报。',
+    auto_empty_nomatch:'没有匹配的任务。换个关键词或切换筛选条件试试。',
+    auto_f_name:'名称', auto_f_name_ph:'任务名称', auto_f_action:'动作', auto_f_action_agent:'向会话投递消息',
+    auto_f_action_shell:'执行 shell 命令', auto_f_prompt:'内容', auto_f_prompt_ph:'触发时投递的消息（交给模型处理）',
+    auto_f_command:'命令', auto_f_command_ph:'要执行的命令，例如 npm run build', auto_f_when:'时机',
+    auto_f_every:'每隔', auto_f_daily:'每天', auto_f_weekly:'每周', auto_f_after:'一次性（延迟）',
+    auto_f_at:'一次性（指定时刻）', auto_f_cron:'cron 表达式', auto_f_interval:'间隔数量', auto_f_unit:'单位',
+    auto_f_min:'分钟', auto_f_hour:'小时', auto_f_time:'时刻', auto_f_weekdays:'星期', auto_f_target:'目标',
+    auto_f_t_reuse:'复用一个会话', auto_f_t_new:'每次新建会话', auto_f_t_existing:'投递到当前会话',
+    auto_f_model:'模型', auto_f_model_follow:'模型：跟随当前',
+    auto_model_none:'尚未配置模型——先在设置里添加模型，这里会自动出现在下拉里。',
+    auto_cron_hint:'cron 示例：*/15 * * * * = 每 15 分钟；0 9 * * 1-5 = 工作日每天 09:00。',
+    auto_weekly_hint:'选择星期后，每天在该时刻触发一次。',
+    auto_at_hint:'按本地时间填写，提交后按 UTC 时刻执行（一次性，不再重复）。',
+    auto_err_name:'请填写任务名称', auto_err_prompt:'请填写要投递的消息',
+    auto_err_command:'请填写要执行的命令', auto_err_cron:'请填写 cron 表达式',
+    auto_err_at:'请选择要触发的时刻', auto_err_weekday:'请至少选择一个星期',
+    auto_err_no_chat:'当前没有会话，不能投递到当前对话',
+    auto_runs_title:'运行历史', auto_runs_empty:'还没有运行记录。', auto_run_ok:'成功', auto_run_fail:'失败',
+    auto_run_exit:'退出码', auto_run_session:'查看会话',
     sp_title:'新标签页', sp_title_h:'选择要打开的工具面板。',
     sp_files:'文件', sp_files_h:'浏览工作区目录与文件。',
     sp_browser:'内置浏览器', sp_browser_h:'Parable 自有浏览器——地址栏导航/后退/前进/刷新/点击截图皆与 agent 操作共用同一视图，实况刷新。',
@@ -2766,6 +2832,38 @@ const L = {
     r2_env_local:'This machine', r2_env_idle:'No active session', r2_env_nomodel:'No model configured', r2_env_off:'Service offline',
     r2_add_chat:'Add to chat', r2_reveal:'Show in folder', r2_added:'Added to chat', r2_add_full:'Attachment limit reached (6)',
     auto_no_chat:'No active chat to deliver to', disc:'Parable is AI and can make mistakes. Please double-check important content',
+    auto_st_active:'Active', auto_st_paused:'Paused', auto_st_ended:'Ended', auto_kind_agent:'agent',
+    auto_pause:'Pause', auto_resume:'Resume', auto_run_now:'Run now', auto_delete:'Delete', auto_edit_btn:'Edit',
+    auto_pause_tip:'Pause this task so it stops firing on schedule', auto_resume_tip:'Resume this task',
+    auto_run_tip:'Trigger it once right now', auto_del_tip:'Delete this task (cannot be undone)',
+    auto_edit_task_tip:'Edit this task', auto_expand_tip:'Click to expand or collapse (also loads run history)',
+    auto_next:'next', auto_ran:'ran', auto_last:'last',
+    auto_del_confirm:'Delete this task? This cannot be undone.', auto_triggered:'Triggered',
+    auto_created:'Task created', auto_saved:'Task saved',
+    auto_edit_title:'Edit task', auto_cancel:'Cancel', auto_save:'Save',
+    auto_filter_label:'Filter by status', auto_search_ph:'Search task names…',
+    auto_f_all:'All', auto_f_active:'Active', auto_f_paused:'Paused', auto_f_ended:'Ended',
+    auto_empty_none:'No scheduled tasks yet. Create one below — an hourly check or a daily digest.',
+    auto_empty_nomatch:'No matching tasks. Try a different keyword or switch the filter.',
+    auto_f_name:'Name', auto_f_name_ph:'Task name', auto_f_action:'Action', auto_f_action_agent:'Deliver a message',
+    auto_f_action_shell:'Run a shell command', auto_f_prompt:'Content',
+    auto_f_prompt_ph:'Message delivered to the agent when it fires',
+    auto_f_command:'Command', auto_f_command_ph:'Command to run, e.g. npm run build', auto_f_when:'When',
+    auto_f_every:'Every', auto_f_daily:'Daily at', auto_f_weekly:'Weekly', auto_f_after:'Once after',
+    auto_f_at:'Once at a given time', auto_f_cron:'Cron expression', auto_f_interval:'Interval amount',
+    auto_f_unit:'Unit', auto_f_min:'min', auto_f_hour:'hour', auto_f_time:'Time', auto_f_weekdays:'Weekdays',
+    auto_f_target:'Target', auto_f_t_reuse:'Reuse one session', auto_f_t_new:'New session each time',
+    auto_f_t_existing:'Current chat', auto_f_model:'Model', auto_f_model_follow:'Model: follow current',
+    auto_model_none:'No models configured yet — add one in Settings and it will show up here.',
+    auto_cron_hint:'Cron examples: */15 * * * * = every 15 minutes; 0 9 * * 1-5 = 09:00 on weekdays.',
+    auto_weekly_hint:'Fires once a day at that time on the selected weekdays.',
+    auto_at_hint:'Enter a local time; it is committed as a one-shot UTC instant.',
+    auto_err_name:'Task name is required', auto_err_prompt:'Message is required',
+    auto_err_command:'Command is required', auto_err_cron:'Cron expression is required',
+    auto_err_at:'Pick the moment to fire at', auto_err_weekday:'Pick at least one weekday',
+    auto_err_no_chat:'No active chat to deliver to',
+    auto_runs_title:'Run history', auto_runs_empty:'No runs yet.', auto_run_ok:'Succeeded', auto_run_fail:'Failed',
+    auto_run_exit:'exit', auto_run_session:'Open session',
     sp_title:'New tab', sp_title_h:'Choose a tool panel to open.',
     sp_files:'Files', sp_files_h:'Browse workspace files and folders.',
     sp_browser:'Built-in browser', sp_browser_h:'A Parable-owned browser — address bar, back/forward/reload and click-on-screenshot all share the same view with the agent, live-refreshed.',
@@ -3242,6 +3340,23 @@ function fmtDT(iso) {
     return new Date(iso).toLocaleString(S.lang === 'zh' ? 'zh-CN' : 'en', { hour12: false });
   } catch (e) { return iso; }
 }
+const AU_WD_ZH = ['一', '二', '三', '四', '五', '六', '日'];
+const AU_WD_EN = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+/** 自动化页的临时状态：筛选条件与正在编辑的任务。跨重渲染保留。 */
+let AU = { filter: 'all', q: '', editId: '' };
+/** 最近一次拉到的任务列表：编辑面板与运行历史都从这里取，避免二次请求。 */
+let AU_TASKS = [];
+/** ISO 星期（1=周一 .. 7=周日）→ 短标签。 */
+function auWeekdayLabel(n) {
+  const i = (+n || 0) - 1;
+  if (i < 0 || i > 6) return String(n);
+  return S.lang === 'zh' ? '周' + AU_WD_ZH[i] : AU_WD_EN[i];
+}
+function auWeekdaysLabel(list) {
+  const arr = (list || []).map(x => +x).filter(x => x >= 1 && x <= 7);
+  if (!arr.length) return '';
+  return arr.map(auWeekdayLabel).join(S.lang === 'zh' ? '、' : ', ');
+}
 function taskTimingLabel(tm) {
   const z = S.lang === 'zh';
   if (!tm || !tm.kind) return '—';
@@ -3250,103 +3365,451 @@ function taskTimingLabel(tm) {
     case 'after': return (z ? '' : 'in ') + durLabel(tm.after_seconds) + (z ? '后' : '');
     case 'at': return (z ? '于 ' : 'at ') + fmtDT(tm.at);
     case 'daily': return (z ? '每天 ' : 'daily ') + tm.time + ' · ' + (tm.timeZone || tm.time_zone || '');
-    case 'weekly': return (z ? '每' : 'weekly ') + (tm.weekdays || []).join(',') + ' ' + tm.time;
+    case 'weekly': {
+      const wd = auWeekdaysLabel(tm.weekdays);
+      return (z ? '每' : 'weekly ') + (wd ? wd + ' ' : '') + (tm.time || '') +
+        ' · ' + (tm.timeZone || tm.time_zone || '');
+    }
     case 'cron': return 'cron ' + tm.expression;
     default: return tm.kind;
   }
+}
+/** <input type="datetime-local"> 的本地值 → RFC 3339 UTC 串。 */
+function auLocalToRFC3339(v) {
+  if (!v) return '';
+  const d = new Date(v);
+  if (!d || isNaN(d.getTime())) return '';
+  return d.toISOString();
+}
+/** RFC 3339 UTC 串 → <input type="datetime-local"> 需要的本地值。 */
+function auRFCToLocalInput(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  const p = n => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) +
+    'T' + p(d.getHours()) + ':' + p(d.getMinutes());
+}
+function auZone() {
+  try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; }
+  catch (e) { return 'UTC'; }
+}
+
+/* —— 自动化表单：新建与编辑同构 ----------------------------------------
+   同一套字段用不同前缀渲染两份（nt-* 新建 / et-* 编辑），字段语义、校验
+   规则、提交体都走同一份代码，避免两套表单走样。 */
+
+/** 表单字段 HTML。p = id 前缀。 */
+function auFormFields(p, modelSel) {
+  const z = S.lang === 'zh';
+  const wd = [];
+  for (let i = 1; i <= 7; i++) {
+    wd.push('<label class="tk-wdl" for="' + p + '-wd-' + i + '"><input type="checkbox" id="' + p + '-wd-' + i +
+      '" value="' + i + '"' + (i === 1 ? ' checked' : '') + '>' + esc(auWeekdayLabel(i)) + '</label>');
+  }
+  return '<div class="tk-row">' +
+      '<label class="tk-lbl" for="' + p + '-name">' + esc(t('auto_f_name')) + '</label>' +
+      '<input id="' + p + '-name" style="flex:1;min-width:180px" placeholder="' + esc(t('auto_f_name_ph')) + '">' +
+    '</div>' +
+    '<div class="tk-row">' +
+      '<label class="tk-lbl" for="' + p + '-action">' + esc(t('auto_f_action')) + '</label>' +
+      '<select id="' + p + '-action" aria-label="' + esc(t('auto_f_action')) + '">' +
+        '<option value="agent">' + esc(t('auto_f_action_agent')) + '</option>' +
+        '<option value="shell">' + esc(t('auto_f_action_shell')) + '</option>' +
+      '</select>' +
+      '<span class="fl"></span>' +
+    '</div>' +
+    '<textarea id="' + p + '-prompt" rows="2" aria-label="' + esc(t('auto_f_prompt')) + '" placeholder="' + esc(t('auto_f_prompt_ph')) + '"></textarea>' +
+    '<textarea id="' + p + '-command" rows="2" style="display:none;font-family:var(--mono);font-size:12.5px" aria-label="' + esc(t('auto_f_command')) + '" placeholder="' + esc(t('auto_f_command_ph')) + '"></textarea>' +
+    '<div class="tk-row">' +
+      '<label class="tk-lbl" for="' + p + '-kind">' + esc(t('auto_f_when')) + '</label>' +
+      '<select id="' + p + '-kind" aria-label="' + esc(t('auto_f_when')) + '">' +
+        '<option value="every">' + esc(t('auto_f_every')) + '</option>' +
+        '<option value="daily">' + esc(t('auto_f_daily')) + '</option>' +
+        '<option value="weekly">' + esc(t('auto_f_weekly')) + '</option>' +
+        '<option value="after">' + esc(t('auto_f_after')) + '</option>' +
+        '<option value="at">' + esc(t('auto_f_at')) + '</option>' +
+        '<option value="cron">' + esc(t('auto_f_cron')) + '</option>' +
+      '</select>' +
+      '<input id="' + p + '-num" type="number" min="1" value="5" style="width:64px" aria-label="' + esc(t('auto_f_interval')) + '">' +
+      '<select id="' + p + '-unit" aria-label="' + esc(t('auto_f_unit')) + '"><option value="min">' + esc(t('auto_f_min')) + '</option><option value="hour">' + esc(t('auto_f_hour')) + '</option></select>' +
+      '<input id="' + p + '-time" type="time" value="09:00" style="display:none" aria-label="' + esc(t('auto_f_time')) + '">' +
+      '<input id="' + p + '-at" type="datetime-local" style="display:none" aria-label="' + esc(t('auto_f_at')) + '">' +
+      '<input id="' + p + '-cron" placeholder="*/15 * * * *" style="display:none;width:150px;font-family:var(--mono)" aria-label="' + esc(t('auto_f_cron')) + '">' +
+    '</div>' +
+    '<div class="tk-row" id="' + p + '-wdrow" style="display:none">' +
+      '<span class="tk-lbl">' + esc(t('auto_f_weekdays')) + '</span>' +
+      '<span class="tk-wd">' + wd.join('') + '</span>' +
+    '</div>' +
+    '<div class="tk-hint" id="' + p + '-hint" style="display:none"></div>' +
+    '<div class="tk-row">' +
+      '<label class="tk-lbl" for="' + p + '-target">' + esc(t('auto_f_target')) + '</label>' +
+      '<select id="' + p + '-target" aria-label="' + esc(t('auto_f_target')) + '">' +
+        '<option value="reuse">' + esc(t('auto_f_t_reuse')) + '</option>' +
+        '<option value="new">' + esc(t('auto_f_t_new')) + '</option>' +
+        '<option value="existing">' + esc(t('auto_f_t_existing')) + '</option>' +
+      '</select>' +
+      '<select id="' + p + '-model" style="max-width:220px" aria-label="' + esc(t('auto_f_model')) + '"><option value="">' + esc(t('auto_f_model_follow')) + '</option></select>' +
+      '<span class="fl"></span>' +
+    '</div>' +
+    '<div class="tk-hint" id="' + p + '-modelhint" style="display:none"></div>';
+}
+
+/** 把一份表单接上交互：时机/动作联动、模型下拉、校验、提交。 */
+function auWireForm(root, p, task) {
+  const z = S.lang === 'zh';
+  const q = id => root.querySelector('#' + p + '-' + id);
+  const kindSel = q('kind'), timeInp = q('time'), cronInp = q('cron'), atInp = q('at');
+  const numInp = q('num'), unitSel = q('unit'), actSel = q('action');
+  const promptInp = q('prompt'), cmdInp = q('command'), modelSel = q('model');
+  const tgtSel = q('target'), nameInp = q('name'), hint = q('hint'), wdRow = q('wdrow');
+  if (!kindSel) return null;
+
+  // —— 时机字段联动 ——
+  const syncKind = () => {
+    const k = kindSel.value;
+    timeInp.style.display = (k === 'daily' || k === 'weekly') ? '' : 'none';
+    cronInp.style.display = k === 'cron' ? '' : 'none';
+    atInp.style.display = k === 'at' ? '' : 'none';
+    if (wdRow) wdRow.style.display = k === 'weekly' ? '' : 'none';
+    const simple = k === 'every' || k === 'after';
+    numInp.style.display = simple ? '' : 'none';
+    unitSel.style.display = simple ? '' : 'none';
+    // cron 的示例提示跟着时机走；其余时机给一句人话说明。
+    if (k === 'cron') auHint(hint, t('auto_cron_hint'), false);
+    else if (k === 'weekly') auHint(hint, t('auto_weekly_hint'), false);
+    else if (k === 'at') auHint(hint, t('auto_at_hint'), false);
+    else auHint(hint, null, false);
+  };
+  kindSel.onchange = syncKind;
+
+  // —— 动作切换：shell 任务不需要会话/模型，agent 任务不需要命令行 ——
+  const syncAction = () => {
+    const shell = actSel.value === 'shell';
+    cmdInp.style.display = shell ? '' : 'none';
+    promptInp.style.display = shell ? 'none' : '';
+    tgtSel.style.display = shell ? 'none' : '';
+    modelSel.style.display = shell ? 'none' : '';
+  };
+  actSel.onchange = syncAction;
+
+  // —— 模型下拉：跟随全局 + 全部已配置模型 ——
+  if (modelSel) {
+    MODELS.forEach(m => {
+      const o = document.createElement('option');
+      o.value = m.value;
+      o.textContent = (m.provider ? m.provider + ' · ' : '') + (m.label || m.value);
+      modelSel.append(o);
+    });
+    // 模型清单还没加载出来时，下拉里只有「跟随当前」——旁注说明去哪里配。
+    const mh = q('modelhint');
+    if (mh) {
+      if (!MODELS.length) {
+        mh.style.display = '';
+        mh.textContent = t('auto_model_none');
+      } else {
+        mh.style.display = 'none';
+      }
+    }
+  }
+
+  // 没有活动会话时「投递到当前会话」没有意义：禁用该选项并标注原因。
+  // 编辑态例外：任务本身可能已绑定了一个会话（boundSid），那仍然可以继续用它。
+  const boundSid = (task && task.target && typeof task.target === 'object')
+    ? (task.target.session_id || task.target.sessionId || '') : '';
+  const exOpt = tgtSel ? tgtSel.querySelector('option[value="existing"]') : null;
+  if (exOpt && !(conv && conv.id) && !boundSid) {
+    exOpt.disabled = true;
+    exOpt.textContent += z ? '（当前没有会话）' : ' (no active chat)';
+  }
+
+  // —— 校验：就地高亮，不只靠 toast ——
+  const clearBad = () => {
+    root.querySelectorAll('.tk-bad').forEach(e => e.classList.remove('tk-bad'));
+  };
+  const fail = (el, msg) => {
+    clearBad();
+    if (el) el.classList.add('tk-bad');
+    auHint(hint, msg, true);
+    if (el && el.focus) { try { el.focus(); } catch (e) {} }
+    return false;
+  };
+
+  /** 从表单读出 timing；失败返回 null 并已就地提示。 */
+  const readTiming = () => {
+    const zone = auZone();
+    const k = kindSel.value;
+    const n = Math.max(1, +numInp.value || 1);
+    const secs = unitSel.value === 'hour' ? n * 3600 : n * 60;
+    if (k === 'every') return { kind: 'every', every_seconds: Math.max(60, secs) };
+    if (k === 'after') return { kind: 'after', after_seconds: secs };
+    if (k === 'daily') return { kind: 'daily', time: timeInp.value || '09:00', timeZone: zone };
+    if (k === 'weekly') {
+      const wd = [];
+      root.querySelectorAll('#' + p + '-wdrow input[type="checkbox"]').forEach(cb => {
+        if (cb.checked) wd.push(+cb.value);
+      });
+      if (!wd.length) { fail(wdRow, t('auto_err_weekday')); return null; }
+      return { kind: 'weekly', time: timeInp.value || '09:00', timeZone: zone, weekdays: wd };
+    }
+    if (k === 'at') {
+      const v = atInp.value;
+      if (!v) { fail(atInp, t('auto_err_at')); return null; }
+      const iso = auLocalToRFC3339(v);
+      if (!iso) { fail(atInp, t('auto_err_at')); return null; }
+      return { kind: 'at', at: iso };
+    }
+    if (k === 'cron') {
+      const expr = cronInp.value.trim();
+      if (!expr) { fail(cronInp, t('auto_err_cron')); return null; }
+      return { kind: 'cron', expression: expr, timeZone: zone };
+    }
+    return null;
+  };
+
+  const readCommon = () => {
+    const name = nameInp.value.trim();
+    const isShell = actSel.value === 'shell';
+    const prompt = isShell ? '' : promptInp.value.trim();
+    const command = isShell ? cmdInp.value.trim() : '';
+    if (!name) { fail(nameInp, t('auto_err_name')); return null; }
+    if (isShell && !command) { fail(cmdInp, t('auto_err_command')); return null; }
+    if (!isShell && !prompt) { fail(promptInp, t('auto_err_prompt')); return null; }
+    const timing = readTiming();
+    if (!timing) return null;
+    const tgt = tgtSel.value;
+    if (!isShell && tgt === 'existing' && !(conv && conv.id)) {
+      fail(tgtSel, t('auto_err_no_chat'));
+      return null;
+    }
+    return { name, prompt, command, isShell, timing, tgt };
+  };
+
+  syncKind();
+  syncAction();
+  return { readCommon, clearBad, q, modelSel, actSel, tgtSel, promptInp, cmdInp, nameInp };
+}
+
+/** 表单内提示行：msg 为 null 时隐藏。 */
+function auHint(el, msg, isErr) {
+  if (!el) return;
+  if (!msg) { el.style.display = 'none'; el.textContent = ''; el.classList.remove('err'); return; }
+  el.style.display = '';
+  el.textContent = msg;
+  el.classList.toggle('err', !!isErr);
 }
 
 async function renderAutoPage() {
   const z = S.lang === 'zh';
   let tasks = [];
   try { tasks = (await api('/schedule')).tasks || []; } catch (e) {}
-  const rows = tasks.map(t => {
-    const st = (t.status || 'active').toLowerCase();
-    const stl = st === 'active' ? (z ? '运行中' : 'Active') : st === 'paused' ? (z ? '已暂停' : 'Paused') : (z ? '已结束' : 'Ended');
-    const isShell = t.action && t.action.kind === 'shell';
+  AU_TASKS = tasks;
+  // 注意：形参不要叫 t —— 全局 t() 是 i18n 取值函数，同名会把它遮掉。
+  const rows = tasks.map(tk => {
+    const st = (tk.status || 'active').toLowerCase();
+    const stl = st === 'active' ? t('auto_st_active') : st === 'paused' ? t('auto_st_paused') : t('auto_st_ended');
+    const isShell = tk.action && tk.action.kind === 'shell';
     const what = isShell
-      ? (z ? '命令 ' : 'cmd ') + (t.action.command || '')
-      : (z ? '消息 ' : 'msg ') + (t.prompt || '');
-    const mdl = isShell ? '' : (t.modelSel || t.model_sel || '');
-    return '<div class="taskrow col" data-id="' + esc(t.id) + '">' +
-      '<div class="tk-top"><b class="tk-name">' + esc(t.name || t.id) + '</b>' +
-        '<span class="tk-kind">' + (isShell ? (z ? 'shell' : 'shell') : (z ? '对话' : 'agent')) + '</span>' +
+      ? (z ? '命令 ' : 'cmd ') + (tk.action.command || '')
+      : (z ? '消息 ' : 'msg ') + (tk.prompt || '');
+    const mdl = isShell ? '' : (tk.modelSel || tk.model_sel || '');
+    const lastAt = tk.lastRunAt || tk.last_run_at || '';
+    const lastOk = (tk.lastRunOk === true) ? true : (tk.lastRunOk === false ? false : null);
+    const lastTxt = lastAt
+      ? t('auto_last') + ' ' + fmtDT(lastAt) + (lastOk === null ? '' : (lastOk ? ' ✓' : ' ✗'))
+      : '';
+    return '<div class="taskrow col" data-id="' + esc(tk.id) + '" data-st="' + esc(st) + '" data-name="' + esc(tk.name || tk.id) + '">' +
+      '<div class="tk-top">' +
+        '<button type="button" class="tk-name" data-act="edit" title="' + esc(t('auto_edit_task_tip')) + '">' + esc(tk.name || tk.id) + '</button>' +
+        '<span class="tk-kind">' + (isShell ? 'shell' : t('auto_kind_agent')) + '</span>' +
         (mdl ? '<span class="tk-model">' + esc(mdl.split('/').pop()) + '</span>' : '') +
         '<span class="tk-st ' + st + '">' + stl + '</span>' +
         '<div class="tk-acts">' +
-          (st === 'active' ? '<button class="btn" data-act="pause">' + (z ? '暂停' : 'Pause') + '</button>' : '') +
-          (st === 'paused' ? '<button class="btn" data-act="resume">' + (z ? '启用' : 'Resume') + '</button>' : '') +
-          (st !== 'ended' ? '<button class="btn" data-act="run">' + (z ? '立即运行' : 'Run now') + '</button>' : '') +
-          '<button class="btn danger" data-act="del">' + (z ? '删除' : 'Delete') + '</button>' +
+          (st === 'active' ? '<button type="button" class="btn" data-act="pause" title="' + esc(t('auto_pause_tip')) + '">' + t('auto_pause') + '</button>' : '') +
+          (st === 'paused' ? '<button type="button" class="btn" data-act="resume" title="' + esc(t('auto_resume_tip')) + '">' + t('auto_resume') + '</button>' : '') +
+          (st !== 'ended' ? '<button type="button" class="btn" data-act="run" title="' + esc(t('auto_run_tip')) + '">' + t('auto_run_now') + '</button>' : '') +
+          '<button type="button" class="btn" data-act="edit" title="' + esc(t('auto_edit_task_tip')) + '">' + t('auto_edit_btn') + '</button>' +
+          '<button type="button" class="btn danger" data-act="del" title="' + esc(t('auto_del_tip')) + '">' + t('auto_delete') + '</button>' +
         '</div>' +
       '</div>' +
-      '<div class="tk-meta">' + esc(taskTimingLabel(t.timing)) + ' <span class="tk-dot">·</span> ' +
-        (z ? '下次 ' : 'next ') + esc(fmtDT(t.scheduledAt)) + ' <span class="tk-dot">·</span> ' +
-        (z ? '已跑 ' : 'ran ') + (t.runCount || 0) + (z ? ' 次' : '×') + '</div>' +
-      '<div class="tk-prompt" title="' + (z ? '点击展开或收起' : 'Click to expand or collapse') + '">' + esc(what) + '</div>' +
+      '<div class="tk-meta">' + esc(taskTimingLabel(tk.timing)) + ' <span class="tk-dot">·</span> ' +
+        t('auto_next') + ' ' + esc(fmtDT(tk.scheduledAt)) + ' <span class="tk-dot">·</span> ' +
+        t('auto_ran') + ' ' + (tk.runCount || 0) + (z ? ' 次' : '×') +
+        (lastTxt ? ' <span class="tk-dot">·</span> ' + esc(lastTxt) : '') + '</div>' +
+      '<button type="button" class="tk-prompt" data-toggle="1" aria-expanded="false" title="' + esc(t('auto_expand_tip')) + '">' + esc(what) + '</button>' +
+      '<div class="tk-runs" data-runs="' + esc(tk.id) + '" hidden></div>' +
     '</div>';
   }).join('');
+  const segs = [
+    ['all', t('auto_f_all')], ['active', t('auto_f_active')],
+    ['paused', t('auto_f_paused')], ['ended', t('auto_f_ended')]
+  ].map(([k, label]) => '<button type="button" data-seg="' + k + '" class="' +
+    (AU.filter === k ? 'on' : '') + '" aria-pressed="' + (AU.filter === k ? 'true' : 'false') + '">' + esc(label) + '</button>').join('');
+  const segBar = '<div class="tk-seg" role="group" aria-label="' + esc(t('auto_filter_label')) + '">' + segs + '</div>' +
+    '<input id="au-q" class="tk-search" type="search" placeholder="' + esc(t('auto_search_ph')) +
+    '" aria-label="' + esc(t('auto_search_ph')) + '" value="' + esc(AU.q) + '">';
+
+  // 列表区：空态区分「没有任务」与「筛选后无匹配」。
+  const total = tasks.length;
+  let listBody;
+  if (!total) {
+    listBody = '<div class="pempty">' + esc(t('auto_empty_none')) + '</div>';
+  } else {
+    listBody = rows + '<div class="pempty" id="au-nomatch" hidden>' + esc(t('auto_empty_nomatch')) + '</div>';
+  }
+
+  const editTask = AU.editId ? AU_TASKS.find(x => x.id === AU.editId) : null;
+  const editPanel = editTask
+    ? '<div class="sksh"><b>' + esc(t('auto_edit_title')) + '</b>' +
+        '<span class="fl"></span>' +
+        '<button type="button" class="btn" id="et-cancel">' + esc(t('auto_cancel')) + '</button>' +
+      '</div>' +
+      '<div class="tk-form editing" id="et-form">' + auFormFields('et') +
+        '<div class="tk-row">' +
+          '<span class="fl"></span>' +
+          '<button type="button" class="btn" id="et-save">' + esc(t('auto_save')) + '</button>' +
+        '</div>' +
+      '</div>'
+    : '';
+
   return '<div class="pg-head"><h2>' + (z ? '自动化' : 'Automation') + '</h2>' +
     '<p>' + (z ? '定时执行命令或投递对话——比如每小时巡检、每天晨报、定时跑构建。' : 'Run a command or deliver a prompt on a schedule — hourly checks, daily digests, timed builds.') + '</p></div>' +
-    '<div class="sksh"><b>' + (z ? '定时任务' : 'Scheduled tasks') + '</b><em>' + tasks.length + '</em></div>' +
-    '<div class="skl">' + (rows || '<div class="pempty">' + (z ? '还没有定时任务。' : 'No scheduled tasks yet.') + '</div>') + '</div>' +
+    '<div class="sksh"><b>' + (z ? '定时任务' : 'Scheduled tasks') + '</b><em>' + total + '</em></div>' +
+    '<div class="tk-filters">' + segBar + '</div>' +
+    '<div class="skl" id="au-list">' + listBody + '</div>' +
+    editPanel +
     '<div class="sksh"><b>' + (z ? '新建任务' : 'New task') + '</b></div>' +
-    '<div class="tk-form">' +
-      '<input id="nt-name" placeholder="' + (z ? '任务名称' : 'Task name') + '">' +
+    '<div class="tk-form" id="nt-form">' + auFormFields('nt') +
       '<div class="tk-row">' +
-        '<select id="nt-action">' +
-          '<option value="agent">' + (z ? '向会话投递消息' : 'Deliver a message') + '</option>' +
-          '<option value="shell">' + (z ? '执行 shell 命令' : 'Run a shell command') + '</option>' +
-        '</select>' +
         '<span class="fl"></span>' +
-      '</div>' +
-      '<textarea id="nt-prompt" rows="2" placeholder="' + (z ? '触发时投递的消息（交给模型处理）' : 'Message delivered to the agent when it fires') + '"></textarea>' +
-      '<textarea id="nt-command" rows="2" style="display:none;font-family:var(--mono);font-size:12.5px" placeholder="' + (z ? '要执行的命令，例如 npm run build' : 'Command to run, e.g. npm run build') + '"></textarea>' +
-      '<div class="tk-row">' +
-        '<select id="nt-kind">' +
-          '<option value="every">' + (z ? '每隔' : 'Every') + '</option>' +
-          '<option value="daily">' + (z ? '每天' : 'Daily at') + '</option>' +
-          '<option value="after">' + (z ? '一次性（延迟）' : 'Once after') + '</option>' +
-          '<option value="cron">' + (z ? 'cron 表达式' : 'Cron expression') + '</option>' +
-        '</select>' +
-        '<input id="nt-num" type="number" min="1" value="5" style="width:64px">' +
-        '<select id="nt-unit"><option value="min">' + (z ? '分钟' : 'min') + '</option><option value="hour">' + (z ? '小时' : 'hour') + '</option></select>' +
-        '<input id="nt-time" type="time" value="09:00" style="display:none">' +
-        '<input id="nt-cron" placeholder="*/15 * * * *" style="display:none;width:150px;font-family:var(--mono)">' +
-      '</div>' +
-      '<div class="tk-row">' +
-        '<select id="nt-target">' +
-          '<option value="reuse">' + (z ? '复用一个会话' : 'Reuse one session') + '</option>' +
-          '<option value="new">' + (z ? '每次新建会话' : 'New session each time') + '</option>' +
-          '<option value="existing">' + (z ? '投递到当前会话' : 'Current chat') + '</option>' +
-        '</select>' +
-        '<select id="nt-model" style="max-width:220px"><option value="">' + (z ? '模型：跟随当前' : 'Model: follow current') + '</option></select>' +
-        '<span class="fl"></span>' +
-        '<button class="btn" id="nt-add">' + (z ? '创建' : 'Create') + '</button>' +
+        '<button type="button" class="btn" id="nt-add">' + (z ? '创建' : 'Create') + '</button>' +
       '</div>' +
     '</div>';
 }
 
+/** 任务卡展开后拉取运行历史；接口未就绪时静默隐藏该区域。 */
+async function auLoadRuns(box, taskId) {
+  if (!box) return;
+  let runs = null;
+  try {
+    const res = await api('/schedule/runs?task=' + encodeURIComponent(taskId));
+    runs = (res && res.runs) || [];
+  } catch (e) { runs = null; }
+  // 接口不可用（后端还没上线 / 路径不对）→ 隐藏运行历史区域，不报错。
+  if (!runs) { box.hidden = true; box.innerHTML = ''; return; }
+  if (!runs.length) {
+    box.hidden = false;
+    box.innerHTML = '<div class="tk-runs-h">' + esc(t('auto_runs_title')) + '</div>' +
+      '<div class="tk-hint">' + esc(t('auto_runs_empty')) + '</div>';
+    return;
+  }
+  const rows = runs.slice(0, 20).map(r => {
+    const ok = r.ok === true;
+    const badge = '<span class="tk-badge ' + (ok ? 'ok' : 'bad') + '">' +
+      (ok ? esc(t('auto_run_ok')) : esc(t('auto_run_fail'))) + '</span>';
+    const code = (r.exitCode === null || r.exitCode === undefined) ? '' :
+      '<span class="tk-rcode">' + esc(t('auto_run_exit') + ' ' + r.exitCode) + '</span>';
+    const sid = r.sessionId || r.session_id || '';
+    const link = sid ? '<button type="button" class="btn tk-rlink" data-sid="' + esc(sid) + '">' +
+      esc(t('auto_run_session')) + '</button>' : '';
+    const err = r.error ? '<div class="tk-hint err">' + esc(r.error) + '</div>' : '';
+    const out = (r.output || '').trim();
+    const outEl = out ? '<pre class="tk-rout">' + esc(out.length > 4000 ? out.slice(-4000) : out) + '</pre>' : '';
+    return '<div class="tk-run">' +
+      '<div class="tk-run-t">' + badge +
+        '<span class="tk-rtime">' + esc(fmtDT(r.startedAt || r.started_at)) + '</span>' + code + link +
+      '</div>' + err + outEl +
+    '</div>';
+  }).join('');
+  box.hidden = false;
+  box.innerHTML = '<div class="tk-runs-h">' + esc(t('auto_runs_title')) + '</div>' + rows;
+  box.querySelectorAll('[data-sid]').forEach(b => {
+    b.onclick = () => {
+      const sid = b.dataset.sid;
+      try { openSession(sid); } catch (e) { toast(e.message || t('auto_run_session')); }
+    };
+  });
+}
+
+/** 按当前筛选/搜索条件就地过滤任务行（不重新请求）。 */
+function auApplyFilter(root) {
+  const rows = [...root.querySelectorAll('#au-list .taskrow')];
+  const q = (AU.q || '').trim().toLowerCase();
+  let shown = 0;
+  rows.forEach(row => {
+    const st = row.dataset.st || 'active';
+    const nm = (row.dataset.name || '').toLowerCase();
+    const okSt = AU.filter === 'all' || st === AU.filter;
+    const okQ = !q || nm.indexOf(q) >= 0;
+    const show = okSt && okQ;
+    row.classList.toggle('hide', !show);
+    if (show) shown++;
+  });
+  const nm = root.querySelector('#au-nomatch');
+  if (nm) nm.hidden = !(shown === 0 && rows.length > 0);
+}
+
 function bindAutoPage(root) {
   const z = S.lang === 'zh';
+
+  // —— 状态筛选分段控件 + 名称搜索 ——
+  root.querySelectorAll('[data-seg]').forEach(b => {
+    b.onclick = () => {
+      AU.filter = b.dataset.seg;
+      root.querySelectorAll('[data-seg]').forEach(x => {
+        const on = x.dataset.seg === AU.filter;
+        x.classList.toggle('on', on);
+        x.setAttribute('aria-pressed', on ? 'true' : 'false');
+      });
+      auApplyFilter(root);
+    };
+  });
+  const qInp = root.querySelector('#au-q');
+  if (qInp) {
+    qInp.oninput = () => { AU.q = qInp.value; auApplyFilter(root); };
+  }
+  auApplyFilter(root);
+
+  // —— 任务行：展开/收起 + 操作按钮 ——
   root.querySelectorAll('.taskrow').forEach(row => {
     const id = row.dataset.id;
     const pr = row.querySelector('.tk-prompt');
-    if (pr) pr.onclick = e => {
-      if (e.target.closest('button')) return;
-      row.classList.toggle('open');
-    };
+    if (pr) {
+      pr.onclick = async () => {
+        const open = row.classList.toggle('open');
+        pr.setAttribute('aria-expanded', open ? 'true' : 'false');
+        const box = row.querySelector('.tk-runs');
+        if (open && box) {
+          box.hidden = false;
+          auLoadRuns(box, id);
+        }
+      };
+    }
     row.querySelectorAll('[data-act]').forEach(b => {
       b.onclick = async () => {
         const act = b.dataset.act;
-        // 删除任务不可恢复，先轻确认
-        if (act === 'del' && !(await confirmBox(z ? '确定删除这个任务？' : 'Delete this task?'))) return;
+        if (act === 'edit') {
+          AU.editId = id;
+          go('auto', true);
+          return;
+        }
+        // 删除任务不可恢复，先二次确认
+        if (act === 'del' && !(await confirmBox(t('auto_del_confirm'), { danger: true }))) return;
         try {
           if (act === 'del') {
             await api('/schedule/' + id, { method: 'DELETE' });
           } else if (act === 'run') {
             await api('/schedule/' + id + '/run', { method: 'POST' });
-            toast(z ? '已触发' : 'Triggered');
+            toast(t('auto_triggered'));
+            // 立即运行后把运行历史拉出来（失败不打扰：历史区会自己隐藏）
+            const box = row.querySelector('.tk-runs');
+            if (box) {
+              row.classList.add('open');
+              if (pr) pr.setAttribute('aria-expanded', 'true');
+              box.hidden = false;
+              auLoadRuns(box, id);
+            }
+            return;
           } else {
             await api('/schedule/' + id, { method: 'PATCH', body: { action: act } });
           }
@@ -3355,93 +3818,134 @@ function bindAutoPage(root) {
       };
     });
   });
-  const kindSel = root.querySelector('#nt-kind');
-  const timeInp = root.querySelector('#nt-time');
-  const cronInp = root.querySelector('#nt-cron');
-  const numInp = root.querySelector('#nt-num');
-  const unitSel = root.querySelector('#nt-unit');
-  const actSel = root.querySelector('#nt-action');
-  const promptInp = root.querySelector('#nt-prompt');
-  const cmdInp = root.querySelector('#nt-command');
-  const modelSel = root.querySelector('#nt-model');
-  const syncKind = () => {
-    const k = kindSel.value;
-    timeInp.style.display = k === 'daily' ? '' : 'none';
-    cronInp.style.display = k === 'cron' ? '' : 'none';
-    const simple = k === 'every' || k === 'after';
-    numInp.style.display = simple ? '' : 'none';
-    unitSel.style.display = simple ? '' : 'none';
-  };
-  kindSel.onchange = syncKind;
-  syncKind();
-  // 动作切换：shell 任务不需要会话/模型，agent 任务不需要命令行
-  const syncAction = () => {
-    const shell = actSel.value === 'shell';
-    cmdInp.style.display = shell ? '' : 'none';
-    promptInp.style.display = shell ? 'none' : '';
-    const tgt = root.querySelector('#nt-target');
-    if (tgt) tgt.style.display = shell ? 'none' : '';
-    if (modelSel) modelSel.style.display = shell ? 'none' : '';
-  };
-  actSel.onchange = syncAction;
-  syncAction();
-  // 模型下拉：跟随全局 + 全部已配置模型
-  if (modelSel) {
-    MODELS.forEach(m => {
-      const o = document.createElement('option');
-      o.value = m.value;
-      o.textContent = (m.provider ? m.provider + ' · ' : '') + (m.label || m.value);
-      modelSel.append(o);
-    });
+
+  // —— 新建表单 ——
+  const ntForm = auWireForm(root, 'nt', null);
+  const addBtn = root.querySelector('#nt-add');
+  if (addBtn && ntForm) {
+    addBtn.onclick = async () => {
+      const c = ntForm.readCommon();
+      if (!c) return;
+      try {
+        await api('/schedule', {
+          method: 'POST',
+          body: {
+            name: c.name,
+            prompt: c.prompt,
+            action: c.isShell ? { kind: 'shell', command: c.command } : { kind: 'agent' },
+            model: c.isShell ? '' : (ntForm.modelSel ? ntForm.modelSel.value : ''),
+            timing: c.timing,
+            target: c.tgt === 'existing' ? { kind: 'existing', session_id: (conv && conv.id) || '' } : c.tgt,
+            session_id: (conv && conv.id) || ''
+          }
+        });
+        toast(t('auto_created'));
+        go('auto', true);
+      } catch (e) { toast(e.message); }
+    };
   }
-  // 没有活动会话时「投递到当前会话」没有意义：禁用该选项并标注原因
-  const tgtSel = root.querySelector('#nt-target');
-  const exOpt = tgtSel ? tgtSel.querySelector('option[value="existing"]') : null;
-  if (exOpt && !(conv && conv.id)) {
-    exOpt.disabled = true;
-    exOpt.textContent += z ? '（当前没有会话）' : ' (no active chat)';
-  }
-  root.querySelector('#nt-add').onclick = async () => {
-    const name = root.querySelector('#nt-name').value.trim();
-    const isShell = actSel.value === 'shell';
-    const prompt = isShell ? '' : promptInp.value.trim();
-    const command = isShell ? cmdInp.value.trim() : '';
-    if (!name) { toast(z ? '请填写任务名称' : 'Task name is required'); return; }
-    if (isShell && !command) { toast(z ? '请填写要执行的命令' : 'Command is required'); return; }
-    if (!isShell && !prompt) { toast(z ? '请填写要投递的消息' : 'Message is required'); return; }
-    const n = Math.max(1, +numInp.value || 1);
-    const secs = unitSel.value === 'hour' ? n * 3600 : n * 60;
-    const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    let timing;
-    if (kindSel.value === 'every') timing = { kind: 'every', every_seconds: Math.max(60, secs) };
-    else if (kindSel.value === 'after') timing = { kind: 'after', after_seconds: secs };
-    else if (kindSel.value === 'cron') {
-      const expr = cronInp.value.trim();
-      if (!expr) { toast(z ? '请填写 cron 表达式' : 'Cron expression is required'); return; }
-      timing = { kind: 'cron', expression: expr, timeZone: zone };
-    } else timing = { kind: 'daily', time: timeInp.value || '09:00', timeZone: zone };
-    const tgt = root.querySelector('#nt-target').value;
-    if (!isShell && tgt === 'existing' && !(conv && conv.id)) {
-      toast(z ? '当前没有会话，不能投递到当前对话' : 'No active chat to deliver to');
-      return;
-    }
-    try {
-      await api('/schedule', {
-        method: 'POST',
-        body: {
-          name,
-          prompt,
-          action: isShell ? { kind: 'shell', command } : { kind: 'agent' },
-          model: isShell ? '' : (modelSel ? modelSel.value : ''),
-          timing,
-          target: tgt === 'existing' ? { kind: 'existing', session_id: (conv && conv.id) || '' } : tgt,
-          session_id: (conv && conv.id) || ''
+
+  // —— 编辑面板（与新建表单同构，保存走 PATCH） ——
+  const etFormEl = root.querySelector('#et-form');
+  const editTask = AU.editId ? AU_TASKS.find(x => x.id === AU.editId) : null;
+  if (etFormEl && editTask) {
+    const et = auWireForm(root, 'et', editTask);
+    // 回填既有值
+    if (et) {
+      const g = id => root.querySelector('#et-' + id);
+      const tm = editTask.timing || {};
+      const isShell = editTask.action && editTask.action.kind === 'shell';
+      g('name').value = editTask.name || '';
+      g('action').value = isShell ? 'shell' : 'agent';
+      g('prompt').value = editTask.prompt || '';
+      g('command').value = (editTask.action && editTask.action.command) || '';
+      g('target').value = 'reuse';
+      const mdl = editTask.modelSel || editTask.model_sel || '';
+      if (mdl && et.modelSel) {
+        let found = false;
+        et.modelSel.querySelectorAll('option').forEach(o => { if (o.value === mdl) found = true; });
+        if (!found) {
+          const o = document.createElement('option');
+          o.value = mdl;
+          o.textContent = mdl;
+          et.modelSel.append(o);
         }
-      });
-      toast(z ? '任务已创建' : 'Task created');
-      go('auto', true);
-    } catch (e) { toast(e.message); }
-  };
+        et.modelSel.value = mdl;
+      }
+      // 时机回填：把后端的 timing 还原成表单的各控件
+      const kind = tm.kind || 'every';
+      g('kind').value = ['every', 'daily', 'weekly', 'after', 'at', 'cron'].indexOf(kind) >= 0 ? kind : 'every';
+      if (kind === 'every') {
+        const s = Math.max(60, +tm.every_seconds || 300);
+        if (s % 3600 === 0 && s >= 3600) { g('num').value = s / 3600; g('unit').value = 'hour'; }
+        else { g('num').value = Math.max(1, Math.round(s / 60)); g('unit').value = 'min'; }
+      } else if (kind === 'after') {
+        const s = Math.max(1, +tm.after_seconds || 5);
+        if (s % 3600 === 0 && s >= 3600) { g('num').value = s / 3600; g('unit').value = 'hour'; }
+        else { g('num').value = s; g('unit').value = 'min'; }
+      } else if (kind === 'daily') {
+        g('time').value = tm.time || '09:00';
+      } else if (kind === 'weekly') {
+        g('time').value = tm.time || '09:00';
+        const wd = (tm.weekdays || []).map(x => +x);
+        root.querySelectorAll('#et-wdrow input[type="checkbox"]').forEach(cb => {
+          cb.checked = wd.indexOf(+cb.value) >= 0;
+        });
+      } else if (kind === 'at') {
+        g('at').value = auRFCToLocalInput(tm.at);
+      } else if (kind === 'cron') {
+        g('cron').value = tm.expression || '';
+      }
+      // 目标：existing 才有意义
+      const tgt = editTask.target;
+      const tgtKind = (tgt && typeof tgt === 'object') ? tgt.kind : tgt;
+      if (tgtKind === 'existing') {
+        // 「投递到当前会话」在没有活动会话时被禁用，选中会被浏览器丢掉：
+        // 保留 existing 语义（有绑定会话 id 就用它，没有则提示改目标）。
+        const boundSid = (tgt && typeof tgt === 'object') ? (tgt.session_id || tgt.sessionId || '') : '';
+        if (boundSid) g('target').value = 'existing';
+        else g('target').value = 'reuse';
+      } else if (tgtKind === 'new_each_time' || tgtKind === 'new') g('target').value = 'new';
+      else g('target').value = 'reuse';
+      // 重新跑一次联动（值变了，display 要跟着走）
+      g('kind').dispatchEvent(new Event('change'));
+      g('action').dispatchEvent(new Event('change'));
+    }
+    const cancelBtn = root.querySelector('#et-cancel');
+    if (cancelBtn) cancelBtn.onclick = () => { AU.editId = ''; go('auto', true); };
+    const saveBtn = root.querySelector('#et-save');
+    if (saveBtn && et) {
+      saveBtn.onclick = async () => {
+        const c = et.readCommon();
+        if (!c) return;
+        try {
+          const body = {
+            name: c.name,
+            prompt: c.prompt,
+            action: c.isShell ? { kind: 'shell', command: c.command } : { kind: 'agent' },
+            timing: c.timing,
+            model: c.isShell ? '' : (et.modelSel ? et.modelSel.value : '')
+          };
+          // 目标也能改：existing 必须带 session_id，否则后端会拒。
+          if (!c.isShell) {
+            if (c.tgt === 'existing') {
+              // 优先用当前会话；没有就用任务原先绑定的那一个。
+              const bound = (editTask.target && typeof editTask.target === 'object')
+                ? (editTask.target.session_id || editTask.target.sessionId || '') : '';
+              const sid = (conv && conv.id) || bound || '';
+              body.target = { kind: 'existing', session_id: sid };
+            } else {
+              body.target = c.tgt === 'new' ? 'new' : 'reuse';
+            }
+          }
+          await api('/schedule/' + editTask.id, { method: 'PATCH', body });
+          toast(t('auto_saved'));
+          AU.editId = '';
+          go('auto', true);
+        } catch (e) { toast(e.message); }
+      };
+    }
+  }
 }
 
 /* ---------------------------------------------------- 插件 */
