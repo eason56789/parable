@@ -286,6 +286,8 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/usage", get(get_usage))
         .route("/tools", get(tools))
         .route("/schedule", get(list_tasks).post(create_task))
+        // 运行历史必须注册在 /schedule/{id} 之前：静态段优先，显式提前更稳。
+        .route("/schedule/runs", get(list_run_records))
         .route("/schedule/{id}", get(get_task).patch(edit_task).delete(delete_task))
         .route("/schedule/{id}/run", post(run_task_now))
         .route("/agents", get(list_agents))
@@ -2638,8 +2640,57 @@ async fn list_tasks(State(state): State<SharedState>, headers: HeaderMap) -> Res
     if !check_auth(&headers, None, &state) {
         return unauthorized();
     }
-    let tasks = state.schedule.store().list().await;
-    Json(json!({"tasks": tasks})).into_response()
+    let store = state.schedule.store();
+    let tasks = store.list().await;
+    // 最近一次运行的结果：前端用来标"上次跑成功/失败"，没有历史时为 null。
+    let last = store.last_runs().await;
+    let items: Vec<Value> = tasks
+        .iter()
+        .map(|t| {
+            let mut v = serde_json::to_value(t).unwrap_or(Value::Null);
+            let lr = last.get(&t.id);
+            if let Some(obj) = v.as_object_mut() {
+                // lastRunOk：最近一次运行是否成功；没有运行历史时为 null。
+                obj.insert(
+                    "lastRunOk".into(),
+                    match lr {
+                        Some(r) => Value::Bool(r.ok),
+                        None => Value::Null,
+                    },
+                );
+                // lastRunAt：任务自带字段（触发时刻）优先；没有则回退到
+                // 运行记录的开始时刻，保证两者不打架。
+                if t.last_run_at.is_none() {
+                    obj.insert(
+                        "lastRunAt".into(),
+                        match lr {
+                            Some(r) => Value::String(r.started_at.clone()),
+                            None => Value::Null,
+                        },
+                    );
+                }
+            }
+            v
+        })
+        .collect();
+    Json(json!({"tasks": items})).into_response()
+}
+
+/// GET /api/schedule/runs?task=<id> —— 运行历史。
+///
+/// 不带 `task` 参数返回全部记录；带 `task` 只返回该任务的记录。
+/// 按开始时间倒序（最新在前）。
+async fn list_run_records(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    let task = q.get("task").map(|s| s.trim()).filter(|s| !s.is_empty());
+    let runs = state.schedule.store().runs_for(task).await;
+    Json(json!({"runs": runs})).into_response()
 }
 
 #[derive(Debug, Deserialize)]
@@ -2757,10 +2808,37 @@ struct EditTaskReq {
     name: Option<String>,
     #[serde(default)]
     prompt: Option<String>,
+    /// 改触发规则；改动后会重新提交下一次触发。
     #[serde(default)]
     timing: Option<crate::schedule::Timing>,
+    /// 动作：老接口塞的是字符串（`pause` / `resume` / `delete`），
+    /// 也接受 `{"kind":"agent"}` / `{"kind":"shell","command":"…"}` 标签形式
+    /// （与 `create_task` 的 `parse_action` 同口径）。
     #[serde(default)]
-    action: Option<String>,
+    action: Option<Value>,
+    /// 改用哪个模型（`provider/model`）；空串 = 跟随全局模型。
+    #[serde(default)]
+    model: Option<String>,
+    /// 改投递目标，解析规则同 `parse_target`。
+    #[serde(default)]
+    target: Option<Value>,
+    /// `active` / `paused` / `ended`。
+    #[serde(default)]
+    status: Option<String>,
+    /// shell 动作的命令（配合 action 一起改）。
+    #[serde(default)]
+    command: Option<String>,
+}
+
+/// 把请求里的 status 解析成 `TaskStatus`；不认识的取值返回 None。
+fn parse_status(v: &str) -> Option<crate::schedule::TaskStatus> {
+    use crate::schedule::TaskStatus;
+    match v.trim().to_ascii_lowercase().as_str() {
+        "active" | "resume" | "running" => Some(TaskStatus::Active),
+        "paused" | "pause" => Some(TaskStatus::Paused),
+        "ended" | "end" => Some(TaskStatus::Ended),
+        _ => None,
+    }
 }
 
 async fn edit_task(
@@ -2772,13 +2850,55 @@ async fn edit_task(
     if !check_auth(&headers, None, &state) {
         return unauthorized();
     }
-    if r.action.as_deref() == Some("delete") {
+    // action 可能是字符串（pause/resume/delete）或标签对象。
+    let action_str = r.action.as_ref().and_then(|v| v.as_str()).map(|s| s.to_string());
+    let action_obj = r.action.as_ref().filter(|v| v.is_object()).cloned();
+    if action_str.as_deref() == Some("delete") {
         return match state.schedule.store().delete(&id).await {
             Ok(()) => Json(json!({"ok": true})).into_response(),
             Err(e) => server_error(e),
         };
     }
-    match state
+    // 改 timing 前先校验：不合法就直接拒绝，别把任务改成永远不触发的状态。
+    if let Some(tm) = &r.timing {
+        if let Err(e) = tm.validate() {
+            return bad_request(&e.to_string());
+        }
+    }
+    // action / status 互相冲突时以 status 为准（status 更明确）。
+    let status = r
+        .status
+        .as_deref()
+        .and_then(parse_status)
+        .or_else(|| match action_str.as_deref() {
+            Some("pause") => Some(crate::schedule::TaskStatus::Paused),
+            Some("resume") => Some(crate::schedule::TaskStatus::Active),
+            _ => None,
+        });
+    if let Some(s) = r.status.as_deref() {
+        if s.trim().is_empty() || parse_status(s).is_none() {
+            return bad_request("status must be one of: active, paused, ended");
+        }
+    }
+    let now = chrono::Utc::now();
+    // 目标在闭包外解析：解析结果要先校验（existing 必须带会话 id）。
+    let new_target = r.target.as_ref().map(|tv| parse_target(Some(tv), ""));
+    if let Some(crate::schedule::Target::Existing { session_id }) = &new_target {
+        if session_id.trim().is_empty() {
+            return bad_request("target `existing` requires a session_id");
+        }
+    }
+    // 标签形式的 action → 新的 TaskAction（shell 时命令取对象里的 command）。
+    let new_action = action_obj.as_ref().map(|v| {
+        let mut a = parse_action(Some(v));
+        if let (crate::schedule::TaskAction::Shell { command }, Some(cmd)) = (&mut a, &r.command) {
+            if !cmd.trim().is_empty() {
+                *command = cmd.clone();
+            }
+        }
+        a
+    });
+    let out = match state
         .schedule
         .store()
         .update(&id, |t| {
@@ -2792,24 +2912,57 @@ async fn edit_task(
                     t.prompt = p.clone();
                 }
             }
-            if let Some(tm) = &r.timing {
-                t.timing = tm.clone();
-                t.scheduled_at = None;
+            if let Some(m) = &r.model {
+                t.model_sel = m.clone();
             }
-            match r.action.as_deref() {
-                Some("pause") => t.status = crate::schedule::TaskStatus::Paused,
-                Some("resume") => {
-                    t.status = crate::schedule::TaskStatus::Active;
-                    t.scheduled_at = None;
+            if let Some(tv) = &new_target {
+                // 目标变了：旧的绑定会话不再适用，清掉让下次触发重新绑定。
+                t.target = tv.clone();
+                t.bound_session_id = None;
+            }
+            if let Some(a) = &new_action {
+                t.action = a.clone();
+            }
+            // 只给了 command（没给 action）：切到 shell 动作并换命令。
+            if let Some(cmd) = &r.command {
+                if !cmd.trim().is_empty() && new_action.is_none() {
+                    t.action = crate::schedule::TaskAction::Shell {
+                        command: cmd.clone(),
+                    };
                 }
-                _ => {}
+            }
+            // 先记下旧状态：判断"是否从暂停恢复"要用改之前的值。
+            let was_paused = matches!(t.status, crate::schedule::TaskStatus::Paused);
+            if let Some(s) = status {
+                t.status = s;
+            }
+            // timing 变了要重新提交下一次触发（否则卡在旧时间点上）。
+            let timing_changed = if let Some(tm) = &r.timing {
+                t.timing = tm.clone();
+                true
+            } else {
+                false
+            };
+            // 从 paused 恢复成 active：同样要重新提交下一次触发，
+            // 但保留 anchor（every 的相位不因暂停而整体平移）。
+            // 只在"确实是从暂停恢复"时重算——已经 active 的任务改别的东西
+            // 不该动它的下一次触发时刻。
+            if timing_changed {
+                t.recompute_next(now);
+            } else if was_paused
+                && matches!(status, Some(crate::schedule::TaskStatus::Active))
+            {
+                t.resume_next(now);
             }
         })
         .await
     {
-        Ok(t) => Json(json!(t)).into_response(),
-        Err(e) => server_error(e),
-    }
+        Ok(t) => t,
+        Err(e) => return server_error(e),
+    };
+    // 任务状态变了，推一次事件让前端刷新。
+    state.schedule.publish_task(&out);
+    Json(json!(out)).into_response()
 }
 
 async fn delete_task(
@@ -2826,6 +2979,11 @@ async fn delete_task(
     }
 }
 
+/// 当前 UTC 时刻（RFC 3339，毫秒精度）——运行历史的时间戳统一用它。
+fn now_iso() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
 /// Run a task immediately, as the UI's "run now" affordance does.
 async fn run_task_now(
     State(state): State<SharedState>,
@@ -2838,6 +2996,7 @@ async fn run_task_now(
     let Some(mut task) = state.schedule.store().get(&id).await else {
         return bad_request("unknown task");
     };
+    let store = state.schedule.store();
     // shell 任务「立即运行」：直接执行，不建会话、不动模型。
     if let crate::schedule::TaskAction::Shell { command } = task.action.clone() {
         let cfg = state.config.read().await;
@@ -2849,13 +3008,19 @@ async fn run_task_now(
         drop(cfg);
         let job = match state.terms.start(state.hub.clone(), ws, command).await {
             Ok(j) => j,
-            Err(e) => return bad_request(&e.to_string()),
+            Err(e) => {
+                // 启动失败也算一次运行（失败）。
+                let mut rec = crate::schedule::RunRecord::new(&task.id, &task.name);
+                rec.ok = false;
+                rec.finished_at = Some(now_iso());
+                rec.error = Some(e.to_string());
+                store.record_run(rec).await;
+                return bad_request(&e.to_string());
+            }
         };
         let label = format!("{} · {}", task.name, job.id);
-        let now_iso = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        if let Err(e) = state
-            .schedule
-            .store()
+        let now_iso = now_iso();
+        if let Err(e) = store
             .update(&id, |t| {
                 t.last_run_at = Some(now_iso.clone());
                 t.run_count += 1;
@@ -2864,6 +3029,12 @@ async fn run_task_now(
         {
             tracing::warn!("recording manual run failed for {id}: {e}");
         }
+        // 运行历史：先落一条"已启动"，命令结束后由后台轮询回填退出码与输出。
+        let mut rec = crate::schedule::RunRecord::new(&task.id, &task.name);
+        rec.ok = true;
+        rec.output = format!("started in background terminal {}", job.id);
+        store.record_run(rec.clone()).await;
+        spawn_term_run_watch(state.clone(), store.clone(), job.id.clone(), rec.id.clone());
         return Json(json!({"ok": true, "jobId": job.id, "label": label})).into_response();
     }
     match state.schedule.resolve_session(&mut task).await {
@@ -2882,13 +3053,96 @@ async fn run_task_now(
                 "[scheduled task `{}` run manually]\n\n{}",
                 task.name, task.prompt
             );
+            // 手动触发也算一次运行：推进 last_run_at / run_count（与 shell 分支一致）。
+            let stamp = now_iso();
+            if let Err(e) = store
+                .update(&id, |t| {
+                    t.last_run_at = Some(stamp.clone());
+                    t.run_count += 1;
+                })
+                .await
+            {
+                tracing::warn!("recording manual run failed for {id}: {e}");
+            }
             match state.agent.start_turn(&sid, &prompt, Vec::new(), opts).await {
-                Ok(turn) => Json(json!({"sessionId": sid, "turnId": turn})).into_response(),
-                Err(e) => (StatusCode::CONFLICT, Json(json!({"error": e.to_string()}))).into_response(),
+                Ok(turn) => {
+                    // 投递成功：落一条运行记录（模型还在跑，finished_at 暂空）。
+                    let mut rec = crate::schedule::RunRecord::new(&task.id, &task.name);
+                    rec.ok = true;
+                    rec.session_id = Some(sid.clone());
+                    rec.output = format!("turn started: {turn}");
+                    store.record_run(rec).await;
+                    Json(json!({"sessionId": sid, "turnId": turn})).into_response()
+                }
+                Err(e) => {
+                    let mut rec = crate::schedule::RunRecord::new(&task.id, &task.name);
+                    rec.ok = false;
+                    rec.finished_at = Some(now_iso());
+                    rec.error = Some(e.to_string());
+                    rec.session_id = Some(sid.clone());
+                    store.record_run(rec).await;
+                    (StatusCode::CONFLICT, Json(json!({"error": e.to_string()}))).into_response()
+                }
             }
         }
-        Err(e) => server_error(e),
+        Err(e) => {
+            // 目标解析失败（会话不存在/已归档）也算一次失败运行。
+            let mut rec = crate::schedule::RunRecord::new(&task.id, &task.name);
+            rec.ok = false;
+            rec.finished_at = Some(now_iso());
+            rec.error = Some(e.to_string());
+            store.record_run(rec).await;
+            server_error(e)
+        }
     }
+}
+
+/// 轮询后台终端，等命令结束后回填运行历史的退出码与输出。
+///
+/// 后台终端是异步的（`terms.start` 立即返回 job id），这里用一个轻量
+/// 轮询把它和运行历史对上；超时（10 分钟）还没结束就按"仍在运行"收尾。
+fn spawn_term_run_watch(
+    state: SharedState,
+    store: Arc<crate::schedule::ScheduleStore>,
+    job_id: String,
+    run_id: String,
+) {
+    tokio::spawn(async move {
+        for _ in 0..600 {
+            tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+            let jobs = state.terms.list().await;
+            let Some(j) = jobs.into_iter().find(|j| j.id == job_id) else {
+                // 终端记录已被清理：收尾为"未知结果"。
+                let _ = store
+                    .update_run(&run_id, |r| {
+                        r.finished_at = Some(now_iso());
+                        r.error = Some("terminal job record was pruned".into());
+                    })
+                    .await;
+                return;
+            };
+            if j.status == "running" {
+                continue;
+            }
+            let exit = j.exit;
+            let _ = store
+                .update_run(&run_id, |r| {
+                    r.finished_at = Some(now_iso());
+                    r.exit_code = exit;
+                    r.ok = exit == Some(0);
+                    r.output = crate::schedule::tail_output(&j.output);
+                    if !r.ok {
+                        r.error = Some(match exit {
+                            Some(c) => format!("command exited with code {c}"),
+                            None => "command was killed".into(),
+                        });
+                    }
+                })
+                .await;
+            return;
+        }
+        // 10 分钟还没结束：保留"进行中"状态，不强行标失败。
+    });
 }
 
 /// GET /api/turn/running?session=<id> —— 该会话是否还有 turn 在跑。
@@ -4781,7 +5035,10 @@ pub async fn serve_in(
             }
         });
     }
-    let sched_store = Arc::new(crate::schedule::ScheduleStore::new());
+    // 任务表与运行历史都落在本次服务的数据根下（测试/沙箱不碰用户真实 home）。
+    let sched_store = Arc::new(crate::schedule::ScheduleStore::with_path(
+        home.join("schedule.json"),
+    ));
 
     // schedule 不依赖 runtime,先建;workspace 根取全局配置(定时任务建会话用),
     // 空配置时与 agent 同款退回 current_dir。
@@ -4894,12 +5151,28 @@ pub async fn serve_in(
                                 "scheduled shell task {} 被权限网关拒绝（{perm} 模式，无人值守不可确认）: {command}",
                                 task.id
                             );
+                            // 被拒也算一次运行（失败），留痕便于排查。
+                            let mut rec = crate::schedule::RunRecord::new(&task.id, &task.name);
+                            rec.ok = false;
+                            rec.finished_at = Some(now_iso());
+                            rec.error = Some(format!(
+                                "blocked by permission gateway ({perm} mode, unattended runs cannot confirm)"
+                            ));
+                            schedule.store().record_run(rec).await;
                             continue;
                         }
                         tracing::info!(
                             "scheduled shell task {} firing ({} mode): {}",
                             task.id, perm, command
                         );
+                        // 运行记录先落一条"已启动"，命令结束后回填退出码与输出。
+                        let mut rec = crate::schedule::RunRecord::new(&task.id, &task.name);
+                        rec.ok = false;
+                        rec.finished_at = None;
+                        let run_id = rec.id.clone();
+                        let store = schedule.store();
+                        store.record_run(rec).await;
+                        let store = store.clone();
                         tokio::spawn(async move {
                             // 到期的 shell 任务用 10 分钟上限，避免一个卡死命令
                             // 把后台调度线程拖住（每次 fire 都是独立 task）。
@@ -4914,14 +5187,50 @@ pub async fn serve_in(
                             )
                             .await;
                             match res {
-                                Ok(out) => tracing::info!(
-                                    "scheduled shell task {} finished: {}",
-                                    task.id, out.title
-                                ),
-                                Err(e) => tracing::warn!(
-                                    "scheduled shell task {} failed: {e}",
-                                    task.id
-                                ),
+                                Ok(out) => {
+                                    tracing::info!(
+                                        "scheduled shell task {} finished: {}",
+                                        task.id, out.title
+                                    );
+                                    // 退出码与输出尾部回填到运行记录。
+                                    let (exit, output) = match &out.display {
+                                        crate::tools::DisplayKind::Shell { exit, stdout, stderr, .. } => (
+                                            Some(*exit),
+                                            format!("{}{}", stdout, stderr),
+                                        ),
+                                        _ => (None, out.for_model.clone()),
+                                    };
+                                    let ok = out.ok && exit.map(|c| c == 0).unwrap_or(true);
+                                    let _ = store
+                                        .update_run(&run_id, |r| {
+                                            r.finished_at = Some(now_iso());
+                                            r.exit_code = exit;
+                                            r.ok = ok;
+                                            r.output = crate::schedule::tail_output(&output);
+                                            if !ok {
+                                                r.error = Some(match exit {
+                                                    Some(c) => format!("command exited with code {c}"),
+                                                    None => "command failed".into(),
+                                                });
+                                            }
+                                        })
+                                        .await;
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "scheduled shell task {} failed: {e}",
+                                        task.id
+                                    );
+                                    let msg = e.to_string();
+                                    let _ = store
+                                        .update_run(&run_id, |r| {
+                                            r.finished_at = Some(now_iso());
+                                            r.ok = false;
+                                            r.exit_code = Some(-1);
+                                            r.error = Some(msg.clone());
+                                        })
+                                        .await;
+                                }
                             }
                         });
                         continue;
@@ -4945,14 +5254,41 @@ pub async fn serve_in(
                                 now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
                                 task.prompt
                             );
-                            if let Err(e) = agent
-                                .start_turn(&sid, &prompt, Vec::new(), opts)
-                                .await
-                            {
-                                tracing::warn!("scheduled task {} failed to start: {e}", task.id);
+                            // 投递结果落运行记录：成功=已投进会话，失败=记原因。
+                            match agent.start_turn(&sid, &prompt, Vec::new(), opts).await {
+                                Ok(turn) => {
+                                    let mut rec =
+                                        crate::schedule::RunRecord::new(&task.id, &task.name);
+                                    rec.ok = true;
+                                    rec.session_id = Some(sid.clone());
+                                    rec.output = format!("delivered to session as turn {turn}");
+                                    schedule.store().record_run(rec).await;
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "scheduled task {} failed to start: {e}",
+                                        task.id
+                                    );
+                                    let mut rec =
+                                        crate::schedule::RunRecord::new(&task.id, &task.name);
+                                    rec.ok = false;
+                                    rec.finished_at = Some(now_iso());
+                                    rec.session_id = Some(sid.clone());
+                                    rec.error = Some(e.to_string());
+                                    schedule.store().record_run(rec).await;
+                                }
                             }
                         }
-                        Err(e) => tracing::warn!("scheduled task {} has no target: {e}", task.id),
+                        Err(e) => {
+                            tracing::warn!("scheduled task {} has no target: {e}", task.id);
+                            // 目标解析失败也算一次失败运行。
+                            let mut rec =
+                                crate::schedule::RunRecord::new(&task.id, &task.name);
+                            rec.ok = false;
+                            rec.finished_at = Some(now_iso());
+                            rec.error = Some(e.to_string());
+                            schedule.store().record_run(rec).await;
+                        }
                     }
                 }
             }
@@ -5636,5 +5972,594 @@ mod regression {
             chain.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>(),
             vec!["p/a", "p/b", "q/c", "q/d", "q/e"]
         );
+    }
+}
+
+#[cfg(test)]
+mod schedule_api {
+    //! 定时任务后端：运行历史、编辑能力、one-shot 结束语义。
+
+    use super::*;
+    use crate::config::Config;
+    use std::sync::Arc as StdArc;
+
+    /// 起一个真实的服务器（随机端口），返回 (base, token)。
+    async fn spawn_server(tag: &str) -> (String, String) {
+        let token = "schedule-token".to_string();
+        let cfg = Config::default();
+        let home = std::env::temp_dir().join(format!(
+            "parable-schedule-{}-{}",
+            tag,
+            uuid::Uuid::new_v4().simple()
+        ));
+        let _ = std::fs::remove_dir_all(&home);
+        let (port, _state, _handle) =
+            serve_in(token.clone(), StdArc::new(RwLock::new(cfg)), 0, Some(home))
+                .await
+                .unwrap();
+        (format!("http://127.0.0.1:{port}"), token)
+    }
+
+    /// 建一个 agent 动作的任务，返回 (id, 原始 json)。
+    async fn create_agent_task(
+        cli: &reqwest::Client,
+        base: &str,
+        token: &str,
+        name: &str,
+        timing: Value,
+    ) -> (String, Value) {
+        let body = json!({
+            "name": name,
+            "prompt": "hello",
+            "action": {"kind": "agent"},
+            "timing": timing,
+            "target": "reuse",
+        });
+        let res = cli
+            .post(format!("{base}/api/schedule"))
+            .header("x-parable-token", token)
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200, "create task must succeed");
+        let v: Value = res.json().await.unwrap();
+        let id = v["id"].as_str().unwrap().to_string();
+        (id, v)
+    }
+
+    /// 运行历史接口：结构正确。
+    #[tokio::test]
+    async fn schedule_runs_endpoint_returns_records() {
+        let (base, token) = spawn_server("runs").await;
+        let cli = reqwest::Client::new();
+
+        // 空历史：返回空数组而不是 404。
+        let res = cli
+            .get(format!("{base}/api/schedule/runs"))
+            .header("x-parable-token", &token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        let v: Value = res.json().await.unwrap();
+        assert!(v.get("runs").is_some(), "runs array must be present");
+        assert_eq!(v["runs"].as_array().unwrap().len(), 0);
+
+        // 不存在的 task 过滤 → 空数组。
+        let v: Value = cli
+            .get(format!("{base}/api/schedule/runs?task=sc_nope"))
+            .header("x-parable-token", &token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(v["runs"].as_array().unwrap().len(), 0);
+    }
+
+    /// 运行历史：写入后能按 task_id 过滤读回。
+    #[tokio::test]
+    async fn schedule_runs_are_filtered_by_task() {
+        let (base, token) = spawn_server("runs-filter").await;
+        let cli = reqwest::Client::new();
+        let (id1, _) = create_agent_task(
+            &cli,
+            &base,
+            &token,
+            "one",
+            json!({"kind": "every", "every_seconds": 3600}),
+        )
+        .await;
+        let (id2, _) = create_agent_task(
+            &cli,
+            &base,
+            &token,
+            "two",
+            json!({"kind": "every", "every_seconds": 3600}),
+        )
+        .await;
+
+        // "立即运行"会落一条运行记录（无论投递成功与否）。
+        let _ = cli
+            .post(format!("{base}/api/schedule/{id1}/run"))
+            .header("x-parable-token", &token)
+            .send()
+            .await
+            .unwrap();
+        let _ = cli
+            .post(format!("{base}/api/schedule/{id2}/run"))
+            .header("x-parable-token", &token)
+            .send()
+            .await
+            .unwrap();
+
+        let all: Value = cli
+            .get(format!("{base}/api/schedule/runs"))
+            .header("x-parable-token", &token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let runs = all["runs"].as_array().unwrap();
+        assert!(!runs.is_empty(), "manual runs must be recorded");
+
+        // 每条记录字段齐全，且带 taskId。
+        for r in runs {
+            assert!(r["id"].is_string(), "run id missing");
+            assert!(r["taskId"].is_string(), "taskId missing");
+            assert!(r["taskName"].is_string(), "taskName missing");
+            assert!(r["startedAt"].is_string(), "startedAt missing");
+            assert!(r["ok"].is_boolean(), "ok must be a bool");
+        }
+
+        // 按 task 过滤：只返回该任务的记录。
+        let filtered: Value = cli
+            .get(format!("{base}/api/schedule/runs?task={id1}"))
+            .header("x-parable-token", &token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let fr = filtered["runs"].as_array().unwrap();
+        assert!(!fr.is_empty(), "filtered runs must not be empty");
+        assert!(
+            fr.iter().all(|r| r["taskId"] == id1.as_str()),
+            "filter must only return the requested task"
+        );
+
+        // 不存在的 task 返回空数组。
+        let empty: Value = cli
+            .get(format!("{base}/api/schedule/runs?task=sc_nope"))
+            .header("x-parable-token", &token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(empty["runs"].as_array().unwrap().len(), 0);
+    }
+
+    /// 运行历史接口必须校验 token。
+    #[tokio::test]
+    async fn schedule_runs_requires_token() {
+        let (base, _token) = spawn_server("runs-auth").await;
+        let res = reqwest::Client::new()
+            .get(format!("{base}/api/schedule/runs"))
+            .header("x-parable-token", "wrong")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 401);
+    }
+
+    /// PATCH 改 name/model/status/timing 后，GET 能读到。
+    #[tokio::test]
+    async fn schedule_patch_edits_task() {
+        let (base, token) = spawn_server("patch").await;
+        let cli = reqwest::Client::new();
+        let (id, _) = create_agent_task(
+            &cli,
+            &base,
+            &token,
+            "before",
+            json!({"kind": "every", "every_seconds": 3600}),
+        )
+        .await;
+
+        let body = json!({
+            "name": "after",
+            "model": "openai/gpt-4o",
+            "status": "paused",
+            "timing": {"kind": "every", "every_seconds": 600},
+        });
+        let res = cli
+            .patch(format!("{base}/api/schedule/{id}"))
+            .header("x-parable-token", &token)
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        let patched: Value = res.json().await.unwrap();
+        assert_eq!(patched["name"], "after");
+        assert_eq!(patched["modelSel"], "openai/gpt-4o");
+        assert_eq!(patched["status"], "paused");
+        assert_eq!(patched["timing"]["every_seconds"], 600);
+
+        // GET 能读到同样的值。
+        let got: Value = cli
+            .get(format!("{base}/api/schedule/{id}"))
+            .header("x-parable-token", &token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(got["name"], "after");
+        assert_eq!(got["modelSel"], "openai/gpt-4o");
+        assert_eq!(got["status"], "paused");
+        assert_eq!(got["timing"]["every_seconds"], 600);
+        // timing 改了要重新提交下一次触发（不能停在旧时间点）。
+        assert!(
+            got["scheduledAt"].is_string(),
+            "timing change must re-commit scheduledAt"
+        );
+    }
+
+    /// PATCH 未传的字段保持不变（向后兼容）。
+    #[tokio::test]
+    async fn schedule_patch_keeps_untouched_fields() {
+        let (base, token) = spawn_server("patch-partial").await;
+        let cli = reqwest::Client::new();
+        let (id, created) = create_agent_task(
+            &cli,
+            &base,
+            &token,
+            "keep",
+            json!({"kind": "every", "every_seconds": 3600}),
+        )
+        .await;
+        let before_prompt = created["prompt"].as_str().unwrap().to_string();
+
+        let res = cli
+            .patch(format!("{base}/api/schedule/{id}"))
+            .header("x-parable-token", &token)
+            .json(&json!({"name": "renamed"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        let v: Value = res.json().await.unwrap();
+        assert_eq!(v["name"], "renamed");
+        assert_eq!(v["prompt"], before_prompt, "prompt must not change");
+        assert_eq!(v["timing"], created["timing"], "timing must not change");
+    }
+
+    /// PATCH 改 target 与 command 也要生效。
+    #[tokio::test]
+    async fn schedule_patch_edits_target_and_command() {
+        let (base, token) = spawn_server("patch-target").await;
+        let cli = reqwest::Client::new();
+        let (id, _) = create_agent_task(
+            &cli,
+            &base,
+            &token,
+            "tgt",
+            json!({"kind": "every", "every_seconds": 3600}),
+        )
+        .await;
+
+        let res = cli
+            .patch(format!("{base}/api/schedule/{id}"))
+            .header("x-parable-token", &token)
+            .json(&json!({
+                "target": {"kind": "new_each_time"},
+                "command": "echo hi",
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        let v: Value = res.json().await.unwrap();
+        assert_eq!(v["target"]["kind"], "new_each_time");
+        assert_eq!(v["action"]["kind"], "shell");
+        assert_eq!(v["action"]["command"], "echo hi");
+    }
+
+    /// PATCH 的 action 支持标签形式：`{"kind":"shell","command":"…"}`。
+    #[tokio::test]
+    async fn schedule_patch_accepts_tagged_action() {
+        let (base, token) = spawn_server("patch-action").await;
+        let cli = reqwest::Client::new();
+        let (id, _) = create_agent_task(
+            &cli,
+            &base,
+            &token,
+            "act",
+            json!({"kind": "every", "every_seconds": 3600}),
+        )
+        .await;
+
+        let res = cli
+            .patch(format!("{base}/api/schedule/{id}"))
+            .header("x-parable-token", &token)
+            .json(&json!({"action": {"kind": "shell", "command": "echo tagged"}}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        let v: Value = res.json().await.unwrap();
+        assert_eq!(v["action"]["kind"], "shell");
+        assert_eq!(v["action"]["command"], "echo tagged");
+    }
+
+    /// 老接口的 pause / resume 动作词仍然有效（向后兼容）。
+    #[tokio::test]
+    async fn schedule_patch_pause_and_resume() {
+        let (base, token) = spawn_server("patch-pause").await;
+        let cli = reqwest::Client::new();
+        let (id, _) = create_agent_task(
+            &cli,
+            &base,
+            &token,
+            "pausable",
+            json!({"kind": "every", "every_seconds": 3600}),
+        )
+        .await;
+
+        let res = cli
+            .patch(format!("{base}/api/schedule/{id}"))
+            .header("x-parable-token", &token)
+            .json(&json!({"action": "pause"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        let v: Value = res.json().await.unwrap();
+        assert_eq!(v["status"], "paused");
+
+        // 恢复后要重新提交下一次触发（不能停在暂停前的旧时间点）。
+        let res = cli
+            .patch(format!("{base}/api/schedule/{id}"))
+            .header("x-parable-token", &token)
+            .json(&json!({"action": "resume"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        let v: Value = res.json().await.unwrap();
+        assert_eq!(v["status"], "active");
+        assert!(v["scheduledAt"].is_string(), "resume must re-commit scheduledAt");
+    }
+
+    /// PATCH 的 action=delete 仍然能删任务（老接口）。
+    #[tokio::test]
+    async fn schedule_patch_delete_still_works() {
+        let (base, token) = spawn_server("patch-del").await;
+        let cli = reqwest::Client::new();
+        let (id, _) = create_agent_task(
+            &cli,
+            &base,
+            &token,
+            "deletable",
+            json!({"kind": "every", "every_seconds": 3600}),
+        )
+        .await;
+        let res = cli
+            .patch(format!("{base}/api/schedule/{id}"))
+            .header("x-parable-token", &token)
+            .json(&json!({"action": "delete"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        let list: Value = cli
+            .get(format!("{base}/api/schedule"))
+            .header("x-parable-token", &token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(list["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|t| t["id"] != id.as_str()));
+    }
+
+    /// PATCH 非法 status 要被拒。
+    #[tokio::test]
+    async fn schedule_patch_rejects_bad_status() {
+        let (base, token) = spawn_server("patch-bad").await;
+        let cli = reqwest::Client::new();
+        let (id, _) = create_agent_task(
+            &cli,
+            &base,
+            &token,
+            "bad",
+            json!({"kind": "every", "every_seconds": 3600}),
+        )
+        .await;
+        let res = cli
+            .patch(format!("{base}/api/schedule/{id}"))
+            .header("x-parable-token", &token)
+            .json(&json!({"status": "bogus"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 400);
+    }
+
+    /// PATCH 非法 timing 要被拒，且任务不被改坏。
+    #[tokio::test]
+    async fn schedule_patch_rejects_bad_timing() {
+        let (base, token) = spawn_server("patch-bad-timing").await;
+        let cli = reqwest::Client::new();
+        let (id, _) = create_agent_task(
+            &cli,
+            &base,
+            &token,
+            "bad-timing",
+            json!({"kind": "every", "every_seconds": 3600}),
+        )
+        .await;
+        let res = cli
+            .patch(format!("{base}/api/schedule/{id}"))
+            .header("x-parable-token", &token)
+            .json(&json!({"timing": {"kind": "every", "every_seconds": 5}}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 400);
+        // 原任务还在，时序没被改坏。
+        let got: Value = cli
+            .get(format!("{base}/api/schedule/{id}"))
+            .header("x-parable-token", &token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(got["timing"]["every_seconds"], 3600);
+    }
+
+    /// 列表接口要带 lastRunOk（没有历史时为 null）。
+    #[tokio::test]
+    async fn schedule_list_reports_last_run_ok() {
+        let (base, token) = spawn_server("list-lr").await;
+        let cli = reqwest::Client::new();
+        let (id, _) = create_agent_task(
+            &cli,
+            &base,
+            &token,
+            "lr",
+            json!({"kind": "every", "every_seconds": 3600}),
+        )
+        .await;
+
+        let list: Value = cli
+            .get(format!("{base}/api/schedule"))
+            .header("x-parable-token", &token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let tasks = list["tasks"].as_array().unwrap();
+        let t = tasks.iter().find(|t| t["id"] == id.as_str()).unwrap();
+        assert!(t.get("lastRunOk").is_some(), "lastRunOk must be present");
+        assert!(t["lastRunOk"].is_null(), "no history yet => lastRunOk is null");
+
+        // 跑一次之后 lastRunOk 应该变成布尔值。
+        let _ = cli
+            .post(format!("{base}/api/schedule/{id}/run"))
+            .header("x-parable-token", &token)
+            .send()
+            .await
+            .unwrap();
+        let list: Value = cli
+            .get(format!("{base}/api/schedule"))
+            .header("x-parable-token", &token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let tasks = list["tasks"].as_array().unwrap();
+        let t = tasks.iter().find(|t| t["id"] == id.as_str()).unwrap();
+        assert!(
+            t["lastRunOk"].is_boolean(),
+            "after a run lastRunOk must be a bool"
+        );
+    }
+
+    /// 非法 timing 的创建请求要给出可读的 400。
+    #[tokio::test]
+    async fn schedule_create_reports_readable_errors() {
+        let (base, token) = spawn_server("create-err").await;
+        let cli = reqwest::Client::new();
+
+        let res = cli
+            .post(format!("{base}/api/schedule"))
+            .header("x-parable-token", &token)
+            .json(&json!({
+                "name": "bad",
+                "prompt": "hi",
+                "timing": {"kind": "every", "every_seconds": 5},
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 400);
+        let v: Value = res.json().await.unwrap();
+        let msg = v["error"].as_str().unwrap();
+        assert!(msg.contains("every_seconds"), "got: {msg}");
+
+        let res = cli
+            .post(format!("{base}/api/schedule"))
+            .header("x-parable-token", &token)
+            .json(&json!({
+                "name": "bad",
+                "prompt": "hi",
+                "timing": {"kind": "cron", "expression": "not a cron", "timeZone": "UTC"},
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 400);
+        let v: Value = res.json().await.unwrap();
+        let msg = v["error"].as_str().unwrap();
+        assert!(msg.contains("cron"), "got: {msg}");
+    }
+
+    /// one-shot（after）任务触发一次后，status 必须变 ended。
+    ///
+    /// 后台调度每 20s 轮询一次，测试里等一会儿即可观察到 ended。
+    #[tokio::test]
+    async fn one_shot_task_ends_after_firing() {
+        let (base, token) = spawn_server("one-shot").await;
+        let cli = reqwest::Client::new();
+        // after_seconds = 1：很快就会到期。
+        let (id, _) = create_agent_task(
+            &cli,
+            &base,
+            &token,
+            "one-shot",
+            json!({"kind": "after", "after_seconds": 1}),
+        )
+        .await;
+
+        // 等后台调度（20s 一轮）把它触发掉。
+        let mut ended = false;
+        for _ in 0..40 {
+            tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+            let got: Value = cli
+                .get(format!("{base}/api/schedule/{id}"))
+                .header("x-parable-token", &token)
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            if got["status"] == "ended" {
+                ended = true;
+                break;
+            }
+        }
+        assert!(ended, "a one-shot task must end after it fires");
     }
 }
