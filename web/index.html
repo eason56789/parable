@@ -882,7 +882,8 @@ button.tk-prompt{width:100%;text-align:left;border:0;cursor:pointer}
   background-size:260% 100%;background-repeat:no-repeat;
   -webkit-background-clip:text;background-clip:text;
   -webkit-text-fill-color:transparent;color:transparent;
-  animation:ecmd-lsw calc(1.05s * var(--animd)) linear infinite}
+  /* 走光一个来回 2s：之前 1.05s 偏急促，扫得太频繁反而分散注意。 */
+  animation:ecmd-lsw calc(2s * var(--animd)) linear infinite}
 @keyframes ecmd-lsw{from{background-position:130% 0}to{background-position:-130% 0}}
 .ecmd .ecmd-st{display:inline-flex;align-items:center;gap:5px;flex:none;color:var(--fg2);font:11.5px var(--sans);padding-left:2px}
 .ecmd .ecmd-st i{width:4px;height:4px;border-radius:50%;background:var(--accent);opacity:.85;flex:none;
