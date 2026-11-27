@@ -39,6 +39,37 @@ body{font:var(--ui,13px)/1.45 var(--sans);background:var(--side);color:var(--fg)
 button{font:inherit;color:inherit}
 svg{display:block}
 #win{height:100%;display:flex;flex-direction:column}
+/* ---- 个性化底图 ----
+   #bg 固定铺满视口（z-index 0，低于 #win）；#bg-img 承载图片本身，
+   模糊/亮度/缩放都作用在它身上，所以模糊不会糊到界面文字。
+   界面底色在 body.has-bg 下改为半透明，底图才透得出来。 */
+#bg{position:fixed;inset:0;z-index:0;pointer-events:none;overflow:hidden;background:var(--bg)}
+#bg[hidden]{display:none}
+#bg-img{position:absolute;inset:0;background-repeat:no-repeat;background-position:center;
+  transform-origin:center;will-change:transform,filter;opacity:1;
+  transition:opacity calc(.3s * var(--animd)),filter calc(.3s * var(--animd)),transform calc(.3s * var(--animd))}
+/* body 的 background 简写在更早的行，这里用同等特异性但更晚声明覆盖；
+   背景层已经提供底色，body 必须透明才透得出来。 */
+body.has-bg{background-color:transparent;background-image:none}
+body.has-bg #win{position:relative;z-index:1}
+body.has-bg #side{background:color-mix(in srgb,var(--side) 72%,transparent)}
+body.has-bg #tb{background:color-mix(in srgb,var(--side) 55%,transparent)}
+body.has-bg .sb{background:color-mix(in srgb,var(--side) 80%,transparent)}
+/* 主对话区与设置导航也半透明：底图从整窗透出，而不是只出现在侧栏边缘。
+   弹窗（.cfmb/#medit/.kbdc 等）保持实色——文字压在照片上不可读。 */
+body.has-bg #main{background:color-mix(in srgb,var(--bg) 82%,transparent)}
+body.has-bg #snav{background:color-mix(in srgb,var(--side) 78%,transparent)}
+body.has-bg #sdp{background:color-mix(in srgb,var(--side) 88%,transparent)}
+body.has-bg .tk-seg,body.has-bg .seg{background:color-mix(in srgb,var(--hov) 70%,transparent)}
+/* 底图选择控件：预览缩略图 + 选图/移除按钮 */
+.bgpick{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.bgprev{width:184px;height:104px;border-radius:10px;border:.5px solid var(--line);
+  background:var(--input) center/cover no-repeat;flex:none;
+  display:grid;place-items:center;color:var(--fg2);font:12px var(--sans);overflow:hidden}
+.bgprev.empty{background-image:none;border-style:dashed}
+.bgacts{display:flex;gap:8px;flex-wrap:wrap}
+.bgacts .btn[disabled]{opacity:.45;pointer-events:none}
+.bghint{margin-top:8px;color:var(--fg2);font:11.5px/1.6 var(--sans)}
 #tb{height:46px;flex:none;display:flex;align-items:center;gap:4px;padding:0 14px;position:relative;user-select:none}
 /* 无边框窗口：#tb 兼作拖拽区（drag region）+ 自绘窗口控制键。
    按钮贴右缘（无 padding 遮挡），宽 46px、通高，对齐系统按键的落点。
@@ -1964,6 +1995,9 @@ body.r2-ws-drag #r2-ws{transition:none}
 </style>
 </head>
 <body>
+<!-- 个性化底图：独立图层垫在应用之下。#bg 铺满视口并按设置做模糊/亮度/缩放，
+     界面各面（--bg/--side 等）在半透明时它才透得出来。 -->
+<div id="bg" aria-hidden="true"><div id="bg-img"></div></div>
 <div id="win">
   <header id="tb" aria-label="顶部工具栏" data-tauri-drag-region="deep">
     <button class="ib" id="tgl" data-ic="side"></button><button class="ib off" data-ic="back"></button><button class="ib off" data-ic="fwd"></button>
@@ -2389,7 +2423,11 @@ const L = {
     permT:'权限模式', permH:'控制 Parable 能对你的文件执行哪些操作',
     lvlT:'思考强度', modelT:'模型', pk_manage:'管理模型', pk_api:'API', pk_vision:'视觉', pk_think:'思考',
     l0:'关闭', l1:'低', l2:'中', l3:'高',
-    s_g:'通用', s_s:'网络搜索', s_a:'外观', s_m:'模型设置', s_p:'权限与思考', s_n:'动画', s_base:'基础设置',
+    s_g:'通用', s_s:'网络搜索', s_a:'外观', s_bg:'个性化背景', s_m:'模型设置', s_p:'权限与思考', s_n:'动画', s_base:'基础设置',
+    bgOn:'启用底图', bgOnH:'关闭后保留设置，界面回到纯色背景', bg_choose:'选择图片', bg_rechoose:'更换图片',
+    bg_none:'尚未选择图片', bg_clear:'移除', bg_notimage:'请选择图片文件（PNG / JPG / WebP）',
+    bg_fail:'图片读取失败，请换一张试试', bg_big:'图片较大，已压缩存储',
+    bgOpacity:'透明度', bgBlur:'模糊', bgBright:'亮度', bgZoom:'缩放', bgX:'裁剪横向位置', bgY:'裁剪纵向位置',
     s_u:'使用统计', s_data:'数据与统计', s_agent:'Agent 能力', s_about:'关于',
     s_mem:'记忆', s_sk:'技能', s_bh:'Agent 行为', s_net:'网络与隐私', s_d:'数据',
     s_mcp:'MCP 服务器', s_hk:'钩子', s_ab:'关于',
@@ -2691,7 +2729,12 @@ const L = {
     permT:'Permission mode', permH:'Control what Parable can do to your files',
     lvlT:'Thinking effort', modelT:'Model', pk_manage:'Manage models', pk_api:'API', pk_vision:'Vision', pk_think:'Think',
     l0:'Off', l1:'Low', l2:'Medium', l3:'High',
-    s_g:'General', s_s:'Web search', s_a:'Appearance', s_m:'Model settings', s_p:'Permissions', s_n:'Animation', s_base:'Basics',
+    s_g:'General', s_s:'Web search', s_a:'Appearance', s_bg:'Wallpaper', s_m:'Model settings', s_p:'Permissions', s_n:'Animation', s_base:'Basics',
+    bgOn:'Enable wallpaper', bgOnH:'Turning it off keeps your settings and returns to a solid background',
+    bg_choose:'Choose image', bg_rechoose:'Replace image', bg_none:'No image selected', bg_clear:'Remove',
+    bg_notimage:'Please choose an image file (PNG / JPG / WebP)', bg_fail:'Could not read that image — try another one',
+    bg_big:'Large image — stored compressed',
+    bgOpacity:'Opacity', bgBlur:'Blur', bgBright:'Brightness', bgZoom:'Zoom', bgX:'Crop horizontal', bgY:'Crop vertical',
     s_u:'Usage', s_data:'Data & stats', s_agent:'Agent capabilities', s_about:'About',
     s_mem:'Memory', s_sk:'Skills', s_bh:'Agent behavior', s_net:'Network & privacy', s_d:'Data',
     s_mcp:'MCP servers', s_hk:'Hooks', s_ab:'About',
@@ -2982,6 +3025,9 @@ const DEF = {
   // 排版个性化：界面字号 / 行距 / 代码字号 / 密度。与 ZCode 的 --ui-font-size、
   // settings.fontSize 对应：正文与界面分开，代码单独一档。
   uiSize:13, lineHeight:1.5, codeSize:13, density:'cozy', inkOn:true,
+  // 个性化背景（底图）：bgImg 为 dataURL；透明度/模糊/亮度/缩放/裁剪位置
+  // 分别控制层不透明度、模糊、滤镜亮度、cover 之上的尺寸系数与背景定位。
+  bgImg:'', bgOn:true, bgOpacity:55, bgBlur:0, bgBright:100, bgZoom:100, bgX:50, bgY:50, bgFixed:true,
   speed:22, cd:650, blur:8, sf:1.5, anim:1, stream:true, think:true, toolThink:false, side:true,
   prefs:'', systemPrompt:'', systemPromptRaw:'', model:'', perm:'ask', lvl:2,
   searchKey:'', anysearchKey:'', spref:'auto', plan:false, mem:true, memAuto:true, followupMode:'queue',
@@ -3077,6 +3123,34 @@ async function api(path, opts) {
 }
 
 let saveTimer = null;
+/**
+ * 应用个性化底图：透明度/模糊/亮度/缩放/裁剪位置。
+ * 只动 #bg-img 这一个节点，绘制成本低；无图或关闭时整层 hidden，
+ * 界面回到纯色背景（不承担任何合成开销）。
+ */
+function applyBg() {
+  const layer = document.getElementById('bg');
+  const img = document.getElementById('bg-img');
+  if (!layer || !img) return;
+  const on = !!(S.bgOn && S.bgImg);
+  layer.hidden = !on;
+  document.body.classList.toggle('has-bg', on);
+  if (!on) return;
+  img.style.backgroundImage = 'url("' + S.bgImg + '")';
+  // cover 之上的额外缩放：bgZoom 100% = cover 原始比例。
+  const z = Math.max(50, Math.min(300, +S.bgZoom || 100)) / 100;
+  img.style.backgroundSize = (z * 100).toFixed(1) + '% auto';
+  img.style.backgroundPosition = (S.bgX | 0) + '% ' + (S.bgY | 0) + '%';
+  img.style.opacity = Math.max(0, Math.min(100, +S.bgOpacity || 0)) / 100;
+  img.style.filter =
+    'blur(' + Math.max(0, Math.min(40, +S.bgBlur || 0)) + 'px) ' +
+    'brightness(' + Math.max(20, Math.min(200, +S.bgBright || 100)) + '%)';
+  // 缩放用 transform 而不是改 background-size 两次：模糊在放大后会变虚边，
+  // 多留 2% 让边缘不足的像素被推出视口。
+  img.style.transform = z > 1 ? 'scale(' + Math.min(1.02, 1 + (z - 1) * 0.05) + ')' : 'none';
+  // 底图固定（不随内容滚动）时背景始终贴着视口——层本身就是 fixed，无需额外处理。
+}
+
 function apply(pushToServer) {
   const r = document.documentElement, st = r.style;
   r.dataset.theme = S.theme;
@@ -3096,6 +3170,7 @@ function apply(pushToServer) {
   st.setProperty('--cd', Math.max(1, Math.round(S.cd / S.anim)) + 'ms');
   st.setProperty('--anim', S.anim);
   st.setProperty('--animd', 1 / S.anim);
+  applyBg();
 
   if (apply.lg !== S.lang) {
     apply.lg = S.lang;
@@ -11532,10 +11607,10 @@ addEventListener('resize', () => { if ($('#mm') && $('#mm').classList.contains('
 /* ==================================================================
    settings modal
    ================================================================== */
-const TAB = ['g', 's', 'a', 'n', 'm', 'p', 'mem', 'sk', 'u', 'ab'];
+const TAB = ['g', 's', 'a', 'bg', 'n', 'm', 'p', 'mem', 'sk', 'u', 'ab'];
 /** 导航分组：基础设置 / Agent 能力 / 数据与统计 */
 const TGRP = [
-  { k: 's_base', tabs: ['g', 'a', 'n', 's', 'net'] },
+  { k: 's_base', tabs: ['g', 'a', 'bg', 'n', 's', 'net'] },
   { k: 's_agent', tabs: ['m', 'p', 'mem', 'sk', 'mcp', 'hk', 'bh'] },
   { k: 's_data', tabs: ['u', 'd'] },
   { k: 's_about', tabs: ['ab'] }
@@ -11576,6 +11651,17 @@ const SC = {
     { k:'side', t:'tg', l:'side' },
     { k:'codeLineNumbers', t:'tg', l:'codeLN', h:'codeLNH' },
     { k:'codeWrap', t:'tg', l:'codeWrap', h:'codeWrapH' }
+  ],
+  // 个性化：底图 + 显示参数。图片选择与裁剪预览是自定义控件（t:'bg'）。
+  bg:[
+    { k:'bgOn', t:'tg', l:'bgOn', h:'bgOnH' },
+    { t:'bg' },
+    { k:'bgOpacity', t:'rg', l:'bgOpacity', min:0, max:100, step:1, u:'%' },
+    { k:'bgBlur', t:'rg', l:'bgBlur', min:0, max:40, step:1, u:'px' },
+    { k:'bgBright', t:'rg', l:'bgBright', min:20, max:200, step:5, u:'%' },
+    { k:'bgZoom', t:'rg', l:'bgZoom', min:50, max:300, step:5, u:'%' },
+    { k:'bgX', t:'rg', l:'bgX', min:0, max:100, step:1, u:'%' },
+    { k:'bgY', t:'rg', l:'bgY', min:0, max:100, step:1, u:'%' }
   ],
   p:[
     { k:'perm', t:'rl', l:'permT', h:'permH', o:PK },
@@ -11847,8 +11933,9 @@ function panel() {
     g: [t('s_g'), z ? '你的名字、语言、偏好与系统提示词。' : 'Your name, language, preferences and system prompt.'],
     s: [t('s_s'), z ? '选择搜索来源并配置搜索密钥。' : 'Pick a search source and configure its key.'],
     a: [t('s_a'), z ? '主题、字体、配色与布局。' : 'Theme, font, colors and layout.'],
-    p: [t('s_p'), z ? '控制 Parable 能对你的文件做什么，以及思考强度。' : 'Control what Parable may do to your files, and thinking effort.'],
+    bg: [t('s_bg'), z ? '上传一张底图，调节透明度、模糊、亮度与裁剪位置。' : 'Pick a wallpaper and tune its opacity, blur, brightness and crop.'],
     n: [t('s_n'), z ? '动画速度、流式效果与视觉效果。' : 'Animation speed, streaming and visual effects.'],
+    p: [t('s_p'), z ? '控制 Parable 能对你的文件做什么，以及思考强度。' : 'Control what Parable may do to your files, and thinking effort.'],
   }[tab] || [t('set'), ''];
   p.innerHTML = '<div class="sphd"><h2>' + esc(HD[0]) + '</h2>' +
     (HD[1] ? '<p>' + esc(HD[1]) + '</p>' : '') + '</div><div class="setbody"></div>';
@@ -11921,6 +12008,71 @@ function panel() {
         }
         ct.firstChild.value = v;
         ct.querySelector('.rv').textContent = v + c.u;
+      } else if (c.t === 'bg') {
+        // 自定义：选图 / 预览 / 移除。图片转 dataURL 存进 S.bgImg（随设置
+        // 持久化到 localStorage，与其它个性化项同一条链路）。
+        ct.className = 'ct';
+        ct.innerHTML =
+          '<div class="bgpick">' +
+            '<div class="bgprev" id="bg-prev"></div>' +
+            '<div class="bgacts">' +
+              '<button class="btn" id="bg-choose"></button>' +
+              '<button class="btn ghost" id="bg-clear"></button>' +
+            '</div>' +
+          '</div>' +
+          '<input type="file" id="bg-file" accept="image/*" hidden>' +
+          '<div class="bghint" id="bg-hint"></div>';
+        const prev = ct.querySelector('#bg-prev');
+        const hint = ct.querySelector('#bg-hint');
+        const paintPrev = () => {
+          const has = !!S.bgImg;
+          prev.style.backgroundImage = has ? 'url("' + S.bgImg + '")' : '';
+          prev.classList.toggle('empty', !has);
+          prev.textContent = has ? '' : t('bg_none');
+          ct.querySelector('#bg-clear').disabled = !has;
+          ct.querySelector('#bg-choose').textContent = t(has ? 'bg_rechoose' : 'bg_choose');
+          hint.textContent = S.bgImg && S.bgImg.length > 2000000
+            ? t('bg_big') : '';
+        };
+        ct.querySelector('#bg-choose').onclick = () => ct.querySelector('#bg-file').click();
+        ct.querySelector('#bg-file').onchange = ev => {
+          const f = ev.target.files && ev.target.files[0];
+          ev.target.value = '';
+          if (!f) return;
+          if (!/^image\//.test(f.type)) { toast(t('bg_notimage')); return; }
+          // 大图先压到 2560 长边再存：localStorage 有 ~5MB 配额，原图
+          // 动辄 8–20MB，直接存会写失败导致设置整份回滚。
+          const rd = new FileReader();
+          rd.onload = () => {
+            const src = String(rd.result || '');
+            const im = new Image();
+            im.onload = () => {
+              const MAX = 2560;
+              const k = Math.min(1, MAX / Math.max(im.width, im.height));
+              if (k >= 1 && src.length < 1500000) {
+                S.bgImg = src; S.bgOn = true; apply(); paintPrev(); f();
+                return;
+              }
+              const cv = document.createElement('canvas');
+              cv.width = Math.round(im.width * k);
+              cv.height = Math.round(im.height * k);
+              cv.getContext('2d').drawImage(im, 0, 0, cv.width, cv.height);
+              try {
+                S.bgImg = cv.toDataURL('image/jpeg', 0.86);
+                S.bgOn = true;
+                apply(); paintPrev(); f();
+              } catch (e) { toast(t('bg_fail')); }
+            };
+            im.onerror = () => toast(t('bg_notimage'));
+            im.src = src;
+          };
+          rd.onerror = () => toast(t('bg_fail'));
+          rd.readAsDataURL(f);
+        };
+        ct.querySelector('#bg-clear').onclick = () => {
+          S.bgImg = ''; S.bgOn = false; apply(); paintPrev();
+        };
+        paintPrev();
       } else if (c.t === 'rules') {
         // 权限规则：读写 permissions.toml（/api/permissions）
         ct.className = 'ct';
