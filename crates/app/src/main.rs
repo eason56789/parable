@@ -109,6 +109,40 @@ fn main() {
                         .inner_size(1280.0, 800.0)
                         .min_inner_size(480.0, 400.0)
                         .additional_browser_args(&ui_args)
+                        // 下载：WebView2 只有在注册了 DownloadStarting 处理器时才
+                        // 真正开始下载。没有它，页面里 `<a download>` 或带
+                        // Content-Disposition: attachment 的导航都会被**静默丢弃**
+                        // ——用户点了「下载图片」只看到提示，磁盘上什么都没有。
+                        //
+                        // 这里返回 true 且**不改 destination**：WebView2 会走它
+                        // 自己的下载流程（弹系统的「另存为」对话框，用户在哪儿
+                        // 存、叫什么名字都由自己决定）。不给固定路径——把文件
+                        // 悄悄塞进某个隐藏目录比「没反应」更让人困惑。
+                        .on_download(|_webview, event| {
+                            use tauri::webview::DownloadEvent;
+                            match event {
+                                DownloadEvent::Requested { url, destination } => {
+                                    tracing::info!(
+                                        "[download] requested {url} -> {}",
+                                        destination.display()
+                                    );
+                                }
+                                DownloadEvent::Finished { url, path, success } => {
+                                    if success {
+                                        tracing::info!(
+                                            "[download] finished {url} -> {}",
+                                            path.as_ref()
+                                                .map(|p| p.display().to_string())
+                                                .unwrap_or_else(|| "(unknown)".into())
+                                        );
+                                    } else {
+                                        tracing::warn!("[download] failed or cancelled {url}");
+                                    }
+                                }
+                                _ => {}
+                            }
+                            true
+                        })
                         // 去掉系统标题栏长条：窗口内容直接顶到最上沿，
                         // 拖拽/双击最大化由 #tb 的 drag region 承担，
                         // 最小化/最大化/关闭用 web 里的自绘按钮（#winctl）。

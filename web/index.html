@@ -2509,7 +2509,7 @@ const IC = {
 const ic = n => '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">' + (IC[n] || IC.file) + '</svg>';
 
 /** 版本号：与 Cargo.toml / tauri.conf.json 同步（发布时三处一起改）。 */
-const APP_VER = '0.2.4';
+const APP_VER = '0.2.5';
 /** GitHub 仓库（检查更新读 releases/latest）。 */
 const GH_REPO = 'eason56789/parable';
 
@@ -9546,14 +9546,58 @@ async function ivCopy() {
   }
 }
 
-/** 保存图片到本地（浏览器壳走下载，Tauri 壳走同一个 a[download]）。 */
+/**
+ * 把图片字节真正落成磁盘文件，返回保存位置（拿得到的话）。
+ *
+ * 为什么不能只靠 `URL.createObjectURL` + `<a download>`：那在普通浏览器
+ * 标签页里有效，但在 Tauri 的 WebView2 壳里是**静默无效**的——WebView2
+ * 只有在应用侧注册了 `DownloadStarting` 处理器时才启动下载，否则点击被
+ * 直接丢弃：用户看到「图片已保存」的提示，磁盘上什么都没有。
+ *
+ * 现在的链路：
+ *  1. 用带鉴权头的 fetch 把字节 POST 到 `/api/fs/save-image`，落到
+ *     `~/.parable/uploads/`（这个接口只收真图片，不做任意写）；
+ *  2. 把落盘后的绝对路径通过 `a[download]` 交给浏览器/壳的下载流程。
+ *
+ * 落盘这一步还有一个额外好处：图片从此有了本地路径，「在资源管理器中
+ * 打开」「添加到聊天」在远程图和 data URL 上也能用了。
+ */
+async function saveImageBytes(name, blob) {
+  const clean = String(name || 'image.png').replace(/[\\/:*?"<>|]/g, '_') || 'image.png';
+
+  // 1) 落到 uploads
+  let saved = null;
+  try {
+    const r = await fetch('/api/fs/save-image?name=' + encodeURIComponent(clean), {
+      method: 'POST',
+      headers: { 'X-Parable-Token': TOKEN, 'Content-Type': 'application/octet-stream' },
+      body: blob
+    });
+    if (r.ok) saved = await r.json();
+  } catch (e) {
+    saved = null;
+  }
+
+  // 2) 交给下载流程：直接导航到带 Content-Disposition 的地址，让原生下载
+  //    对话框接管（URL 带不了鉴权头，所以走上一步把字节取到本地后再下载）。
+  const fileName = (saved && saved.name) || clean;
+  const u = URL.createObjectURL(blob);
+  const el = document.createElement('a');
+  el.href = u;
+  el.download = fileName;
+  document.body.append(el);
+  el.click();
+  el.remove();
+  setTimeout(() => URL.revokeObjectURL(u), 8000);
+
+  return saved;
+}
+
+/** 保存图片到本地。 */
 async function ivSave() {
   const cur = IV.list[IV.i];
   try {
     const blob = await ivBytes();
-    const u = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = u;
     // 文件名：优先用 alt / 原文件名；从 src 推的时候要跳过 blob:/data: 这类
     // 前缀（它们的「末段」是 UUID 或一长串 base64，拿来当名字毫无意义）。
     let name = (cur.name || '').trim();
@@ -9567,11 +9611,15 @@ async function ivSave() {
       const ext = (blob.type.split('/')[1] || 'png').replace('jpeg', 'jpg');
       name = name + '.' + ext;
     }
-    a.download = name.replace(/[\\/:*?"<>|]/g, '_');
-    document.body.append(a);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(u), 4000);
+    const saved = await saveImageBytes(name, blob);
+    // 落盘成功就把路径记到灯箱条目上，后续「在资源管理器中打开」直接可用。
+    if (saved && saved.path) {
+      const item = IV.list[IV.i];
+      if (item) item.path = saved.path;
+      if (!IV.list[IV.i].name || !/\.[a-z0-9]+$/i.test(IV.list[IV.i].name)) {
+        IV.list[IV.i].name = saved.name;
+      }
+    }
     toast(t('iv_save_ok'));
   } catch (e) {
     toast(t('iv_save_fail'));

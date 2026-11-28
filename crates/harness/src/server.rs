@@ -348,6 +348,8 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/fs/tree", get(fs_tree))
         .route("/fs/file", get(fs_file))
         .route("/fs/raw", get(fs_raw))
+        .route("/fs/download", get(fs_download))
+        .route("/fs/save-image", post(save_image_upload))
         .route("/img-proxy", get(img_proxy))
         .route("/fs/search", get(fs_search))
         .route("/git/status", get(git_status))
@@ -903,6 +905,73 @@ async fn pending_permissions(State(state): State<SharedState>, headers: HeaderMa
     }
     let list = state.broker.pending_list().await;
     Json(json!({"permissions": list})).into_response()
+}
+
+/// POST /api/fs/save-image?name=<filename> — write image bytes to the uploads
+/// directory and return the absolute path.
+///
+/// The lightbox has to be able to save images that have no workspace file:
+/// a remote image loaded through `/api/img-proxy`, or a `data:` URL (tool
+/// screenshots). Both are just bytes in the page, and neither can be turned
+/// into a download URL on its own — the bytes have to come back to the server
+/// first. Keeping them under `~/.parable/uploads/` means the existing
+/// reveal/attachment plumbing already accepts the result.
+async fn save_image_upload(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+    body: axum::body::Bytes,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    if body.is_empty() {
+        return bad_request("empty image body");
+    }
+    if body.len() > MAX_UPLOAD_BYTES {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(json!({ "error": format!("image too large: {} bytes (limit 20 MB)", body.len()) })),
+        )
+            .into_response();
+    }
+    // 只接受真的图片：这个接口会把字节写到磁盘，不校验就等于开了个任意写入口。
+    let name_in = q.get("name").cloned().unwrap_or_default();
+    let Some(mime) = crate::wsfs::image_mime(&name_in, &body) else {
+        return bad_request("body is not a recognised image");
+    };
+    let dir = crate::config::Config::uploads_dir();
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        return server_error(e);
+    }
+    let base = if name_in.trim().is_empty() {
+        "image".to_string()
+    } else {
+        sanitize_filename(&name_in)
+    };
+    // 没扩展名就按嗅探出的 MIME 补一个，资源管理器里才认得出类型。
+    let has_ext = std::path::Path::new(&base)
+        .extension()
+        .map(|e| !e.is_empty())
+        .unwrap_or(false);
+    let named = if has_ext {
+        base
+    } else {
+        let ext = mime.strip_prefix("image/").unwrap_or("png").replace("jpeg", "jpg");
+        format!("{base}.{ext}")
+    };
+    let fname = format!("{}-{}", crate::event::now_ms(), named);
+    let path = dir.join(&fname);
+    if let Err(e) = std::fs::write(&path, &body) {
+        return server_error(e);
+    }
+    Json(json!({
+        "path": path.to_string_lossy(),
+        "name": named,
+        "mime": mime,
+        "size": body.len(),
+    }))
+    .into_response()
 }
 
 /// POST /api/attachments?name=<urlencoded filename>:body 为原始字节
@@ -3963,6 +4032,110 @@ async fn fs_raw(
     }
 }
 
+/// URL-safe percent-encoding for a `Content-Disposition` filename.
+///
+/// HTTP headers are latin-1 on the wire; a Chinese filename would either be
+/// mangled or rejected by `HeaderValue::from_str`. RFC 5987 `filename*=UTF-8''…`
+/// is what every modern client (including WebView2) honours, so non-ASCII names
+/// survive intact. Characters that are unsafe *inside* the header (quotes,
+/// backslashes, control chars) are percent-encoded rather than stripped.
+fn disposition_filename(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() * 3);
+    for b in name.as_bytes() {
+        match *b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*b as char)
+            }
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
+}
+
+/// GET /api/fs/download — serve an image as an attachment download.
+///
+/// The lightbox's "download" used to build a `blob:` URL and click an
+/// `<a download>` element. That works in a browser tab but does nothing in the
+/// Tauri WebView2 shell: WebView2 only starts a download when a handler is
+/// registered via `DownloadStarting`, otherwise the click is silently dropped
+/// (the user sees the toast and no file). Serving a real URL with
+/// `Content-Disposition: attachment` lets the native download flow run.
+///
+/// Accepts two roots: the workspace (relative or absolute) and the uploads
+/// directory (absolute only). Uploads must be allowed because "save image"
+/// first writes remote/data-URL images there — without this the download would
+/// 400 on exactly the images that have no workspace file.
+async fn fs_download(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    if !check_auth(&headers, None, &state) {
+        return unauthorized();
+    }
+    let ws = workspace_root(&state).await;
+    let path = q.get("path").cloned().unwrap_or_default();
+    // 前端可以指定一个展示用的文件名（比如 ![](x.png) 的 alt），否则用真实文件名。
+    let want_name = q.get("name").cloned().unwrap_or_default();
+
+    // 绝对路径：先确认落在工作区或 uploads 内，再按绝对路径读取。
+    // 相对路径：走工作区解析（与 /fs/raw 完全一致）。
+    let uploads = crate::config::Config::uploads_dir();
+    let looks_abs = std::path::Path::new(path.trim()).is_absolute();
+    let loaded = if looks_abs {
+        let p = std::path::PathBuf::from(path.trim());
+        let inside = crate::permission::inside_workspace(&ws, &p)
+            || crate::permission::inside_workspace(&uploads, &p);
+        if !inside {
+            return bad_request("路径不在工作区或上传目录内，已拒绝下载");
+        }
+        crate::wsfs::read_image_at(&p)
+    } else {
+        crate::wsfs::read_image(&ws, &path)
+    };
+
+    match loaded {
+        Ok((bytes, mime, real_name)) => {
+            let name = if want_name.trim().is_empty() {
+                real_name
+            } else {
+                sanitize_filename(&want_name)
+            };
+            let mut resp = bytes.into_response();
+            let h = resp.headers_mut();
+            h.insert(
+                axum::http::header::CONTENT_TYPE,
+                HeaderValue::from_str(&mime)
+                    .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")),
+            );
+            h.insert(
+                axum::http::header::X_CONTENT_TYPE_OPTIONS,
+                HeaderValue::from_static("nosniff"),
+            );
+            h.insert(
+                axum::http::header::CACHE_CONTROL,
+                HeaderValue::from_static("no-store"),
+            );
+            if let Ok(v) = HeaderValue::from_str(&format!(
+                "attachment; filename=\"{}\"; filename*=UTF-8''{}",
+                // ASCII 回退名：非 ASCII 字节换成 `_`，老客户端也能得到合法文件名。
+                name.chars()
+                    .map(|c| if c.is_ascii_alphanumeric() || ". -_()".contains(c) {
+                        c
+                    } else {
+                        '_'
+                    })
+                    .collect::<String>(),
+                disposition_filename(&name)
+            )) {
+                h.insert(axum::http::header::CONTENT_DISPOSITION, v);
+            }
+            resp
+        }
+        Err(e) => ws_error(&e),
+    }
+}
+
 /// GET /api/img-proxy?url=… — fetch a remote image for the chat renderer.
 ///
 /// Markdown written by a model routinely embeds `![](https://…)`. Loading that
@@ -6649,5 +6822,33 @@ mod schedule_api {
             }
         }
         assert!(ended, "a one-shot task must end after it fires");
+    }
+}
+
+#[cfg(test)]
+mod download_naming {
+    use super::disposition_filename;
+
+    /// `Content-Disposition` 的文件名要走 RFC 5987：HTTP 头是 latin-1，
+    /// 中文名直接塞进去会被 `HeaderValue::from_str` 拒掉，客户端也解不出。
+    #[test]
+    fn percent_encodes_non_ascii_and_unsafe() {
+        // 纯 ASCII 安全字符原样保留
+        assert_eq!(disposition_filename("shot-01.png"), "shot-01.png");
+        assert_eq!(disposition_filename("a_b.c~d"), "a_b.c~d");
+        // 中文按 UTF-8 字节百分号编码
+        assert_eq!(
+            disposition_filename("截图.png"),
+            "%E6%88%AA%E5%9B%BE.png"
+        );
+        // 引号 / 反斜杠 / 空格 / 分号都会破坏头部语法，必须编码
+        assert_eq!(disposition_filename("a\"b"), "a%22b");
+        assert_eq!(disposition_filename(r"a\b"), "a%5Cb");
+        assert_eq!(disposition_filename("a b"), "a%20b");
+        assert_eq!(disposition_filename("a;b"), "a%3Bb");
+        // 输出只含 ASCII，可以安全放进 HeaderValue
+        for n in ["截图 1.png", "é.png", "a\"b\\c"] {
+            assert!(disposition_filename(n).is_ascii());
+        }
     }
 }

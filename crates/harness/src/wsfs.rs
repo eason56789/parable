@@ -156,6 +156,51 @@ pub fn read_image(workspace: &Path, raw: &str) -> Result<(Vec<u8>, String, Strin
     Ok((bytes, mime.to_string(), name))
 }
 
+/// Read an image from an **absolute** path that the caller has already
+/// validated against its own allowed roots.
+///
+/// `read_image` resolves relative to the workspace, which is right for the
+/// file pane but wrong for `~/.parable/uploads` (outside the workspace). The
+/// download endpoint accepts both, so it does its own containment check and
+/// then calls this. Same rules otherwise: recognised images only, size cap.
+pub fn read_image_at(path: &Path) -> Result<(Vec<u8>, String, String), HarnessError> {
+    let meta = std::fs::metadata(path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            HarnessError::NotFound(path.display().to_string())
+        } else {
+            HarnessError::Io(e)
+        }
+    })?;
+    if meta.is_dir() {
+        return Err(HarnessError::Tool(format!("{} is a directory", path.display())));
+    }
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    if is_secret_name(&name) {
+        return Err(HarnessError::Tool(format!(
+            "{} 是密钥/凭据文件，已拒绝在面板中打开",
+            path.display()
+        )));
+    }
+    if meta.len() > MAX_IMAGE_BYTES {
+        return Err(HarnessError::Tool(format!(
+            "{} is {} bytes; too large to download",
+            path.display(),
+            meta.len()
+        )));
+    }
+    let bytes = std::fs::read(path).map_err(HarnessError::Io)?;
+    let Some(mime) = image_mime(&name, &bytes) else {
+        return Err(HarnessError::Tool(format!(
+            "{} is not a recognised image",
+            path.display()
+        )));
+    };
+    Ok((bytes, mime.to_string(), name))
+}
+
 /// A filename search hit.
 #[derive(Debug, Clone, Serialize)]
 pub struct Match {
