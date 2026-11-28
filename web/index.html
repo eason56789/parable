@@ -545,12 +545,16 @@ textarea::placeholder{color:var(--fg2)}
 .pksl:focus{outline:none}
 .pksl:focus-visible:not(.drag){outline:2px solid color-mix(in srgb,var(--accent) 45%,transparent);
   outline-offset:3px;border-radius:99px}
-.pktrack{position:absolute;left:0;right:0;top:50%;height:14px;transform:translateY(-50%);
-  background:color-mix(in srgb,var(--fg) 15%,transparent);border-radius:99px}
-/* 填充层：宽度随位置，内含星云底色 + 横向流动的星尘。左端固定留出半个
-   旋钮的宽度，这样档位 0 时旋钮正好卡在轨道起点，看上去像「从端头滑出去」。 */
-.pkfill{position:absolute;left:0;top:0;height:14px;top:50%;transform:translateY(-50%);
-  border-radius:99px;overflow:hidden;transition:width calc(.28s * var(--animd)) cubic-bezier(.2,.8,.3,1)}
+.pktrack{position:absolute;left:14px;right:14px;top:50%;height:14px;transform:translateY(-50%);
+  background:color-mix(in srgb,var(--fg) 15%,transparent);border-radius:99px;overflow:hidden}
+/* 轨道左右各内缩一个旋钮半径：轨道端点与「旋钮到达两端时的圆心」重合，
+   所以旋钮停在端点时，轨道不会从它旁边探出一个灰色圆头。 */
+/* 填充层：从轨道左端铺到旋钮圆心，内含星云底色 + 横向流动的星尘。
+   left 与 width 都由 JS 写成 calc(R + …)，与轨道和旋钮共用同一套几何。 */
+.pkfill{position:absolute;top:50%;height:14px;transform:translateY(-50%);
+  border-radius:99px;overflow:hidden;
+  transition:left calc(.28s * var(--animd)) cubic-bezier(.2,.8,.3,1),
+             width calc(.28s * var(--animd)) cubic-bezier(.2,.8,.3,1)}
 .pkfill.off{opacity:0}
 .pkneb{position:absolute;inset:0;border-radius:inherit;
   background:linear-gradient(90deg,#3f8cff 0%,#6d7cf7 52%,#a855f7 100%)}
@@ -559,6 +563,32 @@ textarea::placeholder{color:var(--fg2)}
 .pkstar{position:absolute;left:0;border-radius:50%;background:#f4f8ff;
   box-shadow:0 0 3px rgba(234,240,255,.95),0 0 6px rgba(168,120,255,.5);opacity:0;
   animation:pkdrift var(--d,7s) linear infinite;animation-delay:var(--del,0s)}
+/* 星尘显隐由滑条根节点的一个 data-stars 属性控制：拖动时 JS 只写这一个
+   属性（O(1)），而不是逐颗设 display（O(22) × 每个 pointermove）。
+   1..22 各写一条 `:nth-child(-n+N)` 规则，命中前 N 颗，其余保持隐藏。 */
+.pkstars>.pkstar{display:none}
+.pksl[data-stars='1'] .pkstar:nth-child(-n+1){display:block}
+.pksl[data-stars='2'] .pkstar:nth-child(-n+2){display:block}
+.pksl[data-stars='3'] .pkstar:nth-child(-n+3){display:block}
+.pksl[data-stars='4'] .pkstar:nth-child(-n+4){display:block}
+.pksl[data-stars='5'] .pkstar:nth-child(-n+5){display:block}
+.pksl[data-stars='6'] .pkstar:nth-child(-n+6){display:block}
+.pksl[data-stars='7'] .pkstar:nth-child(-n+7){display:block}
+.pksl[data-stars='8'] .pkstar:nth-child(-n+8){display:block}
+.pksl[data-stars='9'] .pkstar:nth-child(-n+9){display:block}
+.pksl[data-stars='10'] .pkstar:nth-child(-n+10){display:block}
+.pksl[data-stars='11'] .pkstar:nth-child(-n+11){display:block}
+.pksl[data-stars='12'] .pkstar:nth-child(-n+12){display:block}
+.pksl[data-stars='13'] .pkstar:nth-child(-n+13){display:block}
+.pksl[data-stars='14'] .pkstar:nth-child(-n+14){display:block}
+.pksl[data-stars='15'] .pkstar:nth-child(-n+15){display:block}
+.pksl[data-stars='16'] .pkstar:nth-child(-n+16){display:block}
+.pksl[data-stars='17'] .pkstar:nth-child(-n+17){display:block}
+.pksl[data-stars='18'] .pkstar:nth-child(-n+18){display:block}
+.pksl[data-stars='19'] .pkstar:nth-child(-n+19){display:block}
+.pksl[data-stars='20'] .pkstar:nth-child(-n+20){display:block}
+.pksl[data-stars='21'] .pkstar:nth-child(-n+21){display:block}
+.pksl[data-stars='22'] .pkstar:nth-child(-n+22){display:block}
 @keyframes pkdrift{
   0%{transform:translateX(-4px);opacity:0}
   14%{opacity:var(--o,.8)}
@@ -575,7 +605,11 @@ textarea::placeholder{color:var(--fg2)}
 .pkknob{position:absolute;top:50%;width:28px;height:28px;border-radius:50%;background:#fff;
   box-shadow:0 2px 8px rgba(0,0,0,.32);transform:translate(-50%,-50%);pointer-events:none;
   transition:left calc(.28s * var(--animd)) cubic-bezier(.2,.8,.3,1),box-shadow .18s}
-.pksl.drag .pkknob{transition:left 0s,box-shadow .18s;box-shadow:0 3px 14px rgba(0,0,0,.42)}
+/* 拖动中把**所有**跟手属性（旋钮 left、填充 width/left）的过渡都关掉。
+   上一版只关了旋钮的 left，pkfill 的 width 仍在 0.28s 插值——表现就是
+   「鼠标已经拖过去了，蓝条在后面慢慢追」。 */
+.pksl.drag .pkknob{transition:none;box-shadow:0 3px 14px rgba(0,0,0,.42)}
+.pksl.drag .pkfill{transition:none}
 .pksl:hover .pkknob{box-shadow:0 3px 14px rgba(0,0,0,.42)}
 /* 减少动效：星尘放慢，填充宽度瞬间到位 */
 @media (prefers-reduced-motion:reduce){
@@ -2558,7 +2592,7 @@ const IC = {
 const ic = n => '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">' + (IC[n] || IC.file) + '</svg>';
 
 /** 版本号：与 Cargo.toml / tauri.conf.json 同步（发布时三处一起改）。 */
-const APP_VER = '0.2.6';
+const APP_VER = '0.2.7';
 /** GitHub 仓库（检查更新读 releases/latest）。 */
 const GH_REPO = 'eason56789/parable';
 
@@ -12689,15 +12723,17 @@ function pkslLevelColor(level) {
 }
 
 /** 第 i 颗星尘：固定泳道、大小、亮度、时长、相位。 */
-function pkStarStyle(i, energy) {
+function pkStarStyle(i) {
   const top = 15 + Math.floor(pkHash(i, 0x51ab) * 8) % 8 * 10;
-  const size = (1.5 + pkHash(i, 0x99) * 1.5).toFixed(2);
-  const op = (0.5 + pkHash(i, 0xaa) * 0.5).toFixed(2);
-  // 能量越高漂得越快：1.5s 基准，最快缩到 0.75s
-  const dur = (1.5 * (2 - Math.max(0.35, energy) * 1.2)).toFixed(2);
+  const size = (1.1 + pkHash(i, 0x99) * 1.1).toFixed(2);
+  const op = (0.42 + pkHash(i, 0xaa) * 0.4).toFixed(2);
+  // 时长取固定基准：显隐由 CSS 控制，时长若随档位变会触发整条动画重启，
+  // 拖动时每换一档所有粒子就「跳」一次。快慢差异够用就收，
+  // 真正体现「越右越热」的是密度。
+  const dur = (1.2 + pkHash(i, 0x77) * 0.9).toFixed(2);
   const delay = (-(pkHash(i, 53)) * Number(dur)).toFixed(2);
   return 'top:' + top + '%;width:' + size + 'px;height:' + size + 'px;--o:' + op +
-    ';--d:' + dur + 's;--del:' + delay + 's;display:' + (i < Math.round(energy * PK_STARS) ? 'block' : 'none');
+    ';--d:' + dur + 's;--del:' + delay + 's';
 }
 
 /** 滑条的静态骨架；位置/宽度/粒子显隐由 pkslPaint() 在每帧更新。
@@ -12711,27 +12747,32 @@ function pkslLeft(p) {
   const t = Math.max(0, Math.min(1, p));
   return 'calc(' + PK_R + 'px + ' + t.toFixed(4) + ' * (100% - ' + PK_R * 2 + 'px))';
 }
-/** 填充宽度比例：档位 0 也保留一小段蓝色（否则低档只剩旋钮盖住的一个点，
- *  看不出「已经开启但档位低」）。1 档约 1/4，3 档满格。 */
+/** 填充从轨道左端一直铺到旋钮圆心，所以宽度比例就等于位置本身。
+ *  （上一版额外加了 8% 基础宽度，导致档位 0 也有一条蓝、档位 3 时左端
+ *   又露出轨道灰——与参考图不符。） */
 function pkslFillFrac(p) {
-  const t = Math.max(0, Math.min(1, p));
-  return 0.08 + t * 0.92;
+  return Math.max(0, Math.min(1, p));
 }
 function pkslHtml() {
   const pct = Math.max(0, Math.min(1, (S.lvl || 0) / (LEVELS.length - 1)));
+  // 星尘只给几何与动画参数；显隐交给 data-stars + :nth-child 规则
   const stars = Array.from({ length: PK_STARS }, (_, i) =>
-    '<span class="pkstar" style="' + pkStarStyle(i, pkslEnergy(pct)) + '"></span>').join('');
+    '<span class="pkstar" style="' + pkStarStyle(i) + '"></span>').join('');
   const ticks = LEVELS.map((n, i) => {
     const p = i / (LEVELS.length - 1);
     return '<span class="pktick' + (i <= (S.lvl || 0) ? ' hit' : '') +
       '" style="left:' + pkslLeft(p) + '"></span>';
   }).join('');
+  // data-stars 必须在首屏就带上：星尘显隐靠 `[data-stars='n']` 规则控制，
+  // 缺省时全部 display:none，高档位会一颗星都没有。
+  const initStars = Math.round(pkslEnergy(pct) * PK_STARS);
   return '<div class="pksl' + (S.lvl ? '' : ' off') + '" role="slider" tabindex="0" aria-label="' +
       esc(t('lvlT')) + '" aria-valuemin="0" aria-valuemax="' + (LEVELS.length - 1) +
-      '" aria-valuenow="' + (S.lvl || 0) + '" aria-valuetext="' + esc(t('l' + S.lvl)) + '">' +
+      '" aria-valuenow="' + (S.lvl || 0) + '" aria-valuetext="' + esc(t('l' + S.lvl)) +
+      '" data-stars="' + initStars + '">' +
     '<div class="pktrack"></div>' +
-    '<div class="pkfill' + (S.lvl ? '' : ' off') + '" style="left:' + pkslLeft(0) +
-      ';width:calc((100% - ' + PK_R * 2 + 'px) * ' + pkslFillFrac(pct).toFixed(4) + ')">' +
+    '<div class="pkfill' + (S.lvl ? '' : ' off') + '" style="left:0' +
+      ';width:calc(' + PK_R + 'px + (100% - ' + PK_R * 2 + 'px) * ' + pkslFillFrac(pct).toFixed(4) + ')">' +
       '<div class="pkneb"></div><div class="pkstars">' + stars + '</div>' +
     '</div>' + ticks +
     '<span class="pkknob" style="left:' + pkslLeft(pct) + '"></span>' +
@@ -12739,38 +12780,56 @@ function pkslHtml() {
 }
 
 /** 把当前档位画到 DOM 上（拖动过程中 pct 传入临时值，松手后吸附）。 */
+/**
+ * 把当前档位画到 DOM 上（拖动过程中 pct 传入临时值，松手后吸附）。
+ *
+ * 性能：这个函数在每次 pointermove 上都会跑。上一版每次都遍历 22 个星尘
+ * 节点写 `display` + `--travel`，一次拖动几百个 move 事件就是上万次样式写，
+ * 主线程被拖慢，表现就是「鼠标甩出去了，旋钮和蓝条才追上来」。
+ * 现在星尘数量用容器上的一个 CSS 变量 + `:nth-child(n+…)` 选择器控制，
+ * 每次只写 3 个样式（填充宽度、旋钮 left、星尘数），节点数无关。
+ */
 function pkslPaint(root, pct) {
   if (!root) return;
   const sl = root.querySelector('.pksl');
   if (!sl) return;
   const p = Math.max(0, Math.min(1, pct));
   const lv = Math.round(p * (LEVELS.length - 1));
-  const energy = pkslEnergy(p);
   const fill = sl.querySelector('.pkfill');
   const knob = sl.querySelector('.pkknob');
+  // 星尘可见数：转成 CSS 变量，由 :nth-child 选择器控制显隐（见 .pkstars 样式）
+  const want = Math.round(pkslEnergy(p) * PK_STARS);
+  if (sl.__stars !== want) {
+    sl.__stars = want;
+    // 写到滑条根节点上：22 条 `[data-stars='n'] .pkstar:nth-child(-n+n)` 规则
+    // 负责显示前 n 颗，其余保持 display:none。
+    sl.dataset.stars = String(want);
+  }
   if (fill) {
-    // 填充宽度 = 可用区间 × 位置；左端与旋钮圆心对齐
-    fill.style.left = pkslLeft(0);
-    fill.style.width = 'calc((100% - ' + PK_R * 2 + 'px) * ' + pkslFillFrac(p).toFixed(4) + ')';
-    fill.classList.toggle('off', lv === 0);
-    const stars = fill.querySelectorAll('.pkstar');
-    const want = Math.round(energy * PK_STARS);
-    stars.forEach((s, i) => { s.style.display = i < want ? 'block' : 'none'; });
-    // 星尘的横穿距离随实际像素宽度变：容器宽度不能用 100%，要算出来
-    const w = sl.clientWidth || 240;
-    const travel = Math.round(p * Math.max(0, w - PK_R * 2) + 12);
-    stars.forEach(s => s.style.setProperty('--travel', travel + 'px'));
+    // 填充从滑条最左沿一直铺到旋钮圆心。
+    //
+    // 为什么左端取 0 而不是 R（轨道起点）：轨道左右各内缩了 R，若填充也
+    // 从 R 开始，档位 0 时旋钮左边会露出轨道自身的圆角头（截图里那个灰色
+    // 小凸起）。从 0 铺过去，蓝条直接盖住轨道左端，视觉上「电量从左往右长」。
+    fill.style.left = '0px';
+    const span = pkslFillFrac(p);
+    fill.style.width = lv === 0 ? '0px'
+      : 'calc(' + PK_R + 'px + (100% - ' + PK_R * 2 + 'px) * ' + span.toFixed(4) + ')';
   }
   if (knob) knob.style.left = pkslLeft(p);
-  sl.classList.toggle('off', lv === 0);
-  sl.querySelectorAll('.pktick').forEach((tk, i) => tk.classList.toggle('hit', i <= lv));
-  sl.setAttribute('aria-valuenow', String(lv));
-  sl.setAttribute('aria-valuetext', t('l' + lv));
-  const tx = root.querySelector('[data-pklvtx]');
-  if (tx) {
-    tx.textContent = t('l' + lv);
-    const col = pkslLevelColor(lv);
-    tx.style.color = col || '';
+  if (sl.__lv !== lv) {
+    sl.__lv = lv;
+    sl.classList.toggle('off', lv === 0);
+    if (fill) fill.classList.toggle('off', lv === 0);
+    sl.querySelectorAll('.pktick').forEach((tk, i) => tk.classList.toggle('hit', i <= lv));
+    sl.setAttribute('aria-valuenow', String(lv));
+    sl.setAttribute('aria-valuetext', t('l' + lv));
+    const tx = root.querySelector('[data-pklvtx]');
+    if (tx) {
+      tx.textContent = t('l' + lv);
+      const col = pkslLevelColor(lv);
+      tx.style.color = col || '';
+    }
   }
 }
 
